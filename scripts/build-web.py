@@ -398,10 +398,21 @@ def main():
 
     w = args.width
     size = (w, round(w * manifest['height'] / manifest['width']))
-    views = [v for v in manifest['views'] if (keys_dir / v['file']).exists()]
+    # Drawings that can't be fixed (e.g. ones that show her face where the camera can't see it,
+    # see scripts/face_check.py) are listed in <keys>/exclude.txt, one file per line with an
+    # optional "# reason". Their neighbours cover the angle instead.
+    exclude_file = keys_dir / 'exclude.txt'
+    excluded = {line.split('#')[0].strip() for line in exclude_file.read_text().splitlines()} - {''} if exclude_file.exists() else set()
+    views = [v for v in manifest['views'] if (keys_dir / v['file']).exists() and v['file'] not in excluded]
     for v in manifest['views']:
         if v not in views:
-            print(f'skip {v["file"]}: no drawing')
+            print(f'skip {v["file"]}: {"excluded" if v["file"] in excluded else "no drawing"}')
+    for f in (out / 'keys').glob('*.webp'):
+        if f.with_suffix('.png').name in excluded:
+            f.unlink()
+    for f in (out / 'warps').glob('*.webp'):
+        if f.with_suffix('.png').name in excluded:
+            f.unlink()
 
     cam0 = manifest['cameras'][0]
     mesh = json.loads((renders / 'mesh.json').read_text())

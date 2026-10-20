@@ -28,6 +28,8 @@ const { values: opt } = parseArgs({
     force: { type: 'boolean', default: false },
     'no-anchor': { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },
+    // Views where the 3D model shows her face hidden (see scripts/face_check.py): forbid drawing it.
+    'hide-face': { type: 'boolean', default: false },
   },
 });
 
@@ -75,6 +77,7 @@ function buildPrompt(view, hasAnchor) {
   return [
     `Redraw the 3D model RENDER as a polished 2D anime illustration.`,
     `VIEWING ANGLE (most important rule): ${facing}. ${visible}.`,
+    opt['hide-face'] ? `FACE HIDDEN (strict): from this camera her face cannot be seen at all. Her head faces exactly the same direction as her body; she is NOT looking back over her shoulder and NOT turning her head toward the viewer. Draw NO eyes, NO eyelashes, NO mouth and NO nose: only the back or top of her hair (and at most the outer edge of an ear or cheek). Copy the head angle from the RENDER exactly.` : '',
     `The RENDER image is the ground truth for the angle, pose and silhouette. Match it exactly. Never turn the character toward the viewer just because the reference images face forward.`,
     opt['style-only']
       ? `The STYLE REFERENCE is a different character: copy ONLY its art style, NOT its character, outfit or colors.`
@@ -210,7 +213,8 @@ async function run(view, anchorUrl) {
     { label: opt['style-only'] ? 'STYLE REFERENCE' : 'CHARACTER REFERENCE (front view, for design and style only)', url: styleUrl },
   ];
   // The anchor is an eye-level front view; on near-overhead views it pulls the drawing back to the face.
-  if (anchorUrl && view.pitch <= 55) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
+  // ...and it is a picture of her face, so hide-face views go without it.
+  if (anchorUrl && view.pitch <= 55 && !opt['hide-face']) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
   const t = Date.now();
   try {
     await save(await generate(view, images), outFile);
