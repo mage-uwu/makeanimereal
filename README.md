@@ -63,18 +63,19 @@ mixes two drawings on a pixel:
   drawings along dense correspondences matched between the drawings themselves (optical flow),
   as far as the camera has moved toward each. It hands over halfway to the next key.
 - **Flipbook**: the nearest drawing held still, like a 2D game sprite.
-- **Neuromation** (latent rotation): every key drawing is one view of a single latent object, but
-  each was drawn from a slightly different vantage than requested (often turned a few degrees less,
-  or seen from higher). `build-web.py` learns that vantage per key (yaw and pitch offsets, roll,
-  framing; Gauss-Newton with Huber weights over the surface points visible in its render, then
-  smoothed only where neighbours would swap order) and fixes each vertex of a 75 x 112 lattice over
-  the drawing in the latent object, on the ray from that vantage through its pixel at the surface
-  depth. Viewed from its vantage, a lattice reproduces its drawing exactly. Between keys your angle
-  maps to a latent angle that blends the nearby keys' vantages, and the whole object rotates
-  rigidly; no 2D warp fields are interpolated. Each drawing's small offset from the shared surface
-  relaxes away by the hand-off, art off the mesh (ribbons) swings toward where the neighbouring
-  drawing put it, and the lattice is depth-tested like a mesh. Parts stretched past 5x count as
-  tears and are filled, only inside the lead drawing's outline, by the next drawing.
+- **Neuromation** (latent rotation on rigid shells): every key drawing is one view of a single
+  latent object, but each was drawn from a slightly different vantage than requested. `build-web.py`
+  learns that vantage per key (yaw and pitch offsets, roll, framing; Gauss-Newton with Huber weights
+  over the surface points visible in its render, smoothed only where neighbours would swap order)
+  and turns the drawing into a rigid, gently curved shell: each vertex of a 75 x 112 lattice sits on
+  the ray from that vantage through its pixel, at a depth smoothed over ~32 px. Seen from its
+  vantage the shell is exactly the drawing; because the depth is smooth, it cannot shear, bulge or
+  tear when the view turns. Between keys your angle maps to a latent angle blending the nearby
+  keys' vantages and the shell simply rotates. Approaching a hand-off, an articulated correction
+  (a 6 x 9 control grid, ~100 px apart, so head, torso and legs move as blocks) moves the drawing
+  up to halfway toward where the next drawing put things. The Depth relief slider flattens the
+  shell toward a flat card; full relief is the default, since flattening makes neighbouring
+  drawings disagree more at the hand-off.
 
 `build-web.py` writes per key the untouched drawing (`keys/`) and a warp atlas (`warps/`, lossless
 WebP): tile 0 is the fit to the mesh, tiles 1-6 the correspondences to each neighbouring key (the

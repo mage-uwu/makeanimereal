@@ -17,10 +17,10 @@ one goes a warp atlas (warps/*.png), a few smooth displacement fields at quarter
   tiles 1-6  stretch toward each neighbouring key drawing (lossless WebP): dense correspondences between the two
              drawings, so one drawing can be stretched toward the next with no model ("flipstretch")
   tile 7     Neuromation lattice tensor: for each vertex of a shared 75 x 112 grid laid over the
-             drawing, the latent surface point it shows (16-bit, split in high and low byte
-             planes), the drawing's own offset from that point (8-bit, within RESIDUAL_RANGE),
-             whether the drawing has paint there, its nearest bone, and how far off her surface it
-             lies (art beyond the mesh, like ribbons, swings toward where neighbours drew it).
+             drawing, its fixed position in the latent object (16-bit, split in high and low byte
+             planes): on the ray from the drawing's learned vantage, at a smoothed depth, so each
+             drawing is a gently curved rigid shell. Also whether the drawing has paint there,
+             its nearest bone, and how far off her surface it lies.
 
 Latent rotation: each drawing depicts the character from a slightly different vantage than the
 camera it was asked for (the "30 degree" drawing may really be turned 27 degrees and seen from a
@@ -54,6 +54,9 @@ FIELD_DOWNSAMPLE = 4  # fields are smooth, so quarter resolution holds them
 ATLAS_COLS, ATLAS_ROWS = 4, 2  # tile 0 = fit to mesh, tiles 1..6 = neighbours, tile 7 = lattice tensor
 LATTICE = (75, 112)  # Neuromation grid: vertices across and down, shared by every key
 LATTICE_RANGE = 1.25  # metres either side of the target that the 16-bit latent coordinates cover
+HANDOFF_GRID = (6, 9)  # control points across and down for the articulated hand-off field
+HANDOFF_SIGMA = 70.0  # px at the output size
+RELIEF_SIGMA = 4.0  # lattice cells (about 32 px at 600 wide) over which a drawing's depth is smoothed
 RESIDUAL_RANGE = 0.08  # metres either way for a drawing's 8-bit offset from the latent surface
 MAX_NEIGHBOURS = 6
 
@@ -229,12 +232,16 @@ def lattice_tensor(cam, vantage, dist, fit, alpha, size, target, verts, vert_bon
     off_px = cv2.distanceTransform(np.isnan(raw).astype(np.uint8), cv2.DIST_L2, 5) * (W / raw.shape[1])
     offness = np.clip(cv2.remap(off_px.astype(np.float32), yx / W * raw.shape[1], yy / H * raw.shape[0], cv2.INTER_LINEAR) / 16, 0, 1)
     # The vertex's latent position: on the ray from the drawing's learned vantage through its
-    # pixel, at the depth of the surface point the drawing shows there. Rigid from then on.
+    # pixel, at a smoothed depth. Exact per-pixel depth makes neighbouring points (a sleeve in
+    # front of the body, hair drawn beyond the mesh) shear and tear apart as soon as the view
+    # turns; a relief smoothed over RELIEF_SIGMA lattice cells turns the drawing into a gently
+    # curved shell that rotates cleanly. The viewer can flatten it further, down to a flat card.
     depth_from_vantage = (surface - vantage.pos) @ vantage.forward
-    pts = vantage.lift(X, Y, depth_from_vantage)
-    # Stored as the surface point plus the drawing's own offset from it, so the viewer can relax
-    # the offset away near hand-offs, where neighbouring drawings must meet on the same shape.
-    offset = np.clip((pts - surface) / (2 * RESIDUAL_RANGE) + 0.5, 0, 1)
+    weight = valid.astype(np.float32)
+    smooth = cv2.GaussianBlur((depth_from_vantage * weight).astype(np.float32), (0, 0), RELIEF_SIGMA) / \
+        (cv2.GaussianBlur(weight, (0, 0), RELIEF_SIGMA) + 1e-6)
+    pts = vantage.lift(X, Y, smooth.astype(np.float64))
+    offset = np.full(pts.shape, 0.5)  # unused since the shell is rigid; kept for the tile layout
     # Nearest bone, from the nearest mesh vertex.
     bone = np.zeros(X.shape, np.uint8)
     flat = surface[valid]
@@ -242,7 +249,7 @@ def lattice_tensor(cam, vantage, dist, fit, alpha, size, target, verts, vert_bon
         chunk = flat[start:start + 1024]
         nearest = ((chunk[:, None, :] - verts[None]) ** 2).sum(-1).argmin(1)
         bone[np.nonzero(valid)[0][start:start + 1024], np.nonzero(valid)[1][start:start + 1024]] = vert_bone[nearest]
-    q = np.clip((surface - np.asarray(target) + LATTICE_RANGE) / (2 * LATTICE_RANGE), 0, 1)
+    q = np.clip((pts - np.asarray(target) + LATTICE_RANGE) / (2 * LATTICE_RANGE), 0, 1)
     q = (q * 65535 + 0.5).astype(np.uint32)
     tile = np.zeros((size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE, 3), np.float32)
     tile[:gy, :gx] = (q >> 8) / 255            # high bytes of x, y, z
@@ -316,6 +323,53 @@ def smooth_vantages(views, learned, near, max_rounds=12):
         rounds += 1
     print(f'vantage field: {rounds} smoothing rounds, {len(flipped())} keys still out of order')
     return [{k: round(v[k], 5) for k in VANTAGE_KEYS} for v in vals]
+
+
+def decode_lattice(tensor, target):
+    """Latent positions and paint mask of a lattice tile (inverse of lattice_tensor's packing)."""
+    gx, gy = LATTICE
+    t = np.round(tensor * 255).astype(np.uint32)
+    q = (t[:gy, :gx] << 8) + t[gy:2 * gy, :gx]
+    pts = q / 65535 * 2 * LATTICE_RANGE - LATTICE_RANGE + np.asarray(target)
+    return pts, t[:gy, gx:2 * gx, 0] > 127
+
+
+def handoff_field(a, b, corr_tile, size, cam0, manifest, aspect):
+    """What drawing a's rigid shell, seen from b's vantage, still gets wrong about where b drew
+    things: x + F(x) (the a->b correspondence) minus b's vantage projection of a's latent point
+    at x, as a coarse articulated field. The viewer moves a's drawing up to halfway along it by the
+    hand-off, so the drawings on either side of the switch meet. Returns HANDOFF_GRID control
+    points, row by row, as [dx, dy] pairs in output pixels."""
+    gx, gy = LATTICE
+    pts, valid = decode_lattice(a['tensor'], cam0['target'])
+    vb = b['vantage']
+    cam = VantageCamera(b['v']['yaw'], b['v']['pitch'], cam0['target'], cam0['radius'], manifest['fov'], aspect,
+                        vb['d_yaw'], vb['d_pitch'], vb['roll'], vb['scale'], vb['tx'], vb['ty'])
+    fx, fy, _ = cam.project(pts[valid])
+    X, Y = np.meshgrid(np.arange(gx) / (gx - 1), np.arange(gy) / (gy - 1))
+    th, tw = corr_tile.shape[:2]
+    F = (corr_tile[..., :2].astype(np.float32) - 0.5) * FIELD_RANGE
+    Fx = cv2.remap(F[..., 0], (X[valid] * tw).astype(np.float32), (Y[valid] * th).astype(np.float32), cv2.INTER_LINEAR).ravel() / size[0]
+    Fy = cv2.remap(F[..., 1], (X[valid] * tw).astype(np.float32), (Y[valid] * th).astype(np.float32), cv2.INTER_LINEAR).ravel() / size[1]
+    rx, ry = X[valid] + Fx - fx, Y[valid] + Fy - fy
+    # Articulated, not local: splat the residual onto a coarse grid (control points ~100 px apart,
+    # Gaussian over HANDOFF_SIGMA px), so head, torso and legs each get their own smooth move and
+    # nothing smaller than a body part can deform. In output pixels, clipped.
+    W, H = size
+    px, py = X[valid] * W, Y[valid] * H
+    rx_px, ry_px = rx * W, ry * H
+    cols, rows = HANDOFF_GRID
+    grid = []
+    for j in range(rows):
+        for i in range(cols):
+            gx_, gy_ = i / (cols - 1) * W, j / (rows - 1) * H
+            w = np.exp(-((px - gx_) ** 2 + (py - gy_) ** 2) / (2 * HANDOFF_SIGMA ** 2))
+            total = w.sum()
+            fade = total / (total + 20)  # fade to no move where the drawing has little paint nearby
+            mx = float(np.clip((w * rx_px).sum() / max(total, 1e-6), -40, 40)) * fade
+            my = float(np.clip((w * ry_px).sum() / max(total, 1e-6), -40, 40)) * fade
+            grid += [round(mx * 2) / 2, round(my * 2) / 2]
+    return grid
 
 
 def encode_tile(field, size):
@@ -410,7 +464,7 @@ def main():
         v, src = it['v'], keys_dir / it['v']['file']
         tensor_file = cache / (src.stem + '.latent.npy')
         stamp = cache / (src.stem + '.latent.json')
-        if tensor_file.exists() and stamp.exists() and json.loads(stamp.read_text()) == {**vantage, 'format': 3}:
+        if tensor_file.exists() and stamp.exists() and json.loads(stamp.read_text()) == {**vantage, 'format': 4}:
             tensor = np.load(tensor_file)
         else:
             cam = KeyCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], aspect)
@@ -419,7 +473,7 @@ def main():
                                  vantage['d_yaw'], vantage['d_pitch'], vantage['roll'], vantage['scale'], vantage['tx'], vantage['ty'])
             tensor, _ = lattice_tensor(cam, vcam, fill_depth(raw), it['fit'], placed[items.index(it)][..., 3], size, cam0['target'], verts, vert_bone, raw)
             np.save(tensor_file, tensor)
-            stamp.write_text(json.dumps({**vantage, 'format': 3}))
+            stamp.write_text(json.dumps({**vantage, 'format': 4}))
         it['tensor'], it['vantage'] = tensor, vantage
 
     # Pass 2: correspondences between neighbouring drawings, packed with the fit into one atlas.
@@ -447,6 +501,8 @@ def main():
         for j in near[i]:
             # The lower-numbered key of each pair owns the measured flow; the other gets its inverse.
             tiles.append(measured(i, j) if i < j or i not in near[j] else invert_tile(measured(j, i)))
+        # One global affine per neighbour for the hand-off (see handoff_affine).
+        handoffs = [handoff_field(it, items[j], tiles[1 + n], size, cam0, manifest, aspect) for n, j in enumerate(near[i])]
         while len(tiles) < ATLAS_COLS * ATLAS_ROWS - 1:
             tiles.append(np.full_like(tiles[0], 0.5))
         tiles.append(it['tensor'])
@@ -459,7 +515,8 @@ def main():
         keys.append({'file': f'keys/{it["name"]}', 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
                      's': round(it['s'], 5), 'ox': round(it['ox'], 5), 'oy': round(it['oy'], 5),
                      'neighbours': [int(j) for j in near[i]],
-                     'vantage': it['vantage']})
+                     'vantage': it['vantage'],
+                     'handoff': handoffs})
         print(f'{wname}  {len(near[i])} neighbours')
 
     cam = manifest['cameras'][0]
@@ -467,6 +524,7 @@ def main():
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),
         'fieldRange': FIELD_RANGE, 'frame': list(size), 'atlas': [ATLAS_COLS, ATLAS_ROWS],
+        'handoffGrid': list(HANDOFF_GRID),
         'lattice': {'size': list(LATTICE), 'range': LATTICE_RANGE, 'residual': RESIDUAL_RANGE, 'tile': ATLAS_COLS * ATLAS_ROWS - 1},
         'keys': keys,
     }, indent=1))
