@@ -98,7 +98,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .sheet > section + section { border-top: 1px solid var(--rule); }
 .label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 
-.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
 .modes button {
   font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
   padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
@@ -163,6 +163,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="modes" role="group" aria-label="How to show angles between key drawings">
           <button type="button" id="mode-neuro" data-mode="neuro" aria-pressed="false">Neuromation</button>
           <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
+          <button type="button" id="mode-learned" data-mode="learned" aria-pressed="false">Learned</button>
         </div>
         <p class="mode-note" id="mode-note"></p>
         <div class="relief" id="relief-row">
@@ -200,6 +201,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <dl class="method">
           <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
           <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and the drawing becomes a rigid shell: every point sits on the ray from its vantage at a smoothed depth, so the vantage sees it exactly as drawn and the shell can't shear or tear. Between keys the shell rotates; your angle maps to a latent angle that blends the nearby drawings' vantages. Depth relief sets how curved the shell is, from a flat card (no deformation at all) to the full smoothed shape.</dd></div>
+          <div><dt>Learned</dt><dd>A learned render, a cheap cousin of NeRF. Her hidden mesh is rasterised into a G-buffer (base colour, normals, depth) plus 8 learned features stored in a 3D grid around her, a neural texture of what the drawings paint at each spot on her body. A small U-Net, trained on every key drawing moved onto its render, turns that into the drawings' art: colours, shading, outlines. It runs in your browser with TensorFlow.js, so any angle renders in the style of all the keys at once, rather than bending the nearest one.</dd></div>
           <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
         </dl>
         <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
@@ -215,17 +217,19 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { makeGBuffer, loadNet, GBUFFER } from './learned.js';
 
 const $ = id => document.getElementById(id);
 if (matchMedia('(max-width: 700px)').matches) $('info').open = false;
 const viewportEl = $('viewport'), stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
 
-const MODES = ['neuro', 'flipbook'];
+const MODES = ['neuro', 'flipbook', 'learned'];
 const NOTES = {
   neuro: 'Between keys, each drawing turns as one rigid, gently curved shell, seen from the angle it really depicts. Less relief means less deformation.',
   projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
   flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
+  learned: 'Between keys, her hidden mesh is drawn by a small learned shader, fitted to all the key drawings, that paints it in their style at any angle.',
 };
 
 const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true };
@@ -913,6 +917,58 @@ function frame(t) {
   requestAnimationFrame(frame);
 }
 
+// Learned render. Loaded on first use (TensorFlow.js, the network, the feature grid and her base
+// colour), then run whenever the angle changes; the latest result is drawn until the next is ready.
+const IDENTITY = new THREE.Matrix4();
+const learned = { want: null, have: null, shown: false, busy: false, loading: null, error: null, canvas: document.createElement('canvas') };
+learned.canvas.width = GBUFFER.width; learned.canvas.height = GBUFFER.height;
+function loadLearned() {
+  learned.loading ??= (async () => {
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
+      s.onload = res; s.onerror = () => rej(new Error('could not load TensorFlow.js'));
+      document.head.appendChild(s);
+    });
+    if (!await tf.setBackend('webgl')) await tf.setBackend('cpu');
+    const [grid, bytes, albedo, mesh, net] = await Promise.all([
+      fetch('learned/grid.json').then(r => r.json()),
+      fetch('learned/grid.bin').then(r => r.arrayBuffer()),
+      new THREE.TextureLoader().loadAsync('learned/albedo.webp'),
+      fetch('mesh.json').then(r => r.json()),
+      loadNet(tf, 'learned'),
+    ]);
+    learned.gbuffer = makeGBuffer(THREE, mesh, albedo, grid.box, K.radius);
+    learned.gbuffer.setGrid(new Uint8Array(bytes), grid.dims, grid.lo, grid.span);
+    learned.net = net;
+    learned.cam = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+    learned.ready = true;
+  })().catch(err => { learned.error = err; console.error(err); dirty = true; });
+  return learned.loading;
+}
+function requestLearned(yaw, pitch) {
+  learned.want = { yaw, pitch, key: `${yaw.toFixed(2)} ${pitch.toFixed(2)}` };
+  if (!learned.ready) { if (!learned.error) loadLearned().then(() => requestLearned(state.yaw, state.pitch)); return; }
+  if (!learned.busy && learned.want.key !== learned.have?.key) runLearned();
+}
+async function runLearned() {
+  learned.busy = true;
+  try {
+    while (learned.want && learned.want.key !== learned.have?.key) {
+      const w = learned.want;
+      placeCamera(learned.cam, w.yaw, w.pitch, K.radius);
+      const out = learned.net.run(learned.gbuffer.read(renderer, learned.cam, [0, 1, 2, 3]));
+      const px = await tf.browser.toPixels(out);
+      out.dispose();
+      learned.canvas.getContext('2d').putImageData(new ImageData(px, GBUFFER.width, GBUFFER.height), 0, 0);
+      learned.have = w;
+      learned.shown = true;
+      dirty = true;
+    }
+  } catch (err) { learned.error = err; console.error(err); }
+  learned.busy = false;
+}
+
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
   const camDir = dirOf(state.yaw, state.pitch);
@@ -948,10 +1004,16 @@ function render() {
     card.position.set(...K.target);
     card.quaternion.copy(camera.quaternion);
   }
+  const learnedOn = mode === 'learned' && !onKey;
+  if (learnedOn) requestLearned(state.yaw, state.pitch);
   if (neuro) {
     latentViewProjection(lead, stretchTowards(lead, camDir));
     setView(latentCam, latentFrame);
     setWorld(latentAngles.dYaw, latentAngles.dPitch, latentFrame);
+  } else if (learnedOn && learned.shown) {
+    // The learned render is drawn through the plain camera, so the world uses it too.
+    setView(camera, IDENTITY);
+    setWorld(0, 0, IDENTITY);
   } else {
     lead.vantageCam ??= vantageCamera(lead);
     setView(lead.vantageCam.cam, lead.vantageCam.frame);
@@ -1035,7 +1097,9 @@ function render() {
   ctx.clearRect(0, 0, flat.width, flat.height);
   if (!projected && !stretched && !neuro) {
     ctx.setTransform(...upright.canvas);
-    drawKey(lead);
+    // Until the learned render is ready, the nearest drawing holds the spot.
+    if (learnedOn && learned.shown) ctx.drawImage(learned.canvas, 0, 0, flat.width, flat.height);
+    else drawKey(lead);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
   if (state.skeleton) drawSkeleton();
@@ -1165,10 +1229,10 @@ function updateSheet(around, onKey, towards) {
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
-  chip.textContent = onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
+  chip.textContent = onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : state.mode === 'learned' ? (learned.shown ? 'Learned render' : 'Loading learned render') : 'In-between';
   chip.classList.toggle('key', onKey);
   const lead = around[0].key;
-  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
+  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held', learned: learned.shown ? 'Nearest key (the render is learned from all keys)' : `Held while the learned render ${learned.error ? 'failed to load' : 'loads'}` }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
   if (!onKey && state.mode === 'neuro') {
     for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
     if (around[1]) rows.push({ key: around[1].key, role: 'Fills torn or hidden parts', note: `${around[1].angle.toFixed(1)}° away` });

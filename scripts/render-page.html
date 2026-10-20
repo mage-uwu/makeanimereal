@@ -90,10 +90,12 @@ window.pose = ({ anim, time, pose }) => {
 // (no textures, skeleton or animation): exactly the geometry the renders were made from.
 window.exportMesh = () => {
   model.updateMatrixWorld(true);
-  const position = [], index = [];
+  const position = [], index = [], uv = [];
   model.traverse(o => {
     if (!o.isMesh) return;
     const pos = o.geometry.attributes.position, base = position.length / 3, v = new THREE.Vector3();
+    const tc = o.geometry.attributes.uv;
+    for (let i = 0; i < pos.count; i++) uv.push(tc ? +tc.getX(i).toFixed(5) : 0, tc ? +tc.getY(i).toFixed(5) : 0);
     for (let i = 0; i < pos.count; i++) {
       v.fromBufferAttribute(pos, i);
       if (o.isSkinnedMesh) o.applyBoneTransform(i, v);
@@ -125,7 +127,17 @@ window.exportMesh = () => {
       bone.push(si.getComponent(i, best));
     }
   });
-  return { position, index, bone, skeleton };
+  return { position, index, uv, bone, skeleton };
+};
+
+// The base colour texture as a PNG data URL, sampled with the exported uv (glTF orientation: no flip).
+window.albedo = () => {
+  let img = null;
+  model.traverse(o => { if (o.isMesh && o.material.map && !img) img = o.material.map.image; });
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c.toDataURL('image/png');
 };
 
 // yaw 0 = camera in front of the character (+Z), positive yaw orbits to the character's left.
