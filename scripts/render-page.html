@@ -86,6 +86,27 @@ window.pose = ({ anim, time, pose }) => {
   return frame();
 };
 
+// The current pose baked into plain world-space triangles, for viewers that only need the shape
+// (no textures, skeleton or animation): exactly the geometry the renders were made from.
+window.exportMesh = () => {
+  model.updateMatrixWorld(true);
+  const position = [], index = [];
+  model.traverse(o => {
+    if (!o.isMesh) return;
+    const pos = o.geometry.attributes.position, base = position.length / 3, v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      if (o.isSkinnedMesh) o.applyBoneTransform(i, v);
+      v.applyMatrix4(o.matrixWorld);
+      position.push(+v.x.toFixed(4), +v.y.toFixed(4), +v.z.toFixed(4));
+    }
+    const idx = o.geometry.index;
+    if (idx) for (let i = 0; i < idx.count; i++) index.push(base + idx.getX(i));
+    else for (let i = 0; i < pos.count; i++) index.push(base + i);
+  });
+  return { position, index };
+};
+
 // yaw 0 = camera in front of the character (+Z), positive yaw orbits to the character's left.
 window.shot = ({ yaw, pitch }) => {
   const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);

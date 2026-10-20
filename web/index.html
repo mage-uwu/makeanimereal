@@ -173,14 +173,11 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 
 <script type="importmap">
 { "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"
 } }
 </script>
 <script type="module">
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { relaxArms } from './pose.js';
 
 const $ = id => document.getElementById(id);
 const stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
@@ -213,34 +210,20 @@ async function load() {
     img.src = k.file;
   })));
   K.keys.forEach((k, i) => { k.img = images[i]; });
-  const gltf = await new GLTFLoader().loadAsync('model.glb');
+  const mesh = await (await fetch('mesh.json')).json();
   tick();
-  return gltf;
+  return mesh;
 }
 
-// The renders were made from a posed, skinned mesh. Bake that pose into plain world-space geometry
-// so the projection shader stays simple and matches the renders exactly.
-function bake(root) {
-  if (K.pose === 'relaxed') relaxArms(THREE, root);
-  root.updateMatrixWorld(true);
-  const parts = [];
-  root.traverse(o => {
-    if (!o.isMesh) return;
-    const src = o.geometry, pos = src.attributes.position, out = new Float32Array(pos.count * 3), v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      if (o.isSkinnedMesh) o.applyBoneTransform(i, v);
-      v.applyMatrix4(o.matrixWorld);
-      out.set([v.x, v.y, v.z], i * 3);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(out, 3));
-    if (src.attributes.uv) g.setAttribute('uv', src.attributes.uv);
-    if (src.index) g.setIndex(src.index);
-    g.computeVertexNormals();
-    parts.push({ geometry: g, material: o.material });
-  });
-  return parts[0];
+// Her shape in the exact pose the key drawings were made from (exported by render.mjs). It is
+// only ever used to bend drawings; its own surface is never shown.
+function shape(data) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
+  g.setIndex(data.index);
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  return g;
 }
 
 // Each key drawing's camera, rebuilt exactly as scripts/render-page.html placed it.
@@ -345,9 +328,9 @@ function makeProjectionMaterial() {
       uTexel: { value: new THREE.Vector2(1 / 600, 1 / 900) },
     },
     vertexShader: /* glsl */`
-      varying vec3 vWorld; varying vec3 vNormal; varying vec2 vUv;
+      varying vec3 vWorld; varying vec3 vNormal;
       void main() {
-        vWorld = position; vNormal = normal; vUv = uv;
+        vWorld = position; vNormal = normal;
         gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
       }`,
     fragmentShader: /* glsl */`
@@ -356,7 +339,7 @@ function makeProjectionMaterial() {
       uniform vec3 uDir[4];
       uniform float uNear, uFar;
       uniform vec2 uTexel;
-      varying vec3 vWorld; varying vec3 vNormal; varying vec2 vUv;
+      varying vec3 vWorld; varying vec3 vNormal;
       float viewDepth(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
       // Drawing i's paint at this surface point, or the nearest paint within ~35 texels; alpha 0 if none.
       vec4 nearestPaint(sampler2D tex, int i) {
@@ -446,26 +429,25 @@ function makeFloor(minY) {
   return m;
 }
 
-function init(gltf) {
+function init(data) {
   renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  const baked = bake(gltf.scene);
-  baked.geometry.computeBoundingBox();
+  const geometry = shape(data);
   depthScene = new THREE.Scene();
-  depthScene.add(new THREE.Mesh(baked.geometry, new THREE.MeshBasicMaterial({ colorWrite: false })));
+  depthScene.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ colorWrite: false })));
 
   scene = new THREE.Scene();
 
   projMat = makeProjectionMaterial();
-  mesh = new THREE.Mesh(baked.geometry, projMat);
+  mesh = new THREE.Mesh(geometry, projMat);
   scene.add(mesh);
 
   // Drawn first in its own pass: three.js draws transparent objects after opaque ones whatever
   // their renderOrder, and the card must sit behind the mesh, showing only around it.
   backdrop = new THREE.Scene();
-  floor = makeFloor(baked.geometry.boundingBox.min.y);
+  floor = makeFloor(geometry.boundingBox.min.y);
   backdrop.add(floor);
   cardMat = makeCardMaterial();
   card = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), cardMat);

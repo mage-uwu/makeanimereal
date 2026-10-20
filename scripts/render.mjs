@@ -5,6 +5,7 @@
 //   node scripts/render.mjs [--model assets/emerald-pixie.glb] [--out out/renders]
 //        [--yaw-step 30] [--pitches=-15,0,20] [--size 768x1152] [--fov 22]
 //        [--background "#ffffff"] [--anim Walking] [--frames 1] [--pose rest|relaxed]
+//        [--export-mesh out/relaxed-renders/mesh.json]
 import { chromium } from 'playwright-core';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -24,6 +25,7 @@ const { values: opt } = parseArgs({
     background: { type: 'string', default: '#ffffff' },
     anim: { type: 'string' },
     pose: { type: 'string', default: 'rest' }, // rest (the model's own pose) | relaxed (arms down)
+    'export-mesh': { type: 'string' }, // also write the posed mesh as JSON (first frame)
     frames: { type: 'string', default: '1' },
   },
 });
@@ -74,6 +76,11 @@ try {
     const time = clip ? (clip.duration * f) / frames : 0;
     const cam = await page.evaluate(a => window.pose(a), { anim: opt.anim, time, pose: opt.pose });
     cameras.push({ frame: f, target: cam.center, radius: cam.radius });
+    if (f === 0 && opt['export-mesh']) {
+      const mesh = await page.evaluate(() => window.exportMesh());
+      await fs.writeFile(path.resolve(opt['export-mesh']), JSON.stringify(mesh));
+      console.log(`mesh: ${mesh.position.length / 3} vertices, ${mesh.index.length / 3} triangles -> ${opt['export-mesh']}`);
+    }
     for (const pitch of pitches) {
       for (let yaw = 0; yaw < 360; yaw += yawStep) {
         const dataUrl = await page.evaluate(a => window.shot(a), { yaw, pitch });

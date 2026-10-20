@@ -35,11 +35,11 @@ Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` en
 
 ```sh
 # 72 key angles in the relaxed pose, plus the same views with a transparent background
-npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --out out/relaxed-renders
+npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --out out/relaxed-renders --export-mesh out/relaxed-renders/mesh.json
 npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --background none --out out/relaxed-alpha
 npm run stylize -- --renders out/relaxed-renders --out out/relaxed
 pip install opencv-python-headless   # plus Pillow and numpy
-python3 scripts/build-web.py          # -> out/web (page, fitted drawings, model)
+python3 scripts/build-web.py          # -> out/web (page, fitted drawings, mesh.json), ~4.4 MB
 ```
 
 `web/index.html` is the viewer. The 3D model is never drawn. It is an invisible shape that bends
@@ -55,8 +55,9 @@ the nearest key drawing to the current camera:
   Two drawings are never mixed on a pixel, and the mesh's own texture never shows.
 - Art off the mesh (the ribbons) comes from the same drawing on a camera-facing card behind her.
 
-`web/pose.js` holds the relaxed pose shared by the renderer and the viewer, so the viewer's mesh
-matches the renders exactly.
+The viewer gets only the posed shape (`mesh.json`, exported by the renderer with the same three.js
+code that made the renders), not the GLB: no textures, skeleton or animation. `web/pose.js` holds the
+relaxed pose.
 
 ## Cost
 

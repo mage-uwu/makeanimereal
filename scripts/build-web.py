@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Package the web viewer: key drawings cut out and fitted to the 3D model, plus the model.
+"""Package the web viewer: key drawings cut out and fitted to the 3D model, plus its posed shape.
 
     python3 scripts/build-web.py [--renders out/relaxed-renders] [--alpha out/relaxed-alpha]
                                  [--keys out/relaxed] [--out out/web] [--width 600]
 
---renders  manifest with the keyframe cameras (from render.mjs)
+--renders  manifest with the keyframe cameras and mesh.json (render.mjs --export-mesh)
 --alpha    the same views rendered with --background none, used for the model's silhouettes
 --keys     the stylized drawings (from stylize.mjs)
 
@@ -155,9 +155,11 @@ def main():
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),
         'keys': keys,
     }, indent=1))
-    shutil.copy(ROOT / manifest['model'], out / 'model.glb')
-    for f in ('index.html', 'pose.js'):
-        shutil.copy(ROOT / 'web' / f, out / f)
+    # The viewer never shows the model, so it gets only the posed shape (render.mjs --export-mesh).
+    shutil.copy(renders / 'mesh.json', out / 'mesh.json')
+    shutil.copy(ROOT / 'web' / 'index.html', out / 'index.html')
+    for stale in ('model.glb', 'pose.js'):
+        (out / stale).unlink(missing_ok=True)
     size = sum(f.stat().st_size for f in out.rglob('*') if f.is_file())
     print(f'{len(keys)} keys -> {out} ({size / 1e6:.1f} MB)')
 
