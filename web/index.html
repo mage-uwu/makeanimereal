@@ -48,6 +48,8 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
   background: radial-gradient(90% 60% at 50% 90%, color-mix(in srgb, var(--emerald) 10%, var(--stage)), var(--stage) 65%);
 }
 .viewport.dragging { cursor: grabbing; }
+.viewport.room { background: url(room.webp) center / cover no-repeat, var(--stage); }
+.viewport.room + .hint { background: color-mix(in srgb, var(--sheet) 85%, transparent); color: var(--ink); padding: 3px 10px; border-radius: 999px; }
 /* The drawings are 2:3, so the character frame is the largest 2:3 box that fits the window. */
 .stage {
   position: relative; height: min(100%, 150vw); aspect-ratio: 2 / 3; max-width: 100%;
@@ -164,6 +166,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
+          <label><input type="checkbox" id="room"> Room backdrop</label>
         </div>
         </div>
         </details>
@@ -218,7 +221,7 @@ const NOTES = {
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1 };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: false };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -972,7 +975,7 @@ function updateSheet(around, onKey, towards) {
   }
   $('weights').innerHTML = rows.map(r => `<li class="${r.lead ? 'lead' : ''}"><span>${keyName(r.key)}</span><span class="role">${r.role}</span><span class="pct">${r.note}</span></li>`).join('');
   drawRadar(rows);
-  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief })); } catch {}
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
@@ -1036,6 +1039,9 @@ const showRelief = () => { $('relief').value = state.relief; $('relief-out').tex
 showRelief();
 $('relief').addEventListener('input', e => { state.relief = +e.target.value; showRelief(); dirty = true; });
 $('skeleton').addEventListener('change', e => { state.skeleton = e.target.checked; dirty = true; });
+const showRoom = () => { $('room').checked = state.room; viewportEl.classList.toggle('room', state.room); };
+showRoom();
+$('room').addEventListener('change', e => { state.room = e.target.checked; showRoom(); dirty = true; });
 $('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
 
 // Below the lowest ring there are no drawings; above the highest the top ring's drawings carry on
