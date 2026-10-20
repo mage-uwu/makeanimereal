@@ -767,11 +767,11 @@ function renderRoom() {
   if (!state.room || !roomRenderer) return;
   const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
   // Same camera as the character's frame, widened to the whole window around that frame.
-  // The sprite's camera, with its frame (the centred 2:3 box) widened to the whole window.
-  roomCam.position.copy(viewCam.position);
-  roomCam.quaternion.copy(viewCam.quaternion);
+  // The true, upright camera, with its frame (the centred 2:3 box) widened to the whole window.
+  roomCam.position.copy(camera.position);
+  roomCam.quaternion.copy(camera.quaternion);
   roomCam.updateMatrixWorld(true);
-  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(viewCam.projectionMatrix);
+  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(camera.projectionMatrix);
   roomCam.projectionMatrixInverse.copy(roomCam.projectionMatrix).invert();
   // Room as seen from her: rotated by her heading, shifted by her position.
   const h = -walker.heading * D2R;
@@ -943,12 +943,13 @@ function render() {
     lead.vantageCam ??= vantageCamera(lead);
     setView(lead.vantageCam.cam, lead.vantageCam.frame);
   }
+  upright = uprightFit();
   renderer.autoClear = false;
   renderer.clear();
   renderRoom();
-  renderer.render(backdrop, viewCam);
+  renderer.render(backdrop, camera);
   renderer.clearDepth();
-  renderer.render(scene, viewCam);
+  renderer.render(scene, camera);
   if (neuro) {
     towards = stretchTowards(lead, camDir);
     const vp = latentViewProjection(lead, towards);
@@ -959,7 +960,7 @@ function render() {
       u.uOwn.value = d.warps; u.uTex.value = d.tex;
       u.uAlign.value.set(own.s, own.ox, own.oy, 0);
       u.uK0.value = K.frame[0] / glCanvas.width;
-      u.uLatentVP.value.copy(vp);
+      u.uLatentVP.value.copy(upright.clip).multiply(vp);
       own.vantageCam ??= vantageCamera(own);
       u.uOwnPos.value.copy(own.vantageCam.cam.position);
       u.uOwnFwd.value.setFromMatrixColumn(own.vantageCam.cam.matrixWorld, 2).negate();
@@ -1016,7 +1017,11 @@ function render() {
   // The flat canvas shows key drawings as drawn: on a key angle, and always in flipbook mode.
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
-  if (!projected && !stretched && !neuro) drawKey(lead);
+  if (!projected && !stretched && !neuro) {
+    ctx.setTransform(...upright.canvas);
+    drawKey(lead);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
   if (state.skeleton) drawSkeleton();
 
   updateSheet(around, onKey, towards);
@@ -1056,6 +1061,42 @@ function setView(cam, frame) {
   viewCam.projectionMatrixInverse.copy(viewCam.projectionMatrix).invert();
 }
 
+// The world is always seen through the true, upright camera. A drawing depicts a slightly different
+// vantage (its learned one), so it is fitted onto the world instead: the rig's skeleton projected
+// through the drawing's camera is matched to the same skeleton through the true camera by a 2D
+// rotation, uniform scale and shift (feet weighted 3x, so she stays planted). That removes the
+// drawing's roll and scale error and keeps her upright on the floor.
+let upright = { clip: new THREE.Matrix4(), canvas: [1, 0, 0, 1, 0, 0] };
+function uprightFit() {
+  const asp = K.aspect;
+  const sv = new THREE.Matrix4().multiplyMatrices(viewCam.projectionMatrix, viewCam.matrixWorldInverse);
+  const tv = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const P = [], Q = [], Wt = [];
+  for (const b of skeleton) {
+    const p = b.pos.clone().applyMatrix4(sv), q = b.pos.clone().applyMatrix4(tv);
+    P.push([p.x * asp, p.y]); Q.push([q.x * asp, q.y]); Wt.push(/Foot|Toe/.test(b.name) ? 3 : 1);
+  }
+  const sw = Wt.reduce((a, w) => a + w, 0);
+  const pc = [0, 1].map(i => P.reduce((a, p, j) => a + p[i] * Wt[j], 0) / sw);
+  const qc = [0, 1].map(i => Q.reduce((a, q, j) => a + q[i] * Wt[j], 0) / sw);
+  let re = 0, im = 0, den = 0;  // z = sum w (q - qc) conj(p - pc) / sum w |p - pc|^2
+  P.forEach((p, j) => {
+    const px = p[0] - pc[0], py = p[1] - pc[1], qx = Q[j][0] - qc[0], qy = Q[j][1] - qc[1];
+    re += Wt[j] * (qx * px + qy * py); im += Wt[j] * (qy * px - qx * py); den += Wt[j] * (px * px + py * py);
+  });
+  const a = re / den, b = im / den, tx = qc[0] - (a * pc[0] - b * pc[1]), ty = qc[1] - (b * pc[0] + a * pc[1]);
+  // In NDC: x' = a x - (b/asp) y + tx/asp, y' = b asp x + a y + ty; as a clip-space matrix:
+  const clip = new THREE.Matrix4().set(a, -b / asp, 0, tx / asp, b * asp, a, 0, ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  // The same map in canvas pixels (y down) for drawings shown flat.
+  const W = flat.width, H = flat.height;
+  const L = [[a, -b / asp], [b * asp, a]], t = [tx / asp, ty];
+  const D = [2 / W, -2 / H], e = [-1, 1];
+  const m11 = L[0][0], m12 = L[0][1] * D[1] / D[0], m21 = L[1][0] * D[0] / D[1], m22 = L[1][1];
+  const ox = (L[0][0] * e[0] + L[0][1] * e[1] + t[0] - e[0]) / D[0];
+  const oy = (L[1][0] * e[0] + L[1][1] * e[1] + t[1] - e[1]) / D[1];
+  return { clip, canvas: [m11, m21, m12, m22, ox, oy] };
+}
+
 function latentViewProjection(lead, towards) {
   const along = towards.reduce((a, t) => a + t.t, 0), norm = Math.max(1, along);
   const parts = [{ v: lead.vantage, w: Math.max(0, 1 - along) / norm }, ...towards.map(t => ({ v: lead.near[t.i].vantage, w: t.t / norm }))];
@@ -1077,7 +1118,7 @@ function latentViewProjection(lead, towards) {
 // the drawings are rotating through): the pose every drawing is tied to.
 function drawSkeleton() {
   const W = flat.width, H = flat.height, em = getComputedStyle(document.documentElement).getPropertyValue('--emerald').trim();
-  const vp = new THREE.Matrix4().multiplyMatrices(viewCam.projectionMatrix, viewCam.matrixWorldInverse);
+  const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
   const at = v => { const p = v.clone().applyMatrix4(vp); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
   ctx.lineWidth = Math.max(2, W / 300);
   ctx.strokeStyle = em; ctx.fillStyle = em;
