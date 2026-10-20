@@ -71,7 +71,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .sheet > section + section { border-top: 1px solid var(--rule); }
 .label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 
-.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
 .modes button {
   font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
   padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
@@ -103,8 +103,9 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 #radar { width: 100%; height: auto; display: block; cursor: pointer; }
 .radar-axis { display: flex; justify-content: space-between; font: 11px/1 var(--font-data); color: var(--muted); }
 
-.method { margin: 0; padding-left: 1.3em; display: grid; gap: 6px; font-size: 13.5px; }
-.method li::marker { font-family: var(--font-data); color: var(--emerald); }
+.method { margin: 0; display: grid; gap: 8px; font-size: 13.5px; }
+.method dt { font: 500 12px/1.3 var(--font-data); color: var(--emerald); letter-spacing: .04em; }
+.method dd { margin: 2px 0 0; }
 .facts { font: 12px/1.6 var(--font-data); color: var(--muted); margin: 0; }
 .error { color: var(--ink); background: var(--mint); padding: 10px 12px; border-radius: 5px; font-size: 13px; }
 
@@ -113,11 +114,11 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 
 <main class="wrap">
   <header>
-    <div class="eyebrow">Key-drawing turntable · 72 genga · 15° × 3 heights</div>
+    <div class="eyebrow" id="eyebrow">Key-drawing viewer · loading key drawings</div>
     <h1>Emerald Pixie<span class="jp">原画</span></h1>
-    <p class="lede">72 key drawings, one every 15° at three camera heights. On a key angle you see that drawing exactly
-      as it was drawn. Between keys, an invisible 3D model of her bends the nearest drawing to the camera until the
-      next key takes over. Two drawings are never mixed, and the model itself is never shown. Drag to walk around her.</p>
+    <p class="lede">Key drawings of her from all around and from above and below. On a key angle you see that drawing
+      exactly as it was drawn. Between keys, the nearest drawing is carried to your camera angle, either by an invisible
+      3D model of her or by stretching it toward the next drawing. Two drawings are never mixed. Drag in any direction.</p>
   </header>
 
   <div class="layout">
@@ -125,16 +126,17 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
       <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
         <canvas id="gl"></canvas>
         <canvas id="flat"></canvas>
-        <div class="loading" id="loading"><strong>Loading</strong><span id="progress">model and key drawings</span></div>
+        <div class="loading" id="loading"><strong>Loading</strong><span id="progress">key drawings</span></div>
       </div>
-      <div class="hint">Drag to orbit · Arrow keys step 15° · Click the key map to jump</div>
+      <div class="hint">Drag to orbit · Arrow keys step to the next key · Click the key map to jump</div>
     </div>
 
     <div class="sheet">
       <section>
-        <div class="label">Render with</div>
-        <div class="modes" role="group" aria-label="Render mode">
+        <div class="label">Between keys</div>
+        <div class="modes" role="group" aria-label="How to show angles between key drawings">
           <button type="button" id="mode-projected" data-mode="projected" aria-pressed="true">Projected</button>
+          <button type="button" id="mode-flipstretch" data-mode="flipstretch" aria-pressed="false">Flipstretch</button>
           <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
         </div>
         <p class="mode-note" id="mode-note"></p>
@@ -152,20 +154,20 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
       </section>
 
       <section>
-        <div class="label">Key map · yaw across, camera height down</div>
-        <canvas id="radar" width="720" height="150" aria-label="Map of the 72 key drawings. Click one to jump to it."></canvas>
+        <div class="label">Key map · yaw across, camera height up</div>
+        <canvas id="radar" width="720" height="220" aria-label="Map of the key drawings. Click one to jump to it."></canvas>
         <div class="radar-axis"><span>0° front</span><span>90° left</span><span>180° back</span><span>270° right</span><span>360°</span></div>
       </section>
 
       <section>
-        <div class="label">Each frame</div>
-        <ol class="method">
-          <li>On a key angle, show that key drawing exactly as drawn. Arrow keys and the key map land on these.</li>
-          <li>Between keys, take the nearest key drawing and project it onto the hidden mesh from the camera it was drawn for, then look at the mesh from the current camera. The drawing bends with her 3D shape.</li>
-          <li>Ease in each drawing's fit to the mesh as the camera leaves its key, so its eyes, bow and hems ride on the mesh's. None on the key, all of it at the hand-off halfway to the next key.</li>
-          <li>Where the drawing's camera could not see a surface, take that surface whole from the next drawing that did. Where nothing was drawn, show nothing. Two drawings are never mixed.</li>
-        </ol>
-        <p class="facts">72 drawings · Tencent Hy Image 3.5 · $0.024 each · 600 × 900 WebP</p>
+        <div class="label">How each mode fills the gaps</div>
+        <dl class="method">
+          <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
+          <div><dt>Projected</dt><dd>The nearest drawing is projected onto an invisible 3D model of her from the camera it was drawn for, then seen from your camera, so it bends with her shape. Surfaces it could not see come whole from the next drawing that did.</dd></div>
+          <div><dt>Flipstretch</dt><dd>No model. The nearest drawing is stretched toward its neighbouring drawings, along correspondences matched between the drawings themselves. It hands over halfway to the next key.</dd></div>
+          <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
+        </dl>
+        <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
       </section>
     </div>
   </div>
@@ -182,24 +184,28 @@ import * as THREE from 'three';
 const $ = id => document.getElementById(id);
 const stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
 
+const MODES = ['projected', 'flipstretch', 'flipbook'];
 const NOTES = {
-  projected: 'Key angles show the key drawing as drawn. In between, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
-  flipbook: 'The nearest key drawing laid flat, like a 2D game sprite. It stays still and jumps every 15°.',
+  projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
+  flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
+  flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
 const state = { yaw: 20, pitch: 6, mode: 'projected', spin: false };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
-if (!['projected', 'flipbook'].includes(state.mode)) state.mode = 'projected';
+if (!MODES.includes(state.mode)) state.mode = 'projected';
 const hot = window.claude?.hot;
 if (hot?.data?.state) Object.assign(state, hot.data.state);
 hot?.snapshot?.(() => ({ state }));
 
-let K, keyGrid, renderer, scene, backdrop, camera, mesh, projMat, card, cardMat, floor;
+let K, renderer, scene, backdrop, flatScene, camera, orthoCam, mesh, projMat, card, cardMat, floor, stretchQuad, stretchMat;
 const NEAR_PAD = 2.2;
+const D2R = Math.PI / 180;
+const dirOf = (yaw, pitch) => new THREE.Vector3(Math.cos(pitch * D2R) * Math.sin(yaw * D2R), Math.sin(pitch * D2R), Math.cos(pitch * D2R) * Math.cos(yaw * D2R));
+const angleBetween = (a, b) => Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1)) / D2R;
 
 async function load() {
   K = await (await fetch('keys.json')).json();
-  keyGrid = new Map(K.keys.map(k => [`${k.yaw}|${k.pitch}`, k]));
   let done = 0;
   const total = K.keys.length * 2 + 1;
   const tick = () => { $('progress').textContent = `${++done} of ${total} files`; };
@@ -209,7 +215,16 @@ async function load() {
     img.onerror = () => rej(new Error(`Could not load ${src}`));
     img.src = src;
   });
-  await Promise.all(K.keys.map(async k => { [k.img, k.fieldImg] = await Promise.all([image(k.file), image(k.field)]); }));
+  await Promise.all(K.keys.map(async k => { [k.img, k.warpImg] = await Promise.all([image(k.file), image(k.warps)]); }));
+  for (const k of K.keys) k.dir = dirOf(k.yaw, k.pitch);
+  for (const k of K.keys) {
+    k.near = k.neighbours.map(i => K.keys[i]);
+    // The hand-off to a neighbour comes halfway to it; the fit eases in over that distance.
+    k.handoff = 0.5 * Math.min(...k.near.map(n => angleBetween(k.dir, n.dir)));
+  }
+  const pitches = K.keys.map(k => k.pitch);
+  K.minPitch = Math.min(...pitches);
+  K.maxPitch = Math.max(...pitches);
   const mesh = await (await fetch('mesh.json')).json();
   tick();
   return mesh;
@@ -228,15 +243,15 @@ function shape(data) {
 
 // Each key drawing's camera, rebuilt exactly as scripts/render-page.html placed it.
 function placeCamera(cam, yaw, pitch, radius) {
-  const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch), t = K.target;
-  cam.position.set(t[0] + radius * Math.cos(p) * Math.sin(y), t[1] + radius * Math.sin(p), t[2] + radius * Math.cos(p) * Math.cos(y));
+  const t = K.target, d = dirOf(yaw, pitch);
+  cam.position.set(t[0] + radius * d.x, t[1] + radius * d.y, t[2] + radius * d.z);
   cam.lookAt(t[0], t[1], t[2]);
   cam.updateMatrixWorld(true);
 }
 
 const DEPTH_W = 400, DEPTH_H = 600;
 let depthScene;
-const keyCache = new Map(); // key -> { tex, depth, vp, dir }, least recently used first
+const keyCache = new Map(); // key -> GPU resources, least recently used first
 function keyData(k) {
   let d = keyCache.get(k);
   if (d) { keyCache.delete(k); keyCache.set(k, d); return d; }
@@ -250,88 +265,121 @@ function keyData(k) {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   tex.needsUpdate = true;
-  // The fit-to-mesh warp is data, not colour: no colour conversion, no mipmaps.
-  const field = new THREE.Texture(k.fieldImg);
-  field.generateMipmaps = false;
-  field.minFilter = THREE.LinearFilter;
-  field.needsUpdate = true;
+  // Warp fields are data, not colour: no colour conversion, no mipmaps.
+  const warps = new THREE.Texture(k.warpImg);
+  warps.generateMipmaps = false;
+  warps.minFilter = THREE.LinearFilter;
+  warps.needsUpdate = true;
   d = {
-    tex, field, depth,
+    tex, warps, depth,
     vp: new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
     dir: cam.position.clone().sub(new THREE.Vector3(...K.target)).normalize(),
   };
   keyCache.set(k, d);
-  // 16 drawings cover any drag; older ones are released so phones keep their GPU memory.
-  while (keyCache.size > 16) {
+  // A drag only ever touches a handful of drawings; older ones are released to spare GPU memory.
+  while (keyCache.size > 20) {
     const [oldKey, old] = keyCache.entries().next().value;
-    old.tex.dispose(); old.field.dispose(); old.depth.depthTexture.dispose(); old.depth.dispose();
+    old.tex.dispose(); old.warps.dispose(); old.depth.depthTexture.dispose(); old.depth.dispose();
     keyCache.delete(oldKey);
   }
   return d;
 }
 
-// The four key drawings around (yaw, pitch), weighted by closeness. The weights only rank them;
-// no two drawings are ever mixed on screen.
-function surrounding(yaw, pitch) {
-  const step = K.yawStep, ps = K.pitches;
-  const y0 = Math.floor(yaw / step) * step, fy = (yaw - y0) / step;
-  let i = 0;
-  while (i < ps.length - 2 && pitch > ps[i + 1]) i++;
-  const p0 = ps[i], p1 = ps[Math.min(i + 1, ps.length - 1)];
-  const fp = p1 === p0 ? 0 : THREE.MathUtils.clamp((pitch - p0) / (p1 - p0), 0, 1);
-  const wrap = a => ((a % 360) + 360) % 360;
-  return [
-    [wrap(y0), p0, (1 - fy) * (1 - fp)], [wrap(y0 + step), p0, fy * (1 - fp)],
-    [wrap(y0), p1, (1 - fy) * fp], [wrap(y0 + step), p1, fy * fp],
-  ].map(([y, p, w]) => ({ key: keyGrid.get(`${y}|${p}`), w }));
-}
-
-// The surrounding drawings in the order they are used: the nearest first, the rest only to fill
-// surfaces it could not see. The lead changes halfway between keys, with a little hysteresis so it
-// does not flicker back and forth while the camera rests near the midpoint.
+// The key drawings nearest the camera on the view sphere, nearest first. The lead changes where
+// another key becomes nearer (halfway between them), with a little hysteresis so it does not
+// flicker while the camera rests near that line.
 let lead = null;
-function ranked(yaw, pitch) {
-  const seen = new Set();
-  const list = surrounding(yaw, pitch).filter(a => a.key && !seen.has(a.key) && seen.add(a.key)).sort((a, b) => b.w - a.w);
+function ranked(camDir) {
+  const list = K.keys.map(k => ({ key: k, angle: angleBetween(camDir, k.dir) })).sort((a, b) => a.angle - b.angle).slice(0, 4);
   const held = list.findIndex(a => a.key === lead);
-  if (held > 0 && list[0].w - list[held].w < 0.06) list.unshift(...list.splice(held, 1));
+  if (held > 0 && list[held].angle - list[0].angle < 0.6) list.unshift(...list.splice(held, 1));
   lead = list[0].key;
   return list;
 }
 
+// Flipstretch: express the camera's offset from the lead key as a mix of the directions to two of
+// its neighbours (on the plane touching the view sphere at the key), so the drawing can be
+// stretched that far along its correspondences to each.
+function stretchTowards(k, camDir) {
+  const east = new THREE.Vector3(Math.cos(k.yaw * D2R), 0, -Math.sin(k.yaw * D2R));
+  const north = new THREE.Vector3().crossVectors(k.dir, east).normalize();
+  const flat2 = v => { const o = v.clone().sub(k.dir); return [o.dot(east), o.dot(north)]; };
+  const o = flat2(camDir);
+  const len = Math.hypot(...o);
+  if (len < 1e-6) return [];
+  const vs = k.near.map((n, i) => ({ i, v: flat2(n.dir) }));
+  const ang = v => Math.atan2(v[1], v[0]);
+  const oa = ang(o);
+  // The two neighbours whose directions bracket the camera's, one on each side.
+  let left = null, right = null;
+  for (const n of vs) {
+    let d = ang(n.v) - oa;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    if (d >= 0 && (!left || d < left.d)) left = { ...n, d };
+    if (d < 0 && (!right || d > right.d)) right = { ...n, d };
+  }
+  if (left && right && left.d - right.d < Math.PI * 0.95) {
+    const [a1, a2] = [left.v, right.v], det = a1[0] * a2[1] - a1[1] * a2[0];
+    if (Math.abs(det) > 1e-9) {
+      const a = (o[0] * a2[1] - o[1] * a2[0]) / det, b = (a1[0] * o[1] - a1[1] * o[0]) / det;
+      if (a >= 0 && b >= 0) return [{ i: left.i, t: Math.min(a, 1) }, { i: right.i, t: Math.min(b, 1) }];
+    }
+  }
+  // Otherwise stretch toward the single neighbour most in the camera's direction.
+  const best = vs.reduce((m, n) => (n.v[0] * o[0] + n.v[1] * o[1]) / Math.hypot(...n.v) > (m.v[0] * o[0] + m.v[1] * o[1]) / Math.hypot(...m.v) ? n : m);
+  const t = (best.v[0] * o[0] + best.v[1] * o[1]) / (best.v[0] ** 2 + best.v[1] ** 2);
+  return [{ i: best.i, t: THREE.MathUtils.clamp(t, 0, 1) }];
+}
+
+const ATLAS_GLSL = /* glsl */`
+  uniform vec2 uAtlas;       // tile columns, rows
+  uniform vec2 uFieldScale;  // stored field value - 0.5 -> fraction of the frame
+  // A warp field from tile t of an atlas, at render-frame point img (y down), as a frame fraction.
+  vec2 warpAt(sampler2D atlas, float t, vec2 img) {
+    vec2 e = 0.5 / (vec2(textureSize(atlas, 0)) / uAtlas);
+    vec2 cell = vec2(mod(t, uAtlas.x), floor(t / uAtlas.x));
+    vec2 p = (cell + clamp(img, e, 1.0 - e)) / uAtlas;
+    return (texture2D(atlas, vec2(p.x, 1.0 - p.y)).rg - 0.5) * uFieldScale;
+  }
+`;
+
 const SAMPLE = /* glsl */`
+  ${ATLAS_GLSL}
   uniform sampler2D uTex0, uTex1, uTex2, uTex3;
-  uniform sampler2D uFld0, uFld1, uFld2, uFld3;
+  uniform sampler2D uWarp0, uWarp1, uWarp2, uWarp3;
   uniform mat4 uVP[4];
   uniform vec4 uAlign[4];   // drawing scale, offset x, offset y in the render frame
   uniform float uFit[4];    // share of the fit-to-mesh warp: 0 on the key angle, 1 at the hand-off
   uniform float uUse[4];
-  uniform vec2 uFieldScale; // stored field value - 0.5 -> fraction of the frame
   // Where a world point lands in key drawing i: through key camera i into the render frame, nudged
-  // by the share uFit of the drawing's fit-to-mesh warp, then into the drawing by its placement.
-  vec2 keyUV(sampler2D fld, int i, vec3 world) {
+  // by the share uFit of the drawing's fit-to-mesh warp (atlas tile 0), then into the drawing.
+  vec2 keyUV(sampler2D warps, int i, vec3 world) {
     vec4 c = uVP[i] * vec4(world, 1.0);
     vec2 uv = c.xy / c.w * 0.5 + 0.5;
-    vec2 img = vec2(uv.x, 1.0 - uv.y) + uFit[i] * (texture2D(fld, uv).rg - 0.5) * uFieldScale;
+    vec2 img = vec2(uv.x, 1.0 - uv.y);
+    img += uFit[i] * warpAt(warps, 0.0, img);
     vec2 d = (img - uAlign[i].yz) / uAlign[i].x;
     return vec2(d.x, 1.0 - d.y);
   }
-  // Key drawing i at a world point: colour (rgb) and coverage (a).
-  vec4 keySample(sampler2D tex, sampler2D fld, int i, vec3 world) {
-    vec2 uv = keyUV(fld, i, world);
+  vec4 keySample(sampler2D tex, sampler2D warps, int i, vec3 world) {
+    vec2 uv = keyUV(warps, i, world);
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
     return texture2D(tex, uv);
   }
 `;
 
+const atlasUniforms = () => ({
+  uAtlas: { value: new THREE.Vector2(...K.atlas) },
+  uFieldScale: { value: new THREE.Vector2(K.fieldRange / K.frame[0], K.fieldRange / K.frame[1]) },
+});
 const keyUniforms = () => ({
+  ...atlasUniforms(),
   uTex0: { value: null }, uTex1: { value: null }, uTex2: { value: null }, uTex3: { value: null },
-  uFld0: { value: null }, uFld1: { value: null }, uFld2: { value: null }, uFld3: { value: null },
+  uWarp0: { value: null }, uWarp1: { value: null }, uWarp2: { value: null }, uWarp3: { value: null },
   uVP: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) },
   uAlign: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(1, 0, 0, 0)) },
   uFit: { value: [0, 0, 0, 0] },
   uUse: { value: [0, 0, 0, 0] },
-  uFieldScale: { value: new THREE.Vector2(K.fieldRange / K.frame[0], K.fieldRange / K.frame[1]) },
 });
 
 function makeProjectionMaterial() {
@@ -357,7 +405,7 @@ function makeProjectionMaterial() {
       float viewDepth(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
       // Drawing i at this surface point. a = 1: painted. a = 0: its camera did not see the point.
       // a = -1: seen, but outside what was drawn there.
-      vec4 fromKey(sampler2D tex, sampler2D fld, sampler2D dep, int i, vec3 n) {
+      vec4 fromKey(sampler2D tex, sampler2D warps, sampler2D dep, int i, vec3 n) {
         if (uUse[i] < 0.5) return vec4(0.0);
         vec4 c = uVP[i] * vec4(vWorld, 1.0);
         vec3 ndc = c.xyz / c.w;
@@ -365,17 +413,17 @@ function makeProjectionMaterial() {
         // Hidden: something nearer sits in that camera's depth map. Edge-on: the drawing would smear.
         float gap = viewDepth(ndc.z * 0.5 + 0.5) - viewDepth(texture2D(dep, uv).r);
         if (gap > 0.02 || dot(n, uDir[i]) < 0.12) return vec4(0.0);
-        vec4 s = keySample(tex, fld, i, vWorld);
+        vec4 s = keySample(tex, warps, i, vWorld);
         return s.a > 0.5 ? vec4(s.rgb, 1.0) : vec4(0.0, 0.0, 0.0, -1.0);
       }
       void main() {
         vec3 n = normalize(vNormal);
         // The lead drawing owns every point its camera saw. Only points it could not see go to
         // the next drawing that did, taken whole. Nothing is averaged.
-        vec4 s = fromKey(uTex0, uFld0, uDep0, 0, n);
-        if (s.a == 0.0) s = fromKey(uTex1, uFld1, uDep1, 1, n);
-        if (s.a == 0.0) s = fromKey(uTex2, uFld2, uDep2, 2, n);
-        if (s.a == 0.0) s = fromKey(uTex3, uFld3, uDep3, 3, n);
+        vec4 s = fromKey(uTex0, uWarp0, uDep0, 0, n);
+        if (s.a == 0.0) s = fromKey(uTex1, uWarp1, uDep1, 1, n);
+        if (s.a == 0.0) s = fromKey(uTex2, uWarp2, uDep2, 2, n);
+        if (s.a == 0.0) s = fromKey(uTex3, uWarp3, uDep3, 3, n);
         // Where nothing was drawn the mesh stays invisible: the drawing sets the silhouette.
         if (s.a < 0.5) discard;
         gl_FragColor = vec4(s.rgb, 1.0);
@@ -400,9 +448,43 @@ function makeCardMaterial() {
       varying vec3 vWorld;
       void main() {
         // Only the lead drawing: a second one would put a second set of ribbons beside the first.
-        vec4 s0 = keySample(uTex0, uFld0, 0, vWorld);
+        vec4 s0 = keySample(uTex0, uWarp0, 0, vWorld);
         if (s0.a < 0.01) discard;
         gl_FragColor = s0;
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+// Flipstretch: one drawing, stretched in 2D along its correspondences to up to two neighbours.
+function makeStretchMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: {
+      ...atlasUniforms(),
+      uTex: { value: null }, uWarps: { value: null },
+      uAlign: { value: new THREE.Vector4(1, 0, 0, 0) },
+      uTileA: { value: 1 }, uTileB: { value: 1 }, uA: { value: 0 }, uB: { value: 0 },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      ${ATLAS_GLSL}
+      uniform sampler2D uTex, uWarps;
+      uniform vec4 uAlign;
+      uniform float uTileA, uTileB, uA, uB;
+      varying vec2 vUv;
+      void main() {
+        vec2 img = vec2(vUv.x, 1.0 - vUv.y);
+        // The drawing's feature at x lands at x + F(x) in the neighbour; stretching a share t of
+        // the way means showing, at y, what the drawing had at about y - t F(y).
+        vec2 src = img - uA * warpAt(uWarps, uTileA, img) - uB * warpAt(uWarps, uTileB, img);
+        vec2 d = (src - uAlign.yz) / uAlign.x;
+        if (any(lessThan(d, vec2(0.0))) || any(greaterThan(d, vec2(1.0)))) discard;
+        vec4 s = texture2D(uTex, vec2(d.x, 1.0 - d.y));
+        if (s.a < 0.01) discard;
+        gl_FragColor = s;
         #include <colorspace_fragment>
       }`,
   });
@@ -433,7 +515,6 @@ function init(data) {
   depthScene.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ colorWrite: false })));
 
   scene = new THREE.Scene();
-
   projMat = makeProjectionMaterial();
   mesh = new THREE.Mesh(geometry, projMat);
   scene.add(mesh);
@@ -448,7 +529,17 @@ function init(data) {
   card.renderOrder = 1;
   backdrop.add(card);
 
+  flatScene = new THREE.Scene();
+  stretchMat = makeStretchMaterial();
+  stretchQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), stretchMat);
+  stretchQuad.frustumCulled = false;
+  flatScene.add(stretchQuad);
+  orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
   camera = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+  const rings = new Set(K.keys.map(k => k.pitch)).size;
+  $('eyebrow').textContent = `Key-drawing viewer · ${K.keys.length} genga · ${rings} camera heights, ${K.minPitch}° to ${K.maxPitch}°`;
+  $('facts').textContent = `${K.keys.length} drawings · Tencent Hy Image 3.5 · $0.024 each · ${K.frame[0]} × ${K.frame[1]} WebP`;
   new ResizeObserver(resize).observe(stageEl);
   resize();
   $('loading').hidden = true;
@@ -466,9 +557,8 @@ function resize() {
 }
 
 // Draw a key drawing on the flat canvas exactly where its render sat in the frame.
-function drawKey(k, alpha) {
+function drawKey(k) {
   const W = flat.width, H = flat.height;
-  ctx.globalAlpha = alpha;
   ctx.drawImage(k.img, k.ox * W, k.oy * H, k.s * W, k.s * H);
 }
 
@@ -481,31 +571,29 @@ function frame(t) {
   requestAnimationFrame(frame);
 }
 
-// How far the camera has left the lead key, in degrees, and the share of the fit-to-mesh warp that
-// goes with it: none on the key, all of it by the hand-off halfway to the next key.
-const HANDOFF = 7.5;
-const offKey = k => Math.hypot(angleGap(state.yaw, k.yaw), state.pitch - k.pitch);
-
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
-  const around = ranked(state.yaw, state.pitch);
-  const lead = around[0].key;
-  const off = offKey(lead);
+  const camDir = dirOf(state.yaw, state.pitch);
+  const around = ranked(camDir);
+  const lead = around[0].key, off = around[0].angle;
   // On a key angle the key drawing is shown exactly as drawn. Keys are never interpolated.
   const onKey = off < 0.25;
-  const bend = state.mode === 'projected' && !onKey;
+  const mode = state.mode;
+  const projected = mode === 'projected' && !onKey;
+  const stretched = mode === 'flipstretch' && !onKey;
+  let towards = [];
 
-  mesh.visible = card.visible = bend;
-  if (bend) {
+  mesh.visible = card.visible = projected;
+  if (projected) {
     for (let i = 0; i < 4; i++) {
       const entry = around[i];
       projMat.uniforms.uUse.value[i] = entry ? 1 : 0;
       if (!entry) continue;
       const { key } = entry, d = keyData(key);
-      const fit = i === 0 ? THREE.MathUtils.smoothstep(off, 0, HANDOFF) : 1;
+      const fit = i === 0 ? THREE.MathUtils.smoothstep(off, 0, key.handoff) : 1;
       for (const m of [projMat, cardMat]) {
         m.uniforms[`uTex${i}`].value = d.tex;
-        m.uniforms[`uFld${i}`].value = d.field;
+        m.uniforms[`uWarp${i}`].value = d.warps;
         m.uniforms.uVP.value[i].copy(d.vp);
         m.uniforms.uAlign.value[i].set(key.s, key.ox, key.oy, 0);
         m.uniforms.uFit.value[i] = fit;
@@ -521,50 +609,59 @@ function render() {
   renderer.render(backdrop, camera);
   renderer.clearDepth();
   renderer.render(scene, camera);
+  if (stretched) {
+    towards = stretchTowards(lead, camDir);
+    const d = keyData(lead), u = stretchMat.uniforms;
+    u.uTex.value = d.tex;
+    u.uWarps.value = d.warps;
+    u.uAlign.value.set(lead.s, lead.ox, lead.oy, 0);
+    u.uTileA.value = towards[0] ? towards[0].i + 1 : 1;
+    u.uA.value = towards[0] ? towards[0].t : 0;
+    u.uTileB.value = towards[1] ? towards[1].i + 1 : 1;
+    u.uB.value = towards[1] ? towards[1].t : 0;
+    renderer.render(flatScene, orthoCam);
+  }
 
   // The flat canvas shows key drawings as drawn: on a key angle, and always in flipbook mode.
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
-  if (!bend) drawKey(lead, 1);
-  ctx.globalAlpha = 1;
+  if (!projected && !stretched) drawKey(lead);
 
-  updateSheet(around, onKey);
+  updateSheet(around, onKey, towards);
 }
 
-const angleGap = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 
-function updateSheet(around, onKey) {
+function updateSheet(around, onKey, towards) {
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
   chip.textContent = onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
   chip.classList.toggle('key', onKey);
-  $('weights').innerHTML = around.map(({ key }, i) => {
-    const dist = Math.hypot(angleGap(state.yaw, key.yaw), state.pitch - key.pitch);
-    const role = i === 0 ? (onKey ? 'Shown as drawn' : state.mode === 'flipbook' ? 'Held' : 'Bent to this angle')
-      : (state.mode === 'projected' && !onKey ? 'Fills hidden surfaces' : 'Not used');
-    return `<li class="${i === 0 ? 'lead' : ''}"><span>${keyName(key)}</span><span class="role">${role}</span><span class="pct">${dist.toFixed(1)}° away</span></li>`;
-  }).join('');
-  drawRadar(around);
+  const lead = around[0].key;
+  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
+  if (!onKey && state.mode === 'flipstretch') {
+    for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Stretching toward', note: `${Math.round(t.t * 100)}% there` });
+  } else if (!onKey && state.mode === 'projected') {
+    for (const a of around.slice(1)) rows.push({ key: a.key, role: 'Fills hidden surfaces', note: `${a.angle.toFixed(1)}° away` });
+  }
+  $('weights').innerHTML = rows.map(r => `<li class="${r.lead ? 'lead' : ''}"><span>${keyName(r.key)}</span><span class="role">${r.role}</span><span class="pct">${r.note}</span></li>`).join('');
+  drawRadar(rows);
   try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
-const RADAR = { padX: 14, padY: 22, rowGap: 52 };
+const RADAR = { padX: 14, padY: 16 };
 function radarPos(yaw, pitch) {
-  const ps = K.pitches, w = radar.width - RADAR.padX * 2;
-  const row = (ps[ps.length - 1] - pitch) / (ps[ps.length - 1] - ps[0]);
-  return [RADAR.padX + (yaw / 360) * w, RADAR.padY + row * RADAR.rowGap * (ps.length - 1)];
+  const w = radar.width - RADAR.padX * 2, h = radar.height - RADAR.padY * 2;
+  return [RADAR.padX + (yaw / 360) * w, RADAR.padY + ((K.maxPitch - pitch) / (K.maxPitch - K.minPitch || 1)) * h];
 }
-function drawRadar(around) {
+function drawRadar(rows) {
   const css = getComputedStyle(document.documentElement);
   const ink = css.getPropertyValue('--ink').trim(), muted = css.getPropertyValue('--muted').trim();
   const rule = css.getPropertyValue('--rule').trim(), em = css.getPropertyValue('--emerald').trim();
   rctx.clearRect(0, 0, radar.width, radar.height);
-  rctx.font = '20px "Azeret Mono", monospace';
-  rctx.textBaseline = 'middle';
-  for (const p of K.pitches) {
+  for (const p of new Set(K.keys.map(k => k.pitch))) {
     const [, y] = radarPos(0, p);
     rctx.strokeStyle = rule; rctx.lineWidth = 2;
     rctx.beginPath(); rctx.moveTo(RADAR.padX, y); rctx.lineTo(radar.width - RADAR.padX, y); rctx.stroke();
@@ -573,8 +670,8 @@ function drawRadar(around) {
     const [x, y] = radarPos(k.yaw, k.pitch);
     rctx.fillStyle = muted; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, Math.PI * 2); rctx.fill();
   }
-  around.forEach(({ key }, i) => {
-    const [x, y] = radarPos(key.yaw, key.pitch);
+  rows.forEach((r, i) => {
+    const [x, y] = radarPos(r.key.yaw, r.key.pitch);
     rctx.beginPath(); rctx.arc(x, y, i === 0 ? 11 : 7, 0, Math.PI * 2);
     if (i === 0) { rctx.fillStyle = em; rctx.fill(); } else { rctx.strokeStyle = em; rctx.lineWidth = 2.5; rctx.stroke(); }
   });
@@ -583,16 +680,18 @@ function drawRadar(around) {
   rctx.beginPath(); rctx.arc(cx, cy, 9, 0, Math.PI * 2); rctx.stroke();
   rctx.beginPath(); rctx.moveTo(cx - 15, cy); rctx.lineTo(cx + 15, cy); rctx.moveTo(cx, cy - 15); rctx.lineTo(cx, cy + 15); rctx.stroke();
 }
+
+function jumpTo(k) {
+  state.yaw = k.yaw; state.pitch = k.pitch; state.spin = false; $('spin').checked = false;
+  dirty = true;
+}
 radar.addEventListener('click', e => {
   const r = radar.getBoundingClientRect();
   const x = (e.clientX - r.left) * (radar.width / r.width), y = (e.clientY - r.top) * (radar.height / r.height);
-  let best = null, bd = Infinity;
-  for (const k of K.keys) {
-    const [kx, ky] = radarPos(k.yaw, k.pitch), d = Math.hypot(kx - x, ky - y);
-    if (d < bd) { bd = d; best = k; }
-  }
-  state.yaw = best.yaw; state.pitch = best.pitch; state.spin = false; $('spin').checked = false;
-  dirty = true;
+  jumpTo(K.keys.reduce((best, k) => {
+    const [kx, ky] = radarPos(k.yaw, k.pitch), [bx, by] = radarPos(best.yaw, best.pitch);
+    return Math.hypot(kx - x, ky - y) < Math.hypot(bx - x, by - y) ? k : best;
+  }));
 });
 
 function setMode(mode) {
@@ -605,7 +704,9 @@ for (const b of document.querySelectorAll('.modes button')) b.addEventListener('
 $('spin').checked = state.spin;
 $('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
 
-const clampPitch = p => THREE.MathUtils.clamp(p, K.pitches[0], K.pitches[K.pitches.length - 1]);
+// Below the lowest ring there are no drawings; above the highest the top ring's drawings carry on
+// a little, short of straight overhead.
+const clampPitch = p => THREE.MathUtils.clamp(p, K.minPitch, Math.min(K.maxPitch + 5, 85));
 let drag = null;
 stageEl.addEventListener('pointerdown', e => {
   drag = { x: e.clientX, y: e.clientY, yaw: state.yaw, pitch: state.pitch };
@@ -615,7 +716,7 @@ stageEl.addEventListener('pointerdown', e => {
 stageEl.addEventListener('pointermove', e => {
   if (!drag || !K) return;
   state.yaw = (((drag.yaw - (e.clientX - drag.x) * 0.45) % 360) + 360) % 360;
-  state.pitch = clampPitch(drag.pitch + (e.clientY - drag.y) * 0.2);
+  state.pitch = clampPitch(drag.pitch + (e.clientY - drag.y) * 0.3);
   dirty = true;
 });
 const endDrag = () => { drag = null; stageEl.classList.remove('dragging'); };
@@ -623,16 +724,23 @@ stageEl.addEventListener('pointerup', endDrag);
 stageEl.addEventListener('pointercancel', endDrag);
 stageEl.addEventListener('keydown', e => {
   if (!K) return;
-  const step = { ArrowLeft: [-15, 0], ArrowRight: [15, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
-  if (!step) return;
+  const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+  if (!move) return;
   e.preventDefault();
-  // Arrow keys land on key angles so each press shows a finished drawing.
-  state.yaw = (Math.round((state.yaw + step[0]) / 15) * 15 + 360) % 360;
-  if (step[1]) {
-    const ps = K.pitches, i = ps.findIndex(p => p >= Math.round(state.pitch));
-    state.pitch = ps[THREE.MathUtils.clamp((i < 0 ? ps.length - 1 : i) + step[1], 0, ps.length - 1)];
-  } else state.pitch = K.pitches.reduce((a, b) => (Math.abs(b - state.pitch) < Math.abs(a - state.pitch) ? b : a));
-  dirty = true;
+  // Arrow keys land on key angles so each press shows a finished drawing: the next key around the
+  // current ring, or the nearest key on the next ring up or down.
+  const cur = lead || K.keys[0];
+  let pool;
+  if (move[0]) {
+    pool = K.keys.filter(k => k.pitch === cur.pitch && k !== cur)
+      .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+  } else {
+    const rings = [...new Set(K.keys.map(k => k.pitch))].sort((a, b) => a - b);
+    const next = rings[rings.indexOf(cur.pitch) + move[1]];
+    if (next === undefined) return;
+    pool = K.keys.filter(k => k.pitch === next).map(k => ({ k, d: angleBetween(k.dir, cur.dir) })).sort((a, b) => a.d - b.d);
+  }
+  if (pool.length) jumpTo(pool[0].k);
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
 new MutationObserver(() => { dirty = true; }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });

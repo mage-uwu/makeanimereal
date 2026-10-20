@@ -4,6 +4,7 @@
 //
 //   node scripts/render.mjs [--model assets/emerald-pixie.glb] [--out out/renders]
 //        [--yaw-step 30] [--pitches=-15,0,20] [--size 768x1152] [--fov 22]
+//        [--rings=-30:24,0:24,60:12]   (pitch:keys-per-ring; replaces --yaw-step/--pitches)
 //        [--background "#ffffff"] [--anim Walking] [--frames 1] [--pose rest|relaxed]
 //        [--export-mesh out/relaxed-renders/mesh.json]
 import { chromium } from 'playwright-core';
@@ -20,6 +21,7 @@ const { values: opt } = parseArgs({
     out: { type: 'string', default: 'out/renders' },
     'yaw-step': { type: 'string', default: '30' },
     pitches: { type: 'string', default: '-15,0,20' },
+    rings: { type: 'string' },
     size: { type: 'string', default: '768x1152' },
     fov: { type: 'string', default: '22' },
     background: { type: 'string', default: '#ffffff' },
@@ -32,7 +34,12 @@ const { values: opt } = parseArgs({
 
 const [width, height] = opt.size.split('x').map(Number);
 const yawStep = Number(opt['yaw-step']);
-const pitches = opt.pitches.split(',').map(Number);
+// Camera rings around the view sphere: each a pitch and its yaws. Rings near the top need fewer
+// keys for the same spacing, so --rings sets the count per ring.
+const rings = opt.rings
+  ? opt.rings.split(',').map(r => { const [p, n] = r.split(':').map(Number); return { pitch: p, yaws: Array.from({ length: n }, (_, i) => +(i * 360 / n).toFixed(3)) }; })
+  : opt.pitches.split(',').map(Number).map(p => ({ pitch: p, yaws: Array.from({ length: Math.round(360 / yawStep) }, (_, i) => i * yawStep) }));
+const pitches = rings.map(r => r.pitch);
 const frames = Math.max(1, Number(opt.frames));
 const outDir = path.resolve(opt.out);
 
@@ -81,8 +88,8 @@ try {
       await fs.writeFile(path.resolve(opt['export-mesh']), JSON.stringify(mesh));
       console.log(`mesh: ${mesh.position.length / 3} vertices, ${mesh.index.length / 3} triangles -> ${opt['export-mesh']}`);
     }
-    for (const pitch of pitches) {
-      for (let yaw = 0; yaw < 360; yaw += yawStep) {
+    for (const { pitch, yaws } of rings) {
+      for (const yaw of yaws) {
         const dataUrl = await page.evaluate(a => window.shot(a), { yaw, pitch });
         const name = `${clip ? `${clip.name}_f${String(f).padStart(2, '0')}_` : ''}y${String(yaw).padStart(3, '0')}_p${pitch}.png`;
         await fs.writeFile(path.join(outDir, name), Buffer.from(dataUrl.split(',')[1], 'base64'));

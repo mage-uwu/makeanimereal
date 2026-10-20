@@ -58,8 +58,13 @@ function describeView({ yaw, pitch }) {
     : y < 247.5 ? [`THREE-QUARTER BACK view, we see her back and ${side('right')}`, 'face mostly hidden (at most a sliver of cheek), the chest bow and front buttons are NOT visible, mostly back of the hair and back of the dress']
     : y < 292.5 ? [`exact SIDE PROFILE of ${side('right')}, she faces toward the RIGHT edge of the image`, 'only ONE eye visible, nose and chin in silhouette, torso seen edge-on, the chest bow sticks out in profile, one arm in front of the body']
     : [`THREE-QUARTER FRONT view, body turned so we see the front and ${side('right')}`, 'face is seen at an angle, the far eye is partly hidden'];
-  const cam = pitch > 5 ? `camera slightly above, looking down ${pitch}°`
-    : pitch < -5 ? `camera slightly below, looking up ${-pitch}°` : 'camera at eye level';
+  // Image models drift back to eye level, so steep views spell out what the foreshortening does.
+  const cam = pitch > 55 ? `BIRD'S-EYE VIEW: camera high above her, looking steeply down at ${pitch}°, almost straight overhead. The top of her head and her shoulders fill the upper part of the figure and look large; her torso is strongly foreshortened; her legs look very short and her shoes sit just below the skirt. We look DOWN onto the crown of her head, NOT at her face: her face is mostly hidden under her bangs, at most the tip of the nose and chin show. Keep the figure exactly as small as it is in the RENDER, with lots of empty background around it`
+    : pitch > 25 ? `HIGH-ANGLE VIEW: camera well above her, looking down at ${pitch}°. We see the top of her head and the tops of her shoulders; her body is foreshortened, with the head looking larger and the legs shorter than at eye level`
+    : pitch > 5 ? `camera slightly above, looking down ${pitch}°`
+    : pitch < -25 ? `LOW-ANGLE VIEW: camera below her, looking up at ${-pitch}°. Her shoes and legs look larger and her head smaller; we see the underside of her chin`
+    : pitch < -5 ? `camera slightly below, looking up ${-pitch}°`
+    : 'camera at eye level';
   // Name the exact angle too: at 15° steps several views share a band but must differ slightly.
   const exact = y === 0 ? '' : ` (camera orbited exactly ${y <= 180 ? `${y}° toward her left` : `${360 - y}° toward her right`} from straight-on front)`;
   return { facing: `${facing}${exact}; ${cam}`, visible };
@@ -77,7 +82,7 @@ function buildPrompt(view, hasAnchor) {
     hasAnchor ? `The FRONT ANCHOR is an already-finished front view in the target style: keep identity, colors and details consistent with it, but do NOT copy its angle.` : '',
     `Remove all 3D-render artifacts (plastic shading, specular glare, blurry or low-poly textures); interpret them as clean fabric, hair and skin.`,
     notes ? `Character details that must appear correctly at EVERY angle (when visible from this side):\n${notes}` : '',
-    STYLE_RULES,
+    STYLE_RULES.replace('flat solid pure white background', backgroundRule),
     opt.prompt,
   ].filter(Boolean).join('\n');
 }
@@ -174,6 +179,13 @@ async function save(url, file) {
 const rendersDir = path.resolve(opt.renders);
 const outDir = path.resolve(opt.out);
 const manifest = JSON.parse(await fs.readFile(path.join(rendersDir, 'manifest.json'), 'utf8'));
+// Draw on the renders' background. A chroma colour (like the reference sheet's magenta) keys out
+// cleanly, unlike white, which the character's socks and sleeves share.
+const bg = manifest.background;
+const chroma = bg && !['#ffffff', '#fff', 'white', 'none'].includes(bg.toLowerCase());
+var backgroundRule = chroma
+  ? `flat solid chroma-key background of exactly ${bg} (the same colour as the RENDER background), perfectly even, no gradient, no floor, no shadow; never use that colour anywhere on the character`
+  : 'flat solid pure white background';
 let views = manifest.views;
 if (opt.only) {
   const only = new Set(opt.only.split(','));
@@ -197,7 +209,8 @@ async function run(view, anchorUrl) {
     { label: `RENDER (the angle and pose to draw)`, url: await dataUrl(path.join(rendersDir, view.file)) },
     { label: opt['style-only'] ? 'STYLE REFERENCE' : 'CHARACTER REFERENCE (front view, for design and style only)', url: styleUrl },
   ];
-  if (anchorUrl) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
+  // The anchor is an eye-level front view; on near-overhead views it pulls the drawing back to the face.
+  if (anchorUrl && view.pitch <= 55) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
   const t = Date.now();
   try {
     await save(await generate(view, images), outFile);
