@@ -104,11 +104,35 @@ window.exportMesh = () => {
     if (idx) for (let i = 0; i < idx.count; i++) index.push(base + idx.getX(i));
     else for (let i = 0; i < pos.count; i++) index.push(base + i);
   });
-  return { position, index };
+  // The skeleton, and each vertex's most-weighted bone, so drawings mapped onto this shape can
+  // later follow its pose.
+  let skeleton = null;
+  const bone = [];
+  model.traverse(o => {
+    if (!o.isMesh) return;
+    const si = o.geometry.attributes.skinIndex, sw = o.geometry.attributes.skinWeight;
+    if (o.isSkinnedMesh && !skeleton) {
+      const bones = o.skeleton.bones;
+      skeleton = bones.map(b => ({
+        name: b.name, parent: bones.indexOf(b.parent),
+        pos: b.getWorldPosition(new THREE.Vector3()).toArray().map(v => +v.toFixed(4)),
+      }));
+    }
+    for (let i = 0; i < o.geometry.attributes.position.count; i++) {
+      if (!si) { bone.push(-1); continue; }
+      let best = 0;
+      for (let c = 1; c < 4; c++) if (sw.getComponent(i, c) > sw.getComponent(i, best)) best = c;
+      bone.push(si.getComponent(i, best));
+    }
+  });
+  return { position, index, bone, skeleton };
 };
 
 // yaw 0 = camera in front of the character (+Z), positive yaw orbits to the character's left.
-window.shot = ({ yaw, pitch }) => {
+// With depth: true the shot is a depth map instead: gl_FragCoord.z between the given near and far
+// planes, packed into RGB by three.js (packDepthToRGB), transparent where there is no surface.
+const depthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBDepthPacking });
+window.shot = ({ yaw, pitch, depth }) => {
   const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);
   camera.position.set(
     target.x + radius * Math.cos(p) * Math.sin(y),
@@ -116,6 +140,17 @@ window.shot = ({ yaw, pitch }) => {
     target.z + radius * Math.cos(p) * Math.cos(y),
   );
   camera.lookAt(target);
+  if (depth) {
+    const keep = { near: camera.near, far: camera.far, bg: scene.background };
+    camera.near = depth.near; camera.far = depth.far; camera.updateProjectionMatrix();
+    scene.overrideMaterial = depthMaterial; scene.background = null;
+    renderer.setClearColor(0x000000, 0);
+    renderer.render(scene, camera);
+    const url = renderer.domElement.toDataURL('image/png');
+    camera.near = keep.near; camera.far = keep.far; camera.updateProjectionMatrix();
+    scene.overrideMaterial = null; scene.background = keep.bg;
+    return url;
+  }
   renderer.render(scene, camera);
   return renderer.domElement.toDataURL('image/png');
 };

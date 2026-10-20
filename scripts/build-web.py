@@ -16,6 +16,10 @@ one goes a warp atlas (warps/*.png), a few smooth displacement fields at quarter
              so the hidden mesh can bend it ("projected" mode)
   tiles 1-6  stretch toward each neighbouring key drawing (lossless WebP): dense correspondences between the two
              drawings, so one drawing can be stretched toward the next with no model ("flipstretch")
+  tile 7     Neuromation lattice tensor: for each vertex of a shared 75 x 112 grid laid over the
+             drawing, the 3D point of the character it shows (16-bit, split in high and low byte
+             planes), whether the drawing has paint there, and its nearest bone. Every drawing is
+             a view of one latent object, and this is where on it each part of the drawing sits.
 
 A drawing on a flat chroma background (the manifest's background colour) is keyed out; one on
 white falls back to a flood fill from the border.
@@ -29,6 +33,8 @@ import shutil
 from pathlib import Path
 
 import cv2
+
+from latent import KeyCamera, read_depth
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -36,7 +42,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 FIELD_RANGE = 128.0  # px at the output size; fields are stored as (d / FIELD_RANGE + 0.5) in 8 bits
 FIELD_DOWNSAMPLE = 4  # fields are smooth, so quarter resolution holds them
-ATLAS_COLS, ATLAS_ROWS = 4, 2  # tile 0 = fit to mesh, tiles 1..6 = neighbours, tile 7 unused
+ATLAS_COLS, ATLAS_ROWS = 4, 2  # tile 0 = fit to mesh, tiles 1..6 = neighbours, tile 7 = lattice tensor
+LATTICE = (75, 112)  # Neuromation grid: vertices across and down, shared by every key
+LATTICE_RANGE = 1.25  # metres either side of the target that the 16-bit latent coordinates cover
 MAX_NEIGHBOURS = 6
 
 
@@ -172,6 +180,73 @@ def neighbours(views):
     return result
 
 
+def fill_depth(dist):
+    """Depth everywhere: off the surface, take the nearest surface pixel's depth, smoothed, so
+    art drawn beyond the mesh (ribbons, hair) floats at the depth of the body beside it."""
+    hole = np.isnan(dist)
+    _, labels = cv2.distanceTransformWithLabels(hole.astype(np.uint8), cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
+    lut = np.zeros(labels.max() + 1, np.float32)
+    lut[labels[~hole]] = dist[~hole]
+    filled = lut[labels]
+    soft = cv2.GaussianBlur(filled, (0, 0), 8)
+    return np.where(hole, soft, filled).astype(np.float32)
+
+
+def lattice_tensor(cam, dist, fit, alpha, size, target, verts, vert_bone):
+    """Tile 7 for one key: where on the character each lattice vertex of the drawing sits.
+
+    A vertex at frame point x shows the drawing's paint there. The drawing's fit says the render
+    shows that feature at y with y + fit(y) = x; the render's depth map turns y into a 3D point.
+    """
+    W, H = size
+    gx, gy = LATTICE
+    X, Y = np.meshgrid(np.arange(gx) / (gx - 1), np.arange(gy) / (gy - 1))
+    # The vertex is used if the drawing has paint within a cell of it.
+    cell = int(math.ceil(W / (gx - 1)))
+    near_paint = cv2.dilate((alpha > 0.05).astype(np.uint8), np.ones((2 * cell + 1, 2 * cell + 1), np.uint8))
+    valid = near_paint[np.clip((Y * (H - 1)).round().astype(int), 0, H - 1), np.clip((X * (W - 1)).round().astype(int), 0, W - 1)] > 0
+    # Invert the fit by fixed-point iteration: y = x - fit(y).
+    yx, yy = (X * W).astype(np.float32), (Y * H).astype(np.float32)
+    for _ in range(5):
+        fx = cv2.remap(fit[..., 0], yx, yy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        fy = cv2.remap(fit[..., 1], yx, yy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        yx, yy = (X * W - fx).astype(np.float32), (Y * H - fy).astype(np.float32)
+    dh, dw = dist.shape
+    d = cv2.remap(dist, yx / W * dw, yy / H * dh, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    pts = cam.lift(yx / W, yy / H, d.astype(np.float64))
+    # Nearest bone, from the nearest mesh vertex.
+    bone = np.zeros(X.shape, np.uint8)
+    flat = pts[valid]
+    for start in range(0, len(flat), 1024):
+        chunk = flat[start:start + 1024]
+        nearest = ((chunk[:, None, :] - verts[None]) ** 2).sum(-1).argmin(1)
+        bone[np.nonzero(valid)[0][start:start + 1024], np.nonzero(valid)[1][start:start + 1024]] = vert_bone[nearest]
+    q = np.clip((pts - np.asarray(target) + LATTICE_RANGE) / (2 * LATTICE_RANGE), 0, 1)
+    q = (q * 65535 + 0.5).astype(np.uint32)
+    tile = np.zeros((size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE, 3), np.float32)
+    tile[:gy, :gx] = (q >> 8) / 255            # high bytes of x, y, z
+    tile[gy:2 * gy, :gx] = (q & 255) / 255     # low bytes
+    tile[:gy, gx:2 * gx, 0] = valid            # paint here
+    tile[:gy, gx:2 * gx, 1] = bone / 255       # nearest bone
+    return tile, int(valid.sum())
+
+
+def invert_tile(tile):
+    """Exact inverse of an encoded correspondence tile: if A's feature at x sits at x + F(x) in B,
+    then B's feature at y sits at y + G(y) in A, with G(y) = -F(y + G(y)). Using one field and its
+    inverse for a pair (instead of two independent flows) means A stretched halfway toward B and
+    B stretched halfway toward A put every pair of matching points on the same spot."""
+    h, w = tile.shape[:2]
+    f = (tile[..., :2].astype(np.float32) - 0.5) * FIELD_RANGE / FIELD_DOWNSAMPLE  # in tile cells
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    g = -f.copy()
+    for _ in range(12):
+        g = -np.dstack([cv2.remap(f[..., c], gx + g[..., 0], gy + g[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE) for c in (0, 1)])
+    out = tile.copy()
+    out[..., :2] = np.clip(g * FIELD_DOWNSAMPLE / FIELD_RANGE + 0.5, 0, 1)
+    return out
+
+
 def encode_tile(field, size):
     small = cv2.resize(field, (size[0] // FIELD_DOWNSAMPLE, size[1] // FIELD_DOWNSAMPLE), interpolation=cv2.INTER_AREA)
     enc = np.clip(small / FIELD_RANGE + 0.5, 0, 1)
@@ -191,7 +266,6 @@ def main():
     renders, alpha_dir, keys_dir, out, cache = (Path(x) for x in (args.renders, args.alpha, args.keys, args.out, args.cache))
     manifest = json.loads((renders / 'manifest.json').read_text())
     for d in ('keys', 'warps'):
-        shutil.rmtree(out / d, ignore_errors=True)
         (out / d).mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
     bg = manifest.get('background', '#ffffff')
@@ -204,7 +278,13 @@ def main():
         if v not in views:
             print(f'skip {v["file"]}: no drawing')
 
-    # Pass 1: cut out, place in the render frame, fit to the render.
+    cam0 = manifest['cameras'][0]
+    mesh = json.loads((renders / 'mesh.json').read_text())
+    verts = np.asarray(mesh['position'], np.float64).reshape(-1, 3)
+    vert_bone = np.asarray(mesh.get('bone', [0] * len(verts)), np.int64).clip(0, 255)
+    assert 2 * LATTICE[1] <= size[1] // FIELD_DOWNSAMPLE and 2 * LATTICE[0] <= size[0] // FIELD_DOWNSAMPLE
+
+    # Pass 1: cut out, place in the render frame, fit to the render, place on the latent object.
     placed, items = [], []
     for v in views:
         src = keys_dir / v['file']
@@ -232,21 +312,50 @@ def main():
             np.save(fit_file, fit)
         name = Path(v['file']).with_suffix('.webp').name
         # The key drawing itself, untouched apart from the background cut-out and resize.
-        Image.fromarray((drawing * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=90, method=6)
+        if not (out / 'keys' / name).exists() or (out / 'keys' / name).stat().st_mtime < cached.stat().st_mtime:
+            Image.fromarray((drawing * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=90, method=6)
+        tensor_file = cache / (src.stem + '.lattice.npy')
+        if tensor_file.exists() and tensor_file.stat().st_mtime >= fit_file.stat().st_mtime:
+            tensor = np.load(tensor_file)
+            used = int((tensor[:LATTICE[1], LATTICE[0]:2 * LATTICE[0], 0] > 0.5).sum())
+        else:
+            cam = KeyCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], manifest['width'] / manifest['height'])
+            dist = fill_depth(read_depth(renders / manifest['depth']['dir'] / v['file'], cam0['radius'], manifest['depth']['pad']))
+            tensor, used = lattice_tensor(cam, dist, fit, pl[..., 3], size, cam0['target'], verts, vert_bone)
+            np.save(tensor_file, tensor)
         placed.append(pl)
-        items.append({'v': v, 'name': name, 's': s, 'ox': ox, 'oy': oy, 'fit': fit})
-        print(f'{name}  scale {s:.3f}  offset {ox:+.3f},{oy:+.3f}')
+        items.append({'v': v, 'name': name, 's': s, 'ox': ox, 'oy': oy, 'fit': fit, 'tensor': tensor})
+        print(f'{name}  scale {s:.3f}  offset {ox:+.3f},{oy:+.3f}  lattice {used} vertices')
 
     # Pass 2: correspondences between neighbouring drawings, packed with the fit into one atlas.
     near = neighbours([it['v'] for it in items])
     th, tw = size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE
     keys = []
+    measured_tiles = {}
+
+    def measured(i, j):
+        """Optical-flow correspondence tile for drawing i -> drawing j (cached on disk)."""
+        if (i, j) not in measured_tiles:
+            stem_i, stem_j = (Path(items[n]['v']['file']).stem for n in (i, j))
+            cached_pair = cache / f'{stem_i}__{stem_j}.npy'
+            newest = max((cache / (Path(items[n]['v']['file']).stem + '.png')).stat().st_mtime for n in (i, j))
+            if cached_pair.exists() and cached_pair.stat().st_mtime >= newest:
+                tile = np.load(cached_pair).astype(np.float32)
+            else:
+                tile = encode_tile(flow_between(placed[i], placed[j], (placed[i][..., 3] > 0.5).astype(np.float32), 5.0), size)
+                np.save(cached_pair, tile.astype(np.float16))
+            measured_tiles[(i, j)] = tile
+        return measured_tiles[(i, j)]
+
     for i, it in enumerate(items):
         atlas = np.full((th * ATLAS_ROWS, tw * ATLAS_COLS, 3), 0.5, np.float32)
         tiles = [encode_tile(it['fit'], size)]
         for j in near[i]:
-            weight = np.maximum(placed[i][..., 3], 0.0)
-            tiles.append(encode_tile(flow_between(placed[i], placed[j], (weight > 0.5).astype(np.float32), 5.0), size))
+            # The lower-numbered key of each pair owns the measured flow; the other gets its inverse.
+            tiles.append(measured(i, j) if i < j or i not in near[j] else invert_tile(measured(j, i)))
+        while len(tiles) < ATLAS_COLS * ATLAS_ROWS - 1:
+            tiles.append(np.full_like(tiles[0], 0.5))
+        tiles.append(it['tensor'])
         for t, tile in enumerate(tiles):
             r, c = divmod(t, ATLAS_COLS)
             atlas[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
@@ -263,6 +372,7 @@ def main():
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),
         'fieldRange': FIELD_RANGE, 'frame': list(size), 'atlas': [ATLAS_COLS, ATLAS_ROWS],
+        'lattice': {'size': list(LATTICE), 'range': LATTICE_RANGE, 'tile': ATLAS_COLS * ATLAS_ROWS - 1},
         'keys': keys,
     }, indent=1))
     # The viewer never shows the model, so it gets only the posed shape (render.mjs --export-mesh).

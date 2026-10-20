@@ -6,7 +6,7 @@
 //        [--yaw-step 30] [--pitches=-15,0,20] [--size 768x1152] [--fov 22]
 //        [--rings=-30:24,0:24,60:12]   (pitch:keys-per-ring; replaces --yaw-step/--pitches)
 //        [--background "#ffffff"] [--anim Walking] [--frames 1] [--pose rest|relaxed]
-//        [--export-mesh out/relaxed-renders/mesh.json]
+//        [--export-mesh out/relaxed-renders/mesh.json] [--depth]
 import { chromium } from 'playwright-core';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -28,6 +28,7 @@ const { values: opt } = parseArgs({
     anim: { type: 'string' },
     pose: { type: 'string', default: 'rest' }, // rest (the model's own pose) | relaxed (arms down)
     'export-mesh': { type: 'string' }, // also write the posed mesh as JSON (first frame)
+    depth: { type: 'boolean', default: false }, // also write a depth map per view into <out>/depth
     frames: { type: 'string', default: '1' },
   },
 });
@@ -40,6 +41,9 @@ const rings = opt.rings
   ? opt.rings.split(',').map(r => { const [p, n] = r.split(':').map(Number); return { pitch: p, yaws: Array.from({ length: n }, (_, i) => +(i * 360 / n).toFixed(3)) }; })
   : opt.pitches.split(',').map(Number).map(p => ({ pitch: p, yaws: Array.from({ length: Math.round(360 / yawStep) }, (_, i) => i * yawStep) }));
 const pitches = rings.map(r => r.pitch);
+// Depth maps cover the character only, so tight planes around the orbit keep their precision.
+const DEPTH_PAD = 2.2;
+const depthRange = radius => ({ near: radius - DEPTH_PAD, far: radius + DEPTH_PAD });
 const frames = Math.max(1, Number(opt.frames));
 const outDir = path.resolve(opt.out);
 
@@ -93,6 +97,11 @@ try {
         const dataUrl = await page.evaluate(a => window.shot(a), { yaw, pitch });
         const name = `${clip ? `${clip.name}_f${String(f).padStart(2, '0')}_` : ''}y${String(yaw).padStart(3, '0')}_p${pitch}.png`;
         await fs.writeFile(path.join(outDir, name), Buffer.from(dataUrl.split(',')[1], 'base64'));
+        if (opt.depth) {
+          const url = await page.evaluate(a => window.shot(a), { yaw, pitch, depth: depthRange(cam.radius) });
+          await fs.mkdir(path.join(outDir, 'depth'), { recursive: true });
+          await fs.writeFile(path.join(outDir, 'depth', name), Buffer.from(url.split(',')[1], 'base64'));
+        }
         views.push({ file: name, yaw, pitch, frame: f, time, anim: opt.anim || null });
         process.stdout.write(`\r${views.length} views`);
       }
@@ -102,6 +111,7 @@ try {
   await fs.writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({
     model: opt.model, width, height, fov: Number(opt.fov), yawStep, pitches, frames,
     anim: opt.anim || null, pose: opt.pose, background: opt.background, cameras, views,
+    depth: opt.depth ? { dir: 'depth', pad: DEPTH_PAD, packing: 'three RGBDepthPacking of gl_FragCoord.z' } : null,
   }, null, 2));
   console.log(`wrote ${views.length} renders to ${path.relative(process.cwd(), outDir)}`);
 } finally {

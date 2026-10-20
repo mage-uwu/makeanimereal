@@ -39,7 +39,7 @@ overhead), every 15 deg around up to +45 deg, then 18 and 12 keys on the top rin
 ```sh
 RINGS="--pose relaxed --rings=-30:24,-15:24,0:24,15:24,30:24,45:24,60:18,75:12"
 # renders on the reference sheet's magenta, the same views with no background, and the posed mesh
-npm run render -- $RINGS --background "#c006a6" --out out/g2-renders --export-mesh out/g2-renders/mesh.json
+npm run render -- $RINGS --background "#c006a6" --out out/g2-renders --export-mesh out/g2-renders/mesh.json --depth
 npm run render -- $RINGS --background none --out out/g2-alpha
 npm run stylize -- --renders out/g2-renders --out out/g2          # ~$4.20 for 174 keys
 pip install opencv-python-headless                                # plus Pillow and numpy
@@ -63,10 +63,38 @@ mixes two drawings on a pixel:
   drawings along dense correspondences matched between the drawings themselves (optical flow),
   as far as the camera has moved toward each. It hands over halfway to the next key.
 - **Flipbook**: the nearest drawing held still, like a 2D game sprite.
+- **Neuromation**: every key drawing is treated as one view of a single latent object. Each vertex
+  of a 75 x 112 lattice over each drawing knows the 3D point of the character it shows, traced
+  through the drawing's fit to its render and the render's depth map. At any camera, a point sits
+  at its 3D position plus the drawn proportions of up to three nearby keys, blended by closeness.
+  That offset depends only on the 3D point, so every drawing lands on the same shape and a hand-off
+  swaps paint, not shape. Art off the mesh (ribbons) follows the drawing-to-drawing correspondences
+  (each pair measured once and inverted for the reverse direction). Triangles that fold or stretch
+  past 3x are dropped and filled, only inside the lead drawing's outline and only where it left a
+  hole, by the next drawing. No depth maps or mesh are needed at runtime.
 
 `build-web.py` writes per key the untouched drawing (`keys/`) and a warp atlas (`warps/`, lossless
-WebP): tile 0 is the fit to the mesh, tiles 1-6 the correspondences to each neighbouring key, the
-nearest one in each direction around it on the view sphere.
+WebP): tile 0 is the fit to the mesh, tiles 1-6 the correspondences to each neighbouring key (the
+nearest one in each direction around it on the view sphere), tile 7 the Neuromation lattice tensor
+(16-bit 3D point per vertex in high/low byte planes, paint mask, nearest bone). `scripts/latent.py`
+rebuilds the key cameras and decodes the renderer's depth maps (`render.mjs --depth`).
+
+`mesh.json` also carries the rig's skeleton and each vertex's main bone; the viewer can overlay the
+skeleton, and the lattice records each vertex's bone so drawings can later follow a posed skeleton.
+
+### Pose check (MediaPipe)
+
+```sh
+pip install mediapipe        # Linux also needs libegl1
+curl -L -o out/models/pose_landmarker_heavy.task \
+  https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task
+python3 scripts/pose_check.py   # -> out/pose-check.json, prints drawings to consider redrawing
+```
+
+The rig's own skeleton is the pose source: projected through each key camera and the drawing's fit,
+it lands on the drawn joints in every view. MediaPipe, trained on photos of people, is used only as
+an independent check on views where it is reliable (face visible, no steeper than 45 degrees, 75 of
+174 keys here); it flags drawings whose limbs disagree with the rig.
 
 The viewer gets only the posed shape (`mesh.json`, exported by the renderer with the same three.js
 code that made the renders), not the GLB: no textures, skeleton or animation. `web/pose.js` holds
