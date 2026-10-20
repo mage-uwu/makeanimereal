@@ -767,11 +767,11 @@ function renderRoom() {
   if (!state.room || !roomRenderer) return;
   const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
   // Same camera as the character's frame, widened to the whole window around that frame.
-  // The true, upright camera, with its frame (the centred 2:3 box) widened to the whole window.
-  roomCam.position.copy(camera.position);
-  roomCam.quaternion.copy(camera.quaternion);
+  // The world camera, with its frame (the centred 2:3 box) widened to the whole window.
+  roomCam.position.copy(worldCam.position);
+  roomCam.quaternion.copy(worldCam.quaternion);
   roomCam.updateMatrixWorld(true);
-  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(camera.projectionMatrix);
+  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(worldCam.projectionMatrix);
   roomCam.projectionMatrixInverse.copy(roomCam.projectionMatrix).invert();
   // Room as seen from her: rotated by her heading, shifted by her position.
   const h = -walker.heading * D2R;
@@ -939,15 +939,19 @@ function render() {
   if (neuro) {
     latentViewProjection(lead, stretchTowards(lead, camDir));
     setView(latentCam, latentFrame);
+    setWorld(latentAngles.dYaw, latentAngles.dPitch, latentFrame);
   } else {
     lead.vantageCam ??= vantageCamera(lead);
     setView(lead.vantageCam.cam, lead.vantageCam.frame);
+    // On a key angle the camera sits exactly on the key, so its offsets apply in full.
+    const dy = lead.yaw + lead.vantage.d_yaw - state.yaw, dp = lead.pitch + lead.vantage.d_pitch - state.pitch;
+    setWorld(onKey ? dy : lead.vantage.d_yaw, onKey ? dp : lead.vantage.d_pitch, lead.vantageCam.frame);
   }
   upright = uprightFit();
   renderer.autoClear = false;
   renderer.clear();
   renderRoom();
-  renderer.render(backdrop, camera);
+  renderer.render(backdrop, worldCam);
   renderer.clearDepth();
   renderer.render(scene, camera);
   if (neuro) {
@@ -1046,7 +1050,18 @@ function vantageCamera(k) {
   return { cam, vp, frame };
 }
 
-const latentFrame = new THREE.Matrix4();
+const latentFrame = new THREE.Matrix4(), latentAngles = { dYaw: 0, dPitch: 0 };
+
+// The world camera follows the sprite: the same yaw, height and framing the drawing depicts, but
+// never its roll. A drawing's noon (straight up in the image) is her vertical, so the world's
+// vertical must project straight up too: walls run parallel to her and the floor is square to her.
+const worldCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+function setWorld(dYaw, dPitch, frame) {
+  worldCam.fov = K.fov; worldCam.aspect = K.aspect; worldCam.updateProjectionMatrix();
+  placeCamera(worldCam, state.yaw + dYaw, state.pitch + dPitch, K.radius);
+  worldCam.projectionMatrix.premultiply(frame);
+  worldCam.projectionMatrixInverse.copy(worldCam.projectionMatrix).invert();
+}
 
 // The camera the sprite is actually seen through: a drawing's learned vantage on a key angle and in
 // flipbook, the blended latent camera between keys in Neuromation. The room, the floor shadow and
@@ -1061,16 +1076,14 @@ function setView(cam, frame) {
   viewCam.projectionMatrixInverse.copy(viewCam.projectionMatrix).invert();
 }
 
-// The world is always seen through the true, upright camera. A drawing depicts a slightly different
-// vantage (its learned one), so it is fitted onto the world instead: the rig's skeleton projected
-// through the drawing's camera is matched to the same skeleton through the true camera by a 2D
-// rotation, uniform scale and shift (feet weighted 3x, so she stays planted). That removes the
-// drawing's roll and scale error and keeps her upright on the floor.
+// The sprite's camera and the world camera differ only by the drawing's roll. The rig's skeleton,
+// projected through both, gives the uniform scale and shift that plants her feet on the world's
+// floor (feet weighted 3x); there is no rotation, so her noon stays the world's vertical.
 let upright = { clip: new THREE.Matrix4(), canvas: [1, 0, 0, 1, 0, 0] };
 function uprightFit() {
   const asp = K.aspect;
   const sv = new THREE.Matrix4().multiplyMatrices(viewCam.projectionMatrix, viewCam.matrixWorldInverse);
-  const tv = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const tv = new THREE.Matrix4().multiplyMatrices(worldCam.projectionMatrix, worldCam.matrixWorldInverse);
   const P = [], Q = [], Wt = [];
   for (const b of skeleton) {
     const p = b.pos.clone().applyMatrix4(sv), q = b.pos.clone().applyMatrix4(tv);
@@ -1084,7 +1097,8 @@ function uprightFit() {
     const px = p[0] - pc[0], py = p[1] - pc[1], qx = Q[j][0] - qc[0], qy = Q[j][1] - qc[1];
     re += Wt[j] * (qx * px + qy * py); im += Wt[j] * (qy * px - qx * py); den += Wt[j] * (px * px + py * py);
   });
-  const a = re / den, b = im / den, tx = qc[0] - (a * pc[0] - b * pc[1]), ty = qc[1] - (b * pc[0] + a * pc[1]);
+  // No rotation: the drawing's noon stays straight up. Only scale and shift, to plant her feet.
+  const a = re / den, b = 0, tx = qc[0] - (a * pc[0] - b * pc[1]), ty = qc[1] - (b * pc[0] + a * pc[1]);
   // In NDC: x' = a x - (b/asp) y + tx/asp, y' = b asp x + a y + ty; as a clip-space matrix:
   const clip = new THREE.Matrix4().set(a, -b / asp, 0, tx / asp, b * asp, a, 0, ty, 0, 0, 1, 0, 0, 0, 0, 1);
   // The same map in canvas pixels (y down) for drawings shown flat.
@@ -1110,6 +1124,7 @@ function latentViewProjection(lead, towards) {
   const sc = Math.exp(mix('scale')), tx = mix('tx'), ty = mix('ty');
   // Framing in clip space: x' = s x + 2 tx w, y' = s y - 2 ty w (frame fractions, y down).
   latentFrame.set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  latentAngles.dYaw = mix('d_yaw'); latentAngles.dPitch = mix('d_pitch');
   latentVP = latentFrame.clone().multiply(latentCam.projectionMatrix).multiply(latentCam.matrixWorldInverse);
   return latentVP;
 }
@@ -1118,7 +1133,7 @@ function latentViewProjection(lead, towards) {
 // the drawings are rotating through): the pose every drawing is tied to.
 function drawSkeleton() {
   const W = flat.width, H = flat.height, em = getComputedStyle(document.documentElement).getPropertyValue('--emerald').trim();
-  const vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const vp = new THREE.Matrix4().multiplyMatrices(worldCam.projectionMatrix, worldCam.matrixWorldInverse);
   const at = v => { const p = v.clone().applyMatrix4(vp); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
   ctx.lineWidth = Math.max(2, W / 300);
   ctx.strokeStyle = em; ctx.fillStyle = em;
