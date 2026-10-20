@@ -27,6 +27,8 @@ OPENROUTER_API_KEY=sk-or-... npm run stylize
 npm run viewer   # then open http://localhost:8000/viewer/  (?set=out/renders shows the raw renders)
 ```
 
+Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` endpoint automatically; `--endpoint chat|images` forces one. Each run prints its OpenRouter cost.
+
 `OPENROUTER_BASE_URL` overrides the API endpoint, and `OPENROUTER_MODEL` sets the default model.
 
 ## Cost
@@ -38,6 +40,7 @@ Measured per sprite (one angle of one frame), at about 840x1260:
 | `google/gemini-3.1-flash-lite-image` (default) | ~$0.032 | needs `assets/emerald-pixie-notes.txt` to keep reference-only details (ribbons, plain back) |
 | `google/gemini-2.5-flash-image` | ~$0.036 | follows the 3D render closely and drops reference-only details |
 | `google/gemini-3.1-flash-image` | ~$0.09 | best at adding reference-only details |
+| `tencent/hy-image-v3.5-preview` | ~$0.024 + input images? | image-only model, uses OpenRouter's `/images` endpoint (picked automatically); not tested yet |
 
 36 angles is about $1.15 with flash-lite. OpenRouter refuses image requests once the account balance is under $1.
 

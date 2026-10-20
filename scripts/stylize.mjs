@@ -5,6 +5,7 @@
 //
 //   OPENROUTER_API_KEY=... node scripts/stylize.mjs [--renders out/renders] [--out out/stylized]
 //        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model google/gemini-3.1-flash-lite-image] [--notes assets/emerald-pixie-notes.txt]
+//        [--endpoint auto|chat|images]
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -19,6 +20,7 @@ const { values: opt } = parseArgs({
     'style-only': { type: 'boolean', default: false },
     // Plain-text list of design details the model must keep at every angle (skipped if missing).
     notes: { type: 'string', default: 'assets/emerald-pixie-notes.txt' },
+    endpoint: { type: 'string', default: 'auto' }, // auto | chat | images
     model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite-image' },
     prompt: { type: 'string', default: '' },
     concurrency: { type: 'string', default: '4' },
@@ -81,17 +83,33 @@ function buildPrompt(view, hasAnchor) {
 const mimeOf = f => ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' })[path.extname(f).toLowerCase()];
 const dataUrl = async f => `data:${mimeOf(f)};base64,${(await fs.readFile(f)).toString('base64')}`;
 
-// images: [{ label, url }] — each image is preceded by its label so the model knows which is which.
-async function generate(view, images) {
-  const body = {
+// Image-only models (e.g. tencent/hy-image-v3.5-preview, Grok Imagine) live on /images, not
+// /chat/completions. 'auto' starts on chat and switches when OpenRouter says so.
+let endpoint = opt.endpoint;
+let totalCost = 0;
+
+// images: [{ label, url }]. On chat each image is preceded by its label; /images takes a flat list,
+// so the prompt refers to them by position instead.
+function requestFor(view, images) {
+  const hasAnchor = images.some(i => i.label.startsWith('FRONT ANCHOR'));
+  if (endpoint === 'images') {
+    const order = images.map((img, i) => `Image ${i + 1} is the ${img.label}.`).join(' ');
+    return ['images', {
+      model: opt.model,
+      prompt: `${order}\n${buildPrompt(view, hasAnchor)}\nRemember: ${describeView(view).facing}.`,
+      input_references: images.map(i => i.url),
+    }];
+  }
+  return ['chat/completions', {
     model: opt.model,
     modalities: ['image', 'text'],
     // OpenRouter reserves credit for the worst case up front; one image is ~1.3k tokens, so cap it.
     max_tokens: 4096,
+    usage: { include: true },
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: buildPrompt(view, images.some(i => i.label.startsWith('FRONT ANCHOR'))) },
+        { type: 'text', text: buildPrompt(view, hasAnchor) },
         ...images.flatMap(({ label, url }) => [
           { type: 'text', text: `${label}:` },
           { type: 'image_url', image_url: { url } },
@@ -99,20 +117,41 @@ async function generate(view, images) {
         { type: 'text', text: `Now draw the illustration. Remember: ${describeView(view).facing}.` },
       ],
     }],
-  };
+  }];
+}
+
+function imageFrom(json) {
+  const chat = json?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+  if (chat) return chat;
+  const d = json?.data?.[0];
+  if (d?.b64_json) return `data:${d.media_type || 'image/png'};base64,${d.b64_json}`;
+  return d?.url || null;
+}
+
+async function generate(view, images) {
   for (let attempt = 1; ; attempt++) {
+    const [route, body] = requestFor(view, images);
     const headers = { 'content-type': 'application/json', 'x-title': 'makeanimereal' };
     if (KEY) headers.authorization = `Bearer ${KEY}`;
-    const res = await fetch(`${API}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const res = await fetch(`${API}/${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
     const text = await res.text();
     let json;
     try { json = JSON.parse(text); } catch { json = null; }
-    const img = json?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-    if (res.ok && img) return img;
+    const img = imageFrom(json);
+    if (res.ok && img) {
+      totalCost += Number(json.usage?.cost ?? json.cost ?? json.data?.[0]?.cost ?? 0);
+      return img;
+    }
     const err = json?.error?.message || text.slice(0, 300);
+    if (endpoint === 'auto' && /api\/v1\/images/.test(err)) {
+      endpoint = 'images';
+      console.warn(`  ${opt.model} is image-only, switching to the /images endpoint`);
+      attempt--;
+      continue;
+    }
     // Auth and real out-of-credit errors won't fix themselves; everything else (429, 5xx, empty
     // image, a 402 that only means credit is reserved by in-flight requests) gets retried.
-    const fatal = [400, 401, 403].includes(res.status) || (res.status === 402 && !/in-flight/i.test(err));
+    const fatal = [400, 401, 403, 404].includes(res.status) || (res.status === 402 && !/in-flight/i.test(err));
     if (fatal || attempt >= 4) {
       throw new Error(`OpenRouter ${res.status}: ${err || 'no image in response'}`);
     }
@@ -163,7 +202,7 @@ async function run(view, anchorUrl) {
   } catch (e) {
     failed.push({ file: view.file, error: e.message });
     console.error(`fail ${view.file}: ${e.message}`);
-    if (/^OpenRouter 40[123]/.test(e.message)) throw e; // auth/credit problems: stop everything
+    if (/^OpenRouter 40[1234]/.test(e.message)) throw e; // auth/credit problems: stop everything
   }
 }
 
@@ -198,6 +237,7 @@ if (!opt['dry-run']) {
     views: manifest.views.filter(v => doneFiles.has(v.file)),
     failed,
   }, null, 2));
-  console.log(`${done.length} stylized, ${failed.length} failed -> ${path.relative(process.cwd(), outDir)}`);
+  console.log(`${done.length} stylized, ${failed.length} failed -> ${path.relative(process.cwd(), outDir)}`
+    + (totalCost ? ` (OpenRouter cost this run: $${totalCost.toFixed(4)})` : ''));
   if (failed.length) process.exitCode = 1;
 }
