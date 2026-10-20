@@ -14,7 +14,7 @@ one goes a warp atlas (warps/*.png), a few smooth displacement fields at quarter
 
   tile 0     fit to mesh: moves the drawing's features (eyes, bow, buttons, hems) onto the render's,
              so the hidden mesh can bend it ("projected" mode)
-  tiles 1-6  stretch toward each neighbouring key drawing: dense correspondences between the two
+  tiles 1-6  stretch toward each neighbouring key drawing (lossless WebP): dense correspondences between the two
              drawings, so one drawing can be stretched toward the next with no model ("flipstretch")
 
 A drawing on a flat chroma background (the manifest's background colour) is keyed out; one on
@@ -148,23 +148,26 @@ def direction(yaw, pitch):
 
 
 def neighbours(views):
-    """For each key, the keys around it on the view sphere: within 1.6x its nearest neighbour's
-    angle, at most MAX_NEIGHBOURS, picked to spread around it rather than bunch on one side."""
+    """For each key, up to MAX_NEIGHBOURS keys around it on the view sphere, the nearest one in each
+    direction: candidates (within 2.5x the nearest key's angle, so a key on a dense ring near the top
+    still reaches the rings above and below) are taken nearest first, each only if it points at
+    least 35 degrees away from those already taken."""
     dirs = np.array([direction(v['yaw'], v['pitch']) for v in views])
     ang = np.degrees(np.arccos(np.clip(dirs @ dirs.T, -1, 1)))
     result = []
     for i in range(len(views)):
+        def heading(j):  # direction of key j from key i, on the plane touching the sphere at i
+            d = dirs[j] - dirs[i]
+            d = d - dirs[i] * np.dot(d, dirs[i])
+            return d / (np.linalg.norm(d) + 1e-12)
+
         order = [j for j in np.argsort(ang[i]) if j != i]
-        nearest = ang[i, order[0]]
-        cands = [j for j in order if ang[i, j] <= nearest * 1.6]
         picked = []
-        for j in cands:
-            # skip a candidate almost in the same direction as one already picked
-            dj = dirs[j] - dirs[i]
-            if all(np.dot(dj, dirs[k] - dirs[i]) / (np.linalg.norm(dj) * np.linalg.norm(dirs[k] - dirs[i]) + 1e-9) < 0.94 for k in picked):
-                picked.append(j)
-            if len(picked) == MAX_NEIGHBOURS:
+        for j in order:
+            if ang[i, j] > ang[i, order[0]] * 2.5 or len(picked) == MAX_NEIGHBOURS:
                 break
+            if all(np.dot(heading(j), heading(k)) < math.cos(math.radians(35)) for k in picked):
+                picked.append(j)
         result.append(picked)
     return result
 
@@ -221,7 +224,12 @@ def main():
         drawing = np.asarray(cut.resize(size, Image.LANCZOS)).astype(np.float32) / 255
         render = np.asarray(Image.open(alpha_dir / v['file']).convert('RGBA').resize(size, Image.LANCZOS)).astype(np.float32) / 255
         pl = place(drawing, s, ox, oy)
-        fit = flow_between(render, pl, (render[..., 3] > 0.5).astype(np.float32), 9.0)
+        fit_file = cache / (src.stem + '.fit.npy')
+        if fit_file.exists() and fit_file.stat().st_mtime >= cached.stat().st_mtime:
+            fit = np.load(fit_file)
+        else:
+            fit = flow_between(render, pl, (render[..., 3] > 0.5).astype(np.float32), 9.0)
+            np.save(fit_file, fit)
         name = Path(v['file']).with_suffix('.webp').name
         # The key drawing itself, untouched apart from the background cut-out and resize.
         Image.fromarray((drawing * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=90, method=6)
@@ -242,8 +250,9 @@ def main():
         for t, tile in enumerate(tiles):
             r, c = divmod(t, ATLAS_COLS)
             atlas[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
-        wname = Path(it['v']['file']).with_suffix('.png').name
-        Image.fromarray((atlas * 255 + 0.5).astype(np.uint8)).save(out / 'warps' / wname)
+        wname = Path(it['v']['file']).with_suffix('.webp').name
+        # Lossless: the fields are displacements, and lossy noise would make the drawing shimmer.
+        Image.fromarray((atlas * 255 + 0.5).astype(np.uint8)).save(out / 'warps' / wname, 'WEBP', lossless=True, quality=100, method=6)
         keys.append({'file': f'keys/{it["name"]}', 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
                      's': round(it['s'], 5), 'ox': round(it['ox'], 5), 'oy': round(it['oy'], 5),
                      'neighbours': [int(j) for j in near[i]]})

@@ -93,7 +93,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 }
 .chip.key { background: var(--emerald); color: var(--sheet); }
 .weights { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.weights li { display: grid; grid-template-columns: 82px minmax(0, 1fr) 60px; gap: 10px; align-items: center; font: 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
+.weights li { display: grid; grid-template-columns: 82px minmax(0, 1fr) 84px; gap: 10px; align-items: center; font: 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
 .bar { height: 8px; background: color-mix(in srgb, var(--rule) 60%, transparent); border-radius: 2px; overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--emerald); border-radius: 2px; }
 .weights .pct { text-align: right; color: var(--muted); }
@@ -128,7 +128,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <canvas id="flat"></canvas>
         <div class="loading" id="loading"><strong>Loading</strong><span id="progress">key drawings</span></div>
       </div>
-      <div class="hint">Drag to orbit · Arrow keys step to the next key · Click the key map to jump</div>
+      <div class="hint" id="hint">Drag to orbit · Arrow keys step to the next key · Click the key map to jump</div>
     </div>
 
     <div class="sheet">
@@ -204,18 +204,34 @@ const D2R = Math.PI / 180;
 const dirOf = (yaw, pitch) => new THREE.Vector3(Math.cos(pitch * D2R) * Math.sin(yaw * D2R), Math.sin(pitch * D2R), Math.cos(pitch * D2R) * Math.cos(yaw * D2R));
 const angleBetween = (a, b) => Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1)) / D2R;
 
+// Drawings stream in nearest-first from wherever the camera is, so the viewer starts as soon as
+// the ones around the opening angle have arrived. Only loaded drawings are ever used.
+const image = src => new Promise((res, rej) => {
+  const img = new Image();
+  img.onload = () => res(img);
+  img.onerror = () => rej(new Error(`Could not load ${src}`));
+  img.src = src;
+});
+async function fetchKey(k) {
+  if (!k.loading) k.loading = Promise.all([image(k.file), image(k.warps)]).then(([img, warpImg]) => {
+    Object.assign(k, { img, warpImg, ready: true });
+    K.loaded++;
+    dirty = true;
+  });
+  return k.loading;
+}
+function streamKeys() {
+  const next = () => {
+    const camDir = dirOf(state.yaw, state.pitch);
+    const k = K.keys.filter(x => !x.loading).sort((a, b) => angleBetween(camDir, a.dir) - angleBetween(camDir, b.dir))[0];
+    if (k) fetchKey(k).then(next, next);
+  };
+  for (let i = 0; i < 6; i++) next();
+}
+
 async function load() {
   K = await (await fetch('keys.json')).json();
-  let done = 0;
-  const total = K.keys.length * 2 + 1;
-  const tick = () => { $('progress').textContent = `${++done} of ${total} files`; };
-  const image = src => new Promise((res, rej) => {
-    const img = new Image();
-    img.onload = () => { tick(); res(img); };
-    img.onerror = () => rej(new Error(`Could not load ${src}`));
-    img.src = src;
-  });
-  await Promise.all(K.keys.map(async k => { [k.img, k.warpImg] = await Promise.all([image(k.file), image(k.warps)]); }));
+  K.loaded = 0;
   for (const k of K.keys) k.dir = dirOf(k.yaw, k.pitch);
   for (const k of K.keys) {
     k.near = k.neighbours.map(i => K.keys[i]);
@@ -225,8 +241,11 @@ async function load() {
   const pitches = K.keys.map(k => k.pitch);
   K.minPitch = Math.min(...pitches);
   K.maxPitch = Math.max(...pitches);
-  const mesh = await (await fetch('mesh.json')).json();
-  tick();
+  const camDir = dirOf(state.yaw, state.pitch);
+  const first = [...K.keys].sort((a, b) => angleBetween(camDir, a.dir) - angleBetween(camDir, b.dir)).slice(0, 8);
+  $('progress').textContent = 'the nearest key drawings';
+  const [mesh] = await Promise.all([fetch('mesh.json').then(r => r.json()), ...first.map(fetchKey)]);
+  streamKeys();
   return mesh;
 }
 
@@ -290,7 +309,7 @@ function keyData(k) {
 // flicker while the camera rests near that line.
 let lead = null;
 function ranked(camDir) {
-  const list = K.keys.map(k => ({ key: k, angle: angleBetween(camDir, k.dir) })).sort((a, b) => a.angle - b.angle).slice(0, 4);
+  const list = K.keys.filter(k => k.ready).map(k => ({ key: k, angle: angleBetween(camDir, k.dir) })).sort((a, b) => a.angle - b.angle).slice(0, 4);
   const held = list.findIndex(a => a.key === lead);
   if (held > 0 && list[held].angle - list[0].angle < 0.6) list.unshift(...list.splice(held, 1));
   lead = list[0].key;
@@ -633,6 +652,9 @@ function render() {
 const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 
 function updateSheet(around, onKey, towards) {
+  $('hint').textContent = K.loaded < K.keys.length
+    ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
+    : 'Drag to orbit · Arrow keys step to the next key · Click the key map to jump';
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
@@ -668,8 +690,10 @@ function drawRadar(rows) {
   }
   for (const k of K.keys) {
     const [x, y] = radarPos(k.yaw, k.pitch);
+    rctx.globalAlpha = k.ready ? 1 : 0.35;
     rctx.fillStyle = muted; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, Math.PI * 2); rctx.fill();
   }
+  rctx.globalAlpha = 1;
   rows.forEach((r, i) => {
     const [x, y] = radarPos(r.key.yaw, r.key.pitch);
     rctx.beginPath(); rctx.arc(x, y, i === 0 ? 11 : 7, 0, Math.PI * 2);
@@ -682,6 +706,7 @@ function drawRadar(rows) {
 }
 
 function jumpTo(k) {
+  if (!k.ready) fetchKey(k);
   state.yaw = k.yaw; state.pitch = k.pitch; state.spin = false; $('spin').checked = false;
   dirty = true;
 }

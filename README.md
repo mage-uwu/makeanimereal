@@ -31,34 +31,46 @@ Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` en
 
 `OPENROUTER_BASE_URL` overrides the API endpoint, and `OPENROUTER_MODEL` sets the default model.
 
-## Web viewer (anime graphics on a hidden 3D model)
+## Web viewer (anime key drawings you can orbit freely)
+
+Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly
+overhead), every 15 deg around up to +45 deg, then 18 and 12 keys on the top rings.
 
 ```sh
-# 72 key angles in the relaxed pose, plus the same views with a transparent background
-npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --out out/relaxed-renders --export-mesh out/relaxed-renders/mesh.json
-npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --background none --out out/relaxed-alpha
-npm run stylize -- --renders out/relaxed-renders --out out/relaxed
-pip install opencv-python-headless   # plus Pillow and numpy
-python3 scripts/build-web.py          # -> out/web (page, key drawings, fit fields, mesh.json), ~6 MB
+RINGS="--pose relaxed --rings=-30:24,-15:24,0:24,15:24,30:24,45:24,60:18,75:12"
+# renders on the reference sheet's magenta, the same views with no background, and the posed mesh
+npm run render -- $RINGS --background "#c006a6" --out out/g2-renders --export-mesh out/g2-renders/mesh.json
+npm run render -- $RINGS --background none --out out/g2-alpha
+npm run stylize -- --renders out/g2-renders --out out/g2          # ~$4.20 for 174 keys
+pip install opencv-python-headless                                # plus Pillow and numpy
+python3 scripts/build-web.py --renders out/g2-renders --alpha out/g2-alpha --keys out/g2 \
+  --out out/web2 --cache out/cache2                               # ~21 MB, streamed nearest-first
 ```
 
-`web/index.html` is the viewer. Key drawings are never interpolated: on a key angle the viewer
-shows that drawing exactly as drawn. Interpolation only lives between keys, and the 3D model is
-never drawn there either; it is an invisible shape that bends the nearest key drawing:
+Draw on a chroma background from the start: the renders and the drawings both use the reference
+sheet's magenta, so `build-web.py` keys the background out (and removes magenta spill from edges)
+instead of guessing which white belongs to her socks.
 
-- `build-web.py` cuts each drawing out of its background, untouched otherwise, and measures how it
-  fits its render: a scale and offset from the silhouettes (`keys.json`) and a smooth optical-flow
-  field (`fields/*.png`) that moves the drawing's eyes, bow and hems onto the render's.
-- Between keys the viewer projects the nearest key drawing onto the mesh from the camera it was
-  drawn for and views the mesh from the current camera, so the drawing turns with the body. The
-  fit field eases in from none at the key to all of it at the hand-off, halfway to the next key.
-- Surfaces the lead drawing's camera could not see are taken whole from the next drawing that did.
-  Where nothing was drawn the mesh stays invisible. Two drawings are never mixed on a pixel.
-- Art off the mesh (the ribbons) comes from the same drawing on a camera-facing card behind her.
+The viewer (`web/index.html`) never interpolates a key drawing: on a key angle it shows that
+drawing exactly as drawn. Interpolation only lives between keys, in one of three modes, and never
+mixes two drawings on a pixel:
+
+- **Projected**: the nearest drawing is projected onto an invisible 3D mesh of her from the camera
+  it was drawn for and seen from the current camera, so it bends with her shape. Its fit to the
+  mesh (a stored flow field) eases in from none at the key to all of it at the hand-off. Surfaces
+  it could not see come whole from the next drawing that did; where nothing was drawn, nothing shows.
+- **Flipstretch**: no model. The nearest drawing is stretched toward up to two neighbouring
+  drawings along dense correspondences matched between the drawings themselves (optical flow),
+  as far as the camera has moved toward each. It hands over halfway to the next key.
+- **Flipbook**: the nearest drawing held still, like a 2D game sprite.
+
+`build-web.py` writes per key the untouched drawing (`keys/`) and a warp atlas (`warps/`, lossless
+WebP): tile 0 is the fit to the mesh, tiles 1-6 the correspondences to each neighbouring key, the
+nearest one in each direction around it on the view sphere.
 
 The viewer gets only the posed shape (`mesh.json`, exported by the renderer with the same three.js
-code that made the renders), not the GLB: no textures, skeleton or animation. `web/pose.js` holds the
-relaxed pose.
+code that made the renders), not the GLB: no textures, skeleton or animation. `web/pose.js` holds
+the relaxed pose.
 
 ## Cost
 
