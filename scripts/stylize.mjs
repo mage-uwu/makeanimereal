@@ -60,7 +60,9 @@ function describeView({ yaw, pitch }) {
     : [`THREE-QUARTER FRONT view, body turned so we see the front and ${side('right')}`, 'face is seen at an angle, the far eye is partly hidden'];
   const cam = pitch > 5 ? `camera slightly above, looking down ${pitch}°`
     : pitch < -5 ? `camera slightly below, looking up ${-pitch}°` : 'camera at eye level';
-  return { facing: `${facing}; ${cam}`, visible };
+  // Name the exact angle too: at 15° steps several views share a band but must differ slightly.
+  const exact = y === 0 ? '' : ` (camera orbited exactly ${y <= 180 ? `${y}° toward her left` : `${360 - y}° toward her right`} from straight-on front)`;
+  return { facing: `${facing}${exact}; ${cam}`, visible };
 }
 
 function buildPrompt(view, hasAnchor) {

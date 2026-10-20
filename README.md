@@ -13,7 +13,7 @@ npm install
 
 # 1. render 12 yaws x 3 pitches = 36 views of assets/emerald-pixie.glb into out/renders
 npm run render
-#   options: --yaw-step 30 --pitches -15,0,20 --size 768x1152 --fov 22 --background "#ffffff"
+#   options: --yaw-step 30 --pitches=-15,0,20 --size 768x1152 --fov 22 --background "#ffffff"
 #            --anim Idle --frames 8      (animations: Running, Walking)
 #   in the cloud sandbox: CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome npm run render
 

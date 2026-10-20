@@ -3,8 +3,8 @@
 // Writes PNGs + manifest.json into the output directory.
 //
 //   node scripts/render.mjs [--model assets/emerald-pixie.glb] [--out out/renders]
-//        [--yaw-step 30] [--pitches -15,0,20] [--size 768x1152] [--fov 22]
-//        [--background "#ffffff"] [--anim Idle] [--frames 1]
+//        [--yaw-step 30] [--pitches=-15,0,20] [--size 768x1152] [--fov 22]
+//        [--background "#ffffff"] [--anim Walking] [--frames 1] [--pose rest|relaxed]
 import { chromium } from 'playwright-core';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -23,6 +23,7 @@ const { values: opt } = parseArgs({
     fov: { type: 'string', default: '22' },
     background: { type: 'string', default: '#ffffff' },
     anim: { type: 'string' },
+    pose: { type: 'string', default: 'rest' }, // rest (the model's own pose) | relaxed (arms down)
     frames: { type: 'string', default: '1' },
   },
 });
@@ -69,7 +70,7 @@ try {
   const views = [];
   for (let f = 0; f < frames; f++) {
     const time = clip ? (clip.duration * f) / frames : 0;
-    await page.evaluate(a => window.pose(a), { anim: opt.anim, time });
+    await page.evaluate(a => window.pose(a), { anim: opt.anim, time, pose: opt.pose });
     for (const pitch of pitches) {
       for (let yaw = 0; yaw < 360; yaw += yawStep) {
         const dataUrl = await page.evaluate(a => window.shot(a), { yaw, pitch });
@@ -83,7 +84,7 @@ try {
   process.stdout.write('\n');
   await fs.writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({
     model: opt.model, width, height, fov: Number(opt.fov), yawStep, pitches, frames,
-    anim: opt.anim || null, background: opt.background, views,
+    anim: opt.anim || null, pose: opt.pose, background: opt.background, views,
   }, null, 2));
   console.log(`wrote ${views.length} renders to ${path.relative(process.cwd(), outDir)}`);
 } finally {
