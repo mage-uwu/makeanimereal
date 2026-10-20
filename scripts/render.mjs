@@ -7,6 +7,7 @@
 //        [--rings=-30:24,0:24,60:12]   (pitch:keys-per-ring; replaces --yaw-step/--pitches)
 //        [--background "#ffffff"] [--anim Walking] [--frames 1] [--pose rest|relaxed]
 //        [--export-mesh out/relaxed-renders/mesh.json] [--depth]
+//        [--camera-from out/g2-renders/manifest.json]   (reuse that set's orbit for every frame)
 import { chromium } from 'playwright-core';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -30,6 +31,7 @@ const { values: opt } = parseArgs({
     'export-mesh': { type: 'string' }, // also write the posed mesh as JSON (first frame)
     depth: { type: 'boolean', default: false }, // also write a depth map per view into <out>/depth
     frames: { type: 'string', default: '1' },
+    'camera-from': { type: 'string' }, // pin the orbit to another render set's (frame 0) camera
   },
 });
 
@@ -76,6 +78,10 @@ try {
   });
   console.log('animations:', info.clips.map(c => `${c.name} (${c.duration.toFixed(2)}s)`).join(', '));
 
+  if (opt['camera-from']) {
+    const other = JSON.parse(await fs.readFile(path.resolve(opt['camera-from']), 'utf8'));
+    await page.evaluate(c => window.pinCamera(c), other.cameras[0]);
+  }
   const clip = opt.anim ? info.clips.find(c => c.name === opt.anim) : null;
   if (opt.anim && !clip) throw new Error(`unknown animation ${opt.anim}`);
 

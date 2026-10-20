@@ -66,6 +66,13 @@ function frame() {
   return { size: size.toArray(), center: target.toArray(), radius };
 }
 
+// Pin the orbit to a given centre and distance (e.g. the still keys' camera), so every frame of an
+// animation is framed identically instead of refitting to each frame's bounds.
+let pinned = null;
+window.pinCamera = cam => {
+  pinned = cam && { target: new THREE.Vector3(...cam.target), radius: cam.radius };
+};
+
 let rest = null;
 
 window.pose = ({ anim, time, pose }) => {
@@ -83,7 +90,9 @@ window.pose = ({ anim, time, pose }) => {
     if (anim) throw new Error('--pose relaxed is for still renders; animations already pose the arms');
     relaxArms(THREE, model);
   }
-  return frame();
+  const fitted = frame();
+  if (pinned) { target = pinned.target.clone(); radius = pinned.radius; return { ...fitted, center: target.toArray(), radius }; }
+  return fitted;
 };
 
 // The current pose baked into plain world-space triangles, for viewers that only need the shape

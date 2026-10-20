@@ -7,6 +7,12 @@
 //        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model tencent/hy-image-v3.5-preview] [--notes assets/emerald-pixie-notes.txt]
 //        [--endpoint auto|chat|images]
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
+//        [--stills out/g2]   (animations: draw each angle's frames in order, see below)
+//
+// Animations (a renders manifest with frames > 1) need drawings that hold still from frame to frame,
+// or line art boils. With --stills, each frame is drawn with two extra references: the still key
+// drawing nearest its camera angle (identity and details at this angle) and the previous frame from
+// the same camera (continuity). Each camera angle's frames are drawn in order; angles run in parallel.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -30,6 +36,7 @@ const { values: opt } = parseArgs({
     'dry-run': { type: 'boolean', default: false },
     // Views where the 3D model shows her face hidden (see scripts/face_check.py): forbid drawing it.
     'hide-face': { type: 'boolean', default: false },
+    stills: { type: 'string' },
   },
 });
 
@@ -82,6 +89,7 @@ function buildPrompt(view, hasAnchor) {
     opt['style-only']
       ? `The STYLE REFERENCE is a different character: copy ONLY its art style, NOT its character, outfit or colors.`
       : `The CHARACTER REFERENCE is official front-view art of this exact character: copy its art style and design (face, hair, accessories, outfit details, exact colors). Where the render lacks or simplifies a detail the reference shows, add it as it would look from this angle.`,
+    manifest.frames > 1 ? `ANIMATION: this is frame ${view.frame + 1} of ${manifest.frames} of a looping ${view.anim || 'animation'} cycle, seen from a fixed camera. The STILL KEY is a finished drawing of her standing, from (almost) this camera: copy her identity, hair, outfit details, colours and line style from it, but take the pose from the RENDER.${view.frame > 0 ? ' The PREVIOUS FRAME is the finished drawing one frame earlier from this same camera: keep everything that did not move identical to it (hair shape and tufts, bangs, face, ribbons, outfit details, line weight, colours, size and position); change only what the RENDER\'s pose moves (legs, arms, skirt and hair sway).' : ''}` : '',
     hasAnchor ? `The FRONT ANCHOR is an already-finished front view in the target style: keep identity, colors and details consistent with it, but do NOT copy its angle.` : '',
     `Remove all 3D-render artifacts (plastic shading, specular glare, blurry or low-poly textures); interpret them as clean fabric, hair and skin.`,
     notes ? `Character details that must appear correctly at EVERY angle (when visible from this side):\n${notes}` : '',
@@ -215,6 +223,11 @@ async function run(view, anchorUrl) {
   // The anchor is an eye-level front view; on near-overhead views it pulls the drawing back to the face.
   // ...and it is a picture of her face, so hide-face views go without it.
   if (anchorUrl && view.pitch <= 55 && !opt['hide-face']) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
+  if (stills) {
+    images.push({ label: 'STILL KEY (her standing, from this camera: identity and details)', url: await dataUrl(nearestStill(view)) });
+    const prev = manifest.views.find(v => v.yaw === view.yaw && v.pitch === view.pitch && v.frame === view.frame - 1);
+    if (prev) images.push({ label: 'PREVIOUS FRAME (same camera, one frame earlier: continuity)', url: await dataUrl(path.join(outDir, prev.file)) });
+  }
   const t = Date.now();
   try {
     await save(await generate(view, images), outFile);
@@ -227,12 +240,31 @@ async function run(view, anchorUrl) {
   }
 }
 
+// Still key drawings for animations: the one whose camera is nearest each frame's camera.
+let stills = null;
+if (opt.stills) {
+  const dir = path.resolve(opt.stills);
+  const sm = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'));
+  const excluded = new Set((await fs.readFile(path.join(dir, 'exclude.txt'), 'utf8').catch(() => '')).split('\n').map(l => l.split('#')[0].trim()).filter(Boolean));
+  stills = { dir, views: sm.views.filter(v => !excluded.has(v.file)) };
+}
+const dirOf = ({ yaw, pitch }) => { const y = yaw * Math.PI / 180, p = pitch * Math.PI / 180; return [Math.cos(p) * Math.sin(y), Math.sin(p), Math.cos(p) * Math.cos(y)]; };
+function nearestStill(view) {
+  const d = dirOf(view);
+  const best = stills.views.reduce((a, v) => { const e = dirOf(v), dot = d[0] * e[0] + d[1] * e[1] + d[2] * e[2]; return dot > a.dot ? { v, dot } : a; }, { v: null, dot: -2 });
+  return path.join(stills.dir, best.v.file);
+}
+
 // Front, eye-level view of the first frame is generated first and becomes the identity anchor.
 let anchorUrl = null;
 const anchorView = manifest.views.find(v => v.frame === 0 && v.yaw === 0 && v.pitch === 0) || manifest.views[0];
-const queue = views.filter(v => opt['no-anchor'] || v.file !== anchorView.file);
+const queue = views.filter(v => stills || opt['no-anchor'] || v.file !== anchorView.file);
+// Animations: one job per camera angle, drawing its frames in order.
+const jobs = stills
+  ? [...Map.groupBy(queue, v => `${v.yaw} ${v.pitch}`).values()].map(chain => chain.sort((a, b) => a.frame - b.frame))
+  : queue.map(v => [v]);
 try {
-  if (!opt['no-anchor'] && !opt['dry-run']) {
+  if (!stills && !opt['no-anchor'] && !opt['dry-run']) {
     // Only (re)draw the anchor when it is missing or explicitly selected; --force alone must not
     // replace the drawing every other view was matched against.
     const anchorFile = path.join(outDir, anchorView.file);
@@ -241,8 +273,15 @@ try {
   }
   // On a fatal error, stop handing out work but let in-flight requests land before the manifest.
   const results = await Promise.allSettled(Array.from({ length: Math.max(1, Number(opt.concurrency)) }, async () => {
-    while (queue.length) {
-      try { await run(queue.shift(), anchorUrl); } catch (e) { queue.length = 0; throw e; }
+    while (jobs.length) {
+      const chain = jobs.shift();
+      try {
+        for (const v of chain) {
+          const n = failed.length;
+          await run(v, anchorUrl);
+          if (failed.length > n) break; // a later frame can't follow a missing one
+        }
+      } catch (e) { jobs.length = 0; throw e; }
     }
   }));
   const fatal = results.find(r => r.status === 'rejected');
