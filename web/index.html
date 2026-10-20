@@ -88,6 +88,12 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 #info > summary { padding: 14px 16px; }
 #info > section { padding: 14px 16px; display: grid; gap: 10px; border-top: 1px solid var(--rule); }
 .viewport { user-select: none; -webkit-user-select: none; }
+/* With every section closed the panel shrinks to its + buttons (names stay as tooltips). */
+.sheet:not(:has(details[open])) { width: auto; }
+.sheet:not(:has(details[open])) summary > span {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.sheet:not(:has(details[open])) > section, .sheet:not(:has(details[open])) #info > summary { padding: 7px 10px; }
 .sheet > section { padding: 14px 16px; display: grid; gap: 10px; }
 .sheet > section + section { border-top: 1px solid var(--rule); }
 .label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
@@ -152,7 +158,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
     <div class="sheet">
       <section>
         <details id="between">
-        <summary class="label">Between keys</summary>
+        <summary class="label" title="Between keys"><span>Between keys</span></summary>
         <div class="menu">
         <div class="modes" role="group" aria-label="How to show angles between key drawings">
           <button type="button" id="mode-neuro" data-mode="neuro" aria-pressed="false">Neuromation</button>
@@ -174,7 +180,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
       </section>
 
       <details id="info" open>
-      <summary class="label info-summary">Angle and key map</summary>
+      <summary class="label info-summary" title="Angle and key map"><span>Angle and key map</span></summary>
       <section>
         <div class="readout">
           <div class="angles"><span id="yaw">0</span><span>° yaw</span>&nbsp; <span id="pitch">0</span><span>° pitch</span></div>
