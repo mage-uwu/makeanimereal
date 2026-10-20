@@ -71,17 +71,12 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .sheet > section + section { border-top: 1px solid var(--rule); }
 .label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 
-.modes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
 .modes button {
   font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
   padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
 }
 .modes button:first-child { border-left: 0; }
-@media (max-width: 460px) {
-  .modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .modes button:nth-child(3) { border-left: 0; }
-  .modes button:nth-child(n + 3) { border-top: 1px solid var(--rule); }
-}
 .modes button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
 .modes button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
 .mode-note { margin: 0; color: var(--muted); font-size: 13px; min-height: 3.2em; }
@@ -138,8 +133,6 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="label">Between keys</div>
         <div class="modes" role="group" aria-label="How to show angles between key drawings">
           <button type="button" id="mode-neuro" data-mode="neuro" aria-pressed="false">Neuromation</button>
-          <button type="button" id="mode-projected" data-mode="projected" aria-pressed="true">Projected</button>
-          <button type="button" id="mode-flipstretch" data-mode="flipstretch" aria-pressed="false">Flipstretch</button>
           <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
         </div>
         <p class="mode-note" id="mode-note"></p>
@@ -173,8 +166,6 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <dl class="method">
           <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
           <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and the drawing becomes a rigid shell: every point sits on the ray from its vantage at a smoothed depth, so the vantage sees it exactly as drawn and the shell can't shear or tear. Between keys the shell rotates; your angle maps to a latent angle that blends the nearby drawings' vantages. Depth relief sets how curved the shell is, from a flat card (no deformation at all) to the full smoothed shape.</dd></div>
-          <div><dt>Projected</dt><dd>The nearest drawing is projected onto an invisible 3D model of her from the camera it was drawn for, then seen from your camera, so it bends with her shape. Surfaces it could not see come whole from the next drawing that did.</dd></div>
-          <div><dt>Flipstretch</dt><dd>No model. The nearest drawing is stretched toward its neighbouring drawings, along correspondences matched between the drawings themselves. It hands over halfway to the next key.</dd></div>
           <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
         </dl>
         <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
@@ -194,7 +185,7 @@ import * as THREE from 'three';
 const $ = id => document.getElementById(id);
 const stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
 
-const MODES = ['neuro', 'projected', 'flipstretch', 'flipbook'];
+const MODES = ['neuro', 'flipbook'];
 const NOTES = {
   neuro: 'Between keys, each drawing turns as one rigid, gently curved shell, seen from the angle it really depicts. Less relief means less deformation.',
   projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
