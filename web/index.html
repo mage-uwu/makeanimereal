@@ -1248,7 +1248,7 @@ const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 function updateSheet(around, onKey, towards) {
   $('hint').textContent = K.loaded < K.keys.length
     ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
-    : anim.shown ? 'WASD to walk · Drag to orbit · ← → step walk angles · , . step frames'
+    : anim.shown ? 'WASD to walk · Drag to orbit · Arrow keys step walk angles · , . step frames'
     : 'WASD to walk · Drag to orbit · Arrow keys step to the next key';
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
@@ -1432,12 +1432,20 @@ stageEl.addEventListener('keydown', e => {
   e.preventDefault();
   // Arrow keys land on key angles so each press shows a finished drawing: the next key around the
   // current ring, or the nearest key on the next ring up or down.
-  // With an animation showing, left and right step through its drawn angles.
+  // With an animation showing, the arrows step through its drawn angles: around the ring, or to
+  // the nearest angle on the next ring up or down.
   if (anim.shown) {
-    if (!move[0]) return;
-    const cur = anim.shown.angle;
-    const pool = anim.data.angles.filter(a => a.pitch === cur.pitch && a !== cur)
-      .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+    const cur = anim.shown.angle, all = anim.data.angles;
+    let pool;
+    if (move[0]) {
+      pool = all.filter(a => a.pitch === cur.pitch && a !== cur)
+        .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+    } else {
+      const rings = [...new Set(all.map(a => a.pitch))].sort((a, b) => a - b);
+      const next = rings[rings.indexOf(cur.pitch) + move[1]];
+      if (next === undefined) return;
+      pool = all.filter(a => a.pitch === next).map(k => ({ k, d: angleBetween(k.dir, cur.dir) })).sort((a, b) => a.d - b.d);
+    }
     if (pool.length) jumpTo(pool[0].k);
     return;
   }
