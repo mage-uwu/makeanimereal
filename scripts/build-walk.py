@@ -69,7 +69,7 @@ def main():
             sheet.paste(cut.resize(size, Image.LANCZOS), ((i % COLS) * size[0], (i // COLS) * size[1]))
         name = f'{args.name}/y{yaw:g}_p{pitch:g}.webp'
         sheet.save(out / name, 'WEBP', quality=90, method=6)
-        sheets.append({'yaw': yaw, 'pitch': pitch, 'sheet': name, 'frames': frames})
+        sheets.append({'yaw': yaw, 'pitch': pitch, 'sheet': name, 'v': bw.version(out / name), 'frames': frames})
         print(f'{name}  scale {s:.3f}  {len(views)} frames')
 
     times = sorted({v['time'] for v in manifest['views']})

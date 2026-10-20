@@ -284,11 +284,13 @@ const image = src => new Promise((res, rej) => {
   img.onerror = () => rej(new Error(`Could not load ${src}`));
   img.src = src;
 });
+// Drawing files carry a content version (from the build), so a redrawn one is never served stale.
+const versioned = (src, v) => v ? `${src}?v=${v}` : src;
 // Warp atlases come 16 to a sheet; each key's is cut back out onto its own canvas.
 const sheets = new Map();
 async function warpAtlas(w) {
   if (typeof w === 'string') return image(w);
-  if (!sheets.has(w.sheet)) sheets.set(w.sheet, image(w.sheet));
+  if (!sheets.has(w.sheet)) sheets.set(w.sheet, image(versioned(w.sheet, w.v)));
   const sheet = await sheets.get(w.sheet);
   const h = sheet.width / K.atlas[0] * K.atlas[1] * K.frame[1] / K.frame[0];
   const c = document.createElement('canvas');
@@ -297,7 +299,7 @@ async function warpAtlas(w) {
   return c;
 }
 async function fetchKey(k) {
-  if (!k.loading) k.loading = Promise.all([image(k.file), warpAtlas(k.warps)]).then(([img, warpImg]) => {
+  if (!k.loading) k.loading = Promise.all([image(versioned(k.file, k.v)), warpAtlas(k.warps)]).then(([img, warpImg]) => {
     Object.assign(k, { img, warpImg, ready: true });
     K.loaded++;
     dirty = true;
@@ -314,7 +316,7 @@ function streamKeys() {
 }
 
 async function load() {
-  K = await (await fetch('keys.json')).json();
+  K = await (await fetch('keys.json', { cache: 'no-cache' })).json();
   K.loaded = 0;
   for (const k of K.keys) k.dir = dirOf(k.yaw, k.pitch);
   for (const k of K.keys) {
@@ -957,7 +959,7 @@ const anim = { t: 0, data: null, sheets: new Map() };
 // slider scrubs through the cycle.
 const walking = () => !!anim.data && (state.anim === 'walk' || walker.keys.size > 0);
 const animFrame = () => Math.floor(anim.t / anim.data.duration * anim.data.frames + 1e-6) % anim.data.frames;
-fetch('walk.json').then(r => r.ok ? r.json() : null).then(d => {
+fetch('walk.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
   if (!d) return;
   for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
   anim.data = d;
@@ -969,9 +971,9 @@ fetch('walk.json').then(r => r.ok ? r.json() : null).then(d => {
 function walkSheet(a) {
   if (!anim.sheets.has(a)) {
     anim.sheets.set(a, null);
-    image(a.sheet).then(img => { anim.sheets.set(a, img); dirty = true; }, () => {});
+    image(versioned(a.sheet, a.v)).then(img => { anim.sheets.set(a, img); dirty = true; }, () => {});
     // The rest stream in behind it, so turning never waits long.
-    for (const b of anim.data.angles) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(b.sheet).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
+    for (const b of anim.data.angles) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(versioned(b.sheet, b.v)).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
   }
   return anim.sheets.get(a);
 }

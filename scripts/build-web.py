@@ -37,6 +37,7 @@ white falls back to a flood fill from the border.
 Needs Pillow (with WebP), numpy and opencv-python-headless.
 """
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -135,6 +136,11 @@ def extent(mask):
     y0 = int((bot - (bot - top) * 0.22) * h)
     xs = np.where(m[y0:int(bot * h)])[1]
     return top, bot, xs.mean() / w
+
+
+def version(path):
+    """A short content hash, appended to a file's URL so browsers fetch it again after a redraw."""
+    return hashlib.md5(Path(path).read_bytes()).hexdigest()[:8]
 
 
 def gray(rgba):
@@ -525,7 +531,7 @@ def main():
         wname = Path(it['v']['file']).with_suffix('.webp').name
         # Lossless: the fields are displacements, and lossy noise would make the drawing shimmer.
         atlases.append((atlas * 255 + 0.5).astype(np.uint8))
-        keys.append({'file': f'keys/{it["name"]}', 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
+        keys.append({'file': f'keys/{it["name"]}', 'v': version(out / 'keys' / it['name']), 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
                      's': round(it['s'], 5), 'ox': round(it['ox'], 5), 'oy': round(it['oy'], 5),
                      'neighbours': [int(j) for j in near[i]],
                      'vantage': it['vantage'],
@@ -543,7 +549,7 @@ def main():
         sheet = f'warps/sheet{n // WARP_SHEET:02d}.webp'
         Image.fromarray(np.concatenate([atlases[i] for i in group], 0)).save(out / sheet, 'WEBP', lossless=True, quality=100, method=6)
         for row, i in enumerate(group):
-            keys[i]['warps'] = {'sheet': sheet, 'row': row}
+            keys[i]['warps'] = {'sheet': sheet, 'row': row, 'v': version(out / sheet)}
     (out / 'keys.json').write_text(json.dumps({
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),

@@ -181,10 +181,27 @@ async function generate(view, images) {
   }
 }
 
-async function save(url, file) {
+async function bytesOf(url) {
   const m = /^data:image\/(\w+);base64,(.*)$/s.exec(url);
-  const buf = m ? Buffer.from(m[2], 'base64') : Buffer.from(await (await fetch(url)).arrayBuffer());
-  await fs.writeFile(file, buf);
+  return m ? Buffer.from(m[2], 'base64') : Buffer.from(await (await fetch(url)).arrayBuffer());
+}
+
+// Width and height of a PNG, JPEG or WebP, from its header.
+function imageSize(b) {
+  if (b.readUInt32BE(0) === 0x89504e47) return [b.readUInt32BE(16), b.readUInt32BE(20)];
+  if (b.toString('ascii', 0, 4) === 'RIFF') {
+    const kind = b.toString('ascii', 12, 16);
+    if (kind === 'VP8X') return [1 + b.readUIntLE(24, 3), 1 + b.readUIntLE(27, 3)];
+    if (kind === 'VP8L') { const n = b.readUInt32LE(21); return [1 + (n & 0x3fff), 1 + ((n >> 14) & 0x3fff)]; }
+    return [b.readUInt16LE(26) & 0x3fff, b.readUInt16LE(28) & 0x3fff];
+  }
+  for (let i = 2; i < b.length - 8;) {
+    if (b[i] !== 0xff) { i++; continue; }
+    const marker = b[i + 1], len = b.readUInt16BE(i + 2);
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return [b.readUInt16BE(i + 7), b.readUInt16BE(i + 5)];
+    i += 2 + len;
+  }
+  return null;
 }
 
 const rendersDir = path.resolve(opt.renders);
@@ -230,7 +247,18 @@ async function run(view, anchorUrl) {
   }
   const t = Date.now();
   try {
-    await save(await generate(view, images), outFile);
+    // The model sometimes answers in another shape (square, 3:4). Fitting that into the render's
+    // frame would squash her, so such drawings are drawn again.
+    const want = imageSize(await fs.readFile(path.join(rendersDir, view.file)));
+    let buf;
+    for (let tries = 1; ; tries++) {
+      buf = await bytesOf(await generate(view, images));
+      const got = imageSize(buf);
+      if (!got || !want || Math.abs(got[0] / got[1] - want[0] / want[1]) < 0.02) break;
+      if (tries >= 3) throw new Error(`drawn ${got.join('x')} three times, not the render's ${want[0]}:${want[1]} shape`);
+      console.warn(`  redraw ${view.file}: came back ${got.join('x')}, not ${want[0]}:${want[1]}`);
+    }
+    await fs.writeFile(outFile, buf);
     done.push(view);
     console.log(`ok   ${view.file} (${((Date.now() - t) / 1000).toFixed(1)}s)`);
   } catch (e) {
