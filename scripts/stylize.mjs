@@ -4,7 +4,7 @@
 // front view is fed back as an identity anchor so every angle draws the same character.
 //
 //   OPENROUTER_API_KEY=... node scripts/stylize.mjs [--renders out/renders] [--out out/stylized]
-//        [--style assets/style-ref.jpg] [--model google/gemini-3.1-flash-image]
+//        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model google/gemini-3.1-flash-image]
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
 import fs from 'node:fs/promises';
 import path from 'node:path';
