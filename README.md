@@ -31,6 +31,33 @@ Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` en
 
 `OPENROUTER_BASE_URL` overrides the API endpoint, and `OPENROUTER_MODEL` sets the default model.
 
+## Web viewer (anime graphics on a hidden 3D model)
+
+```sh
+# 72 key angles in the relaxed pose, plus the same views with a transparent background
+npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --out out/relaxed-renders
+npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --background none --out out/relaxed-alpha
+npm run stylize -- --renders out/relaxed-renders --out out/relaxed
+pip install opencv-python-headless   # plus Pillow and numpy
+python3 scripts/build-web.py          # -> out/web (page, fitted drawings, model)
+```
+
+`web/index.html` is the viewer. The 3D model is never drawn. It is an invisible shape that bends
+the nearest key drawing to the current camera:
+
+- `build-web.py` cuts each drawing out of its background and fits it to its render: first a scale
+  and offset from the silhouettes, then a smooth optical-flow warp that moves the drawing's eyes,
+  bow and hems onto the render's.
+- The viewer projects the nearest fitted drawing onto the mesh from the camera it was drawn for and
+  views the mesh from the current camera, so the drawing turns with the body. It hands over to the
+  next drawing halfway between keys.
+- Surfaces the lead drawing's camera could not see are taken whole from the next drawing that did.
+  Two drawings are never mixed on a pixel, and the mesh's own texture never shows.
+- Art off the mesh (the ribbons) comes from the same drawing on a camera-facing card behind her.
+
+`web/pose.js` holds the relaxed pose shared by the renderer and the viewer, so the viewer's mesh
+matches the renders exactly.
+
 ## Cost
 
 Measured per sprite (one angle of one frame), at about 840x1260:

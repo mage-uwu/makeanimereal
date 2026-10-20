@@ -145,9 +145,11 @@ async function generate(view, images) {
       return img;
     }
     const err = json?.error?.message || text.slice(0, 300);
-    if (endpoint === 'auto' && /api\/v1\/images/.test(err)) {
+    // Parallel requests can all hit chat before the first one learns to switch, so key this on
+    // the route this request used rather than the shared setting.
+    if (opt.endpoint === 'auto' && route === 'chat/completions' && /api\/v1\/images/.test(err)) {
+      if (endpoint !== 'images') console.warn(`  ${opt.model} is image-only, switching to the /images endpoint`);
       endpoint = 'images';
-      console.warn(`  ${opt.model} is image-only, switching to the /images endpoint`);
       attempt--;
       continue;
     }
@@ -214,8 +216,10 @@ const anchorView = manifest.views.find(v => v.frame === 0 && v.yaw === 0 && v.pi
 const queue = views.filter(v => opt['no-anchor'] || v.file !== anchorView.file);
 try {
   if (!opt['no-anchor'] && !opt['dry-run']) {
-    await run(anchorView, null);
+    // Only (re)draw the anchor when it is missing or explicitly selected; --force alone must not
+    // replace the drawing every other view was matched against.
     const anchorFile = path.join(outDir, anchorView.file);
+    if (!(await exists(anchorFile)) || views.some(v => v.file === anchorView.file)) await run(anchorView, null);
     if (await exists(anchorFile)) anchorUrl = await dataUrl(anchorFile);
   }
   // On a fatal error, stop handing out work but let in-flight requests land before the manifest.

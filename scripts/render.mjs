@@ -68,9 +68,12 @@ try {
 
   await fs.mkdir(outDir, { recursive: true });
   const views = [];
+  // Orbit centre and distance per frame, so a viewer can rebuild each keyframe's exact camera.
+  const cameras = [];
   for (let f = 0; f < frames; f++) {
     const time = clip ? (clip.duration * f) / frames : 0;
-    await page.evaluate(a => window.pose(a), { anim: opt.anim, time, pose: opt.pose });
+    const cam = await page.evaluate(a => window.pose(a), { anim: opt.anim, time, pose: opt.pose });
+    cameras.push({ frame: f, target: cam.center, radius: cam.radius });
     for (const pitch of pitches) {
       for (let yaw = 0; yaw < 360; yaw += yawStep) {
         const dataUrl = await page.evaluate(a => window.shot(a), { yaw, pitch });
@@ -84,7 +87,7 @@ try {
   process.stdout.write('\n');
   await fs.writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({
     model: opt.model, width, height, fov: Number(opt.fov), yawStep, pitches, frames,
-    anim: opt.anim || null, pose: opt.pose, background: opt.background, views,
+    anim: opt.anim || null, pose: opt.pose, background: opt.background, cameras, views,
   }, null, 2));
   console.log(`wrote ${views.length} renders to ${path.relative(process.cwd(), outDir)}`);
 } finally {

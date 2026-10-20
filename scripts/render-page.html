@@ -15,6 +15,7 @@
 // Headless turntable renderer. Driven from scripts/render.mjs through window.setup()/window.shot().
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { relaxArms } from '/web/pose.js';
 
 let renderer, scene, camera, mixer, model, clips, target, radius;
 
@@ -62,35 +63,10 @@ function frame() {
   target = box.getCenter(new THREE.Vector3());
   const r = Math.max(size.y / 2, size.x / 2 / camera.aspect, size.z / 2) * 1.12;
   radius = r / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  return { size: size.toArray(), center: target.toArray() };
+  return { size: size.toArray(), center: target.toArray(), radius };
 }
 
-// Turn `bone` (in world space) so the direction from it to `child` points along `dir`.
-function aim(bone, child, dir) {
-  model.updateMatrixWorld(true);
-  const from = bone.getWorldPosition(new THREE.Vector3());
-  const cur = child.getWorldPosition(new THREE.Vector3()).sub(from).normalize();
-  const turn = new THREE.Quaternion().setFromUnitVectors(cur, dir.clone().normalize());
-  const parentWorld = bone.parent.getWorldQuaternion(new THREE.Quaternion());
-  const world = bone.getWorldQuaternion(new THREE.Quaternion()).premultiply(turn);
-  bone.quaternion.copy(parentWorld.invert().multiply(world));
-}
-
-const bone = name => model.getObjectByName(name) || model.getObjectByName(name.replace(':', ''));
 let rest = null;
-
-// Arms hanging at the sides with a slight outward angle and a soft elbow bend, built from the
-// T-pose by aiming the Mixamo arm bones rather than hard-coding rotations.
-function relax() {
-  const hips = bone('mixamorig:Hips').getWorldPosition(new THREE.Vector3());
-  for (const side of ['Left', 'Right']) {
-    const arm = bone(`mixamorig:${side}Arm`), fore = bone(`mixamorig:${side}ForeArm`), hand = bone(`mixamorig:${side}Hand`);
-    if (!arm || !fore || !hand) throw new Error(`relaxed pose needs mixamorig:${side}Arm/ForeArm/Hand bones`);
-    const out = Math.sign(arm.getWorldPosition(new THREE.Vector3()).x - hips.x);
-    aim(arm, fore, new THREE.Vector3(out * 0.36, -1, 0.03));
-    aim(fore, hand, new THREE.Vector3(out * 0.42, -1, 0.12));
-  }
-}
 
 window.pose = ({ anim, time, pose }) => {
   mixer.stopAllAction();
@@ -105,7 +81,7 @@ window.pose = ({ anim, time, pose }) => {
   mixer.setTime(time || 0);
   if (pose === 'relaxed') {
     if (anim) throw new Error('--pose relaxed is for still renders; animations already pose the arms');
-    relax();
+    relaxArms(THREE, model);
   }
   return frame();
 };

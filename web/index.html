@@ -1,0 +1,658 @@
+<meta charset="utf-8">
+<title>Emerald Pixie Turntable</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Azeret+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a 2:3 stage (the same frame the key drawings were made in) beside a control sheet that
+   reads like an animation timing sheet: what the camera sees, which key drawings feed it, how much. */
+:root {
+  --paper: #f2f5f1;      /* page */
+  --sheet: #ffffff;      /* control sheet */
+  --stage: #e3ebe4;      /* backdrop behind the character */
+  --ink: #17201a;        /* text, lineart */
+  --muted: #5a6a60;      /* secondary text */
+  --rule: #d3ddd5;       /* hairlines */
+  --emerald: #13804a;    /* accent: her eyes, the gem */
+  --mint: #cfe8d3;       /* ribbon tint, weight bars */
+  --font-display: "Dela Gothic One", "Hiragino Kaku Gothic StdN", "Arial Black", sans-serif;
+  --font-body: "Zen Kaku Gothic New", "Hiragino Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "Azeret Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #111613; --sheet: #18201b; --stage: #1d2620; --ink: #e5ece6; --muted: #93a499;
+    --rule: #2c3830; --emerald: #4cc985; --mint: #24412f; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #111613; --sheet: #18201b; --stage: #1d2620; --ink: #e5ece6; --muted: #93a499;
+  --rule: #2c3830; --emerald: #4cc985; --mint: #24412f; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--paper); color: var(--ink); font: 15px/1.6 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px 40px;
+}
+.wrap { max-width: 1060px; margin: 0 auto; display: grid; gap: 20px; }
+
+header { display: grid; gap: 6px; }
+.eyebrow { font: 500 12px/1.4 var(--font-data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font: 400 clamp(30px, 5vw, 46px)/1.05 var(--font-display); margin: 0; text-wrap: balance; letter-spacing: .01em; }
+h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-align: .25em; }
+.lede { margin: 0; max-width: 62ch; color: var(--muted); }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 380px); gap: 20px; align-items: start; }
+@media (max-width: 820px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.stage-col { display: grid; gap: 8px; justify-items: center; }
+.stage {
+  position: relative; width: min(100%, 540px); max-width: 100%; aspect-ratio: 2 / 3;
+  background: radial-gradient(120% 70% at 50% 92%, color-mix(in srgb, var(--emerald) 10%, var(--stage)), var(--stage) 60%);
+  border-radius: 6px; overflow: hidden; cursor: grab; touch-action: none; outline: none;
+}
+.stage:focus-visible { box-shadow: 0 0 0 3px var(--emerald); }
+.stage.dragging { cursor: grabbing; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.loading {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; text-align: center;
+  font: 500 13px/1.5 var(--font-data); color: var(--muted);
+}
+.loading strong { font: 400 20px/1.2 var(--font-display); color: var(--ink); }
+.hint { font: 12px/1.4 var(--font-data); color: var(--muted); }
+
+.sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; display: grid; }
+.sheet > section { padding: 14px 16px; display: grid; gap: 10px; }
+.sheet > section + section { border-top: 1px solid var(--rule); }
+.label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes button {
+  font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
+  padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
+}
+.modes button:first-child { border-left: 0; }
+.modes button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
+.modes button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
+.mode-note { margin: 0; color: var(--muted); font-size: 13px; min-height: 3.2em; }
+.toggles { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.toggles label { display: inline-flex; gap: 7px; align-items: center; font-size: 13px; cursor: pointer; }
+.toggles input { accent-color: var(--emerald); }
+
+.readout { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.angles { font: 500 22px/1 var(--font-data); font-variant-numeric: tabular-nums; }
+.angles span { color: var(--muted); font-size: 12px; margin-left: 2px; }
+.chip {
+  font: 500 12px/1 var(--font-body); padding: 5px 9px; border-radius: 999px;
+  border: 1px solid var(--emerald); color: var(--emerald); white-space: nowrap;
+}
+.chip.key { background: var(--emerald); color: var(--sheet); }
+.weights { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.weights li { display: grid; grid-template-columns: 82px minmax(0, 1fr) 60px; gap: 10px; align-items: center; font: 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
+.bar { height: 8px; background: color-mix(in srgb, var(--rule) 60%, transparent); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--emerald); border-radius: 2px; }
+.weights .pct { text-align: right; color: var(--muted); }
+.weights .role { color: var(--muted); font-family: var(--font-body); font-size: 12.5px; }
+.weights li.lead span:first-child, .weights li.lead .role { color: var(--emerald); font-weight: 500; }
+
+#radar { width: 100%; height: auto; display: block; cursor: pointer; }
+.radar-axis { display: flex; justify-content: space-between; font: 11px/1 var(--font-data); color: var(--muted); }
+
+.method { margin: 0; padding-left: 1.3em; display: grid; gap: 6px; font-size: 13.5px; }
+.method li::marker { font-family: var(--font-data); color: var(--emerald); }
+.facts { font: 12px/1.6 var(--font-data); color: var(--muted); margin: 0; }
+.error { color: var(--ink); background: var(--mint); padding: 10px 12px; border-radius: 5px; font-size: 13px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main class="wrap">
+  <header>
+    <div class="eyebrow">Key-drawing turntable · 72 genga · 15° × 3 heights</div>
+    <h1>Emerald Pixie<span class="jp">原画</span></h1>
+    <p class="lede">Every angle you see is one of 72 key drawings. An invisible 3D model of her bends the nearest drawing
+      to the camera, so the drawing turns with her body until the next one takes over. Pixels from two drawings are
+      never mixed, and the model itself is never shown. Drag to walk around her.</p>
+  </header>
+
+  <div class="layout">
+    <div class="stage-col">
+      <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
+        <canvas id="gl"></canvas>
+        <canvas id="flat"></canvas>
+        <div class="loading" id="loading"><strong>Loading</strong><span id="progress">model and key drawings</span></div>
+      </div>
+      <div class="hint">Drag to orbit · Arrow keys step 15° · Click the key map to jump</div>
+    </div>
+
+    <div class="sheet">
+      <section>
+        <div class="label">Render with</div>
+        <div class="modes" role="group" aria-label="Render mode">
+          <button type="button" id="mode-projected" data-mode="projected" aria-pressed="true">Projected</button>
+          <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
+        </div>
+        <p class="mode-note" id="mode-note"></p>
+        <div class="toggles">
+          <label><input type="checkbox" id="spin"> Turn slowly</label>
+        </div>
+      </section>
+
+      <section>
+        <div class="readout">
+          <div class="angles"><span id="yaw">0</span><span>° yaw</span>&nbsp; <span id="pitch">0</span><span>° pitch</span></div>
+          <div class="chip" id="state">In-between</div>
+        </div>
+        <ul class="weights" id="weights"></ul>
+      </section>
+
+      <section>
+        <div class="label">Key map · yaw across, camera height down</div>
+        <canvas id="radar" width="720" height="150" aria-label="Map of the 72 key drawings. Click one to jump to it."></canvas>
+        <div class="radar-axis"><span>0° front</span><span>90° left</span><span>180° back</span><span>270° right</span><span>360°</span></div>
+      </section>
+
+      <section>
+        <div class="label">Each frame</div>
+        <ol class="method">
+          <li>Rank the four key drawings around the camera by angle. The nearest one is the drawing; it hands over halfway to the next key.</li>
+          <li>Project that drawing onto the hidden mesh from the exact camera it was drawn for, then view the mesh from the current camera. The drawing bends with her 3D shape. Each drawing was fitted to the mesh beforehand, so its eyes, bow and hems sit on the mesh's.</li>
+          <li>Where its camera could not see a surface, or saw it edge-on, take that surface whole from the next drawing that did. Pixels are never mixed, and the mesh's own colours never show.</li>
+          <li>Paint art that sits off the mesh, like the ribbons, from the same drawing onto a card behind her.</li>
+        </ol>
+        <p class="facts">72 drawings · Tencent Hy Image 3.5 · $0.024 each · 600 × 900 WebP</p>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { relaxArms } from './pose.js';
+
+const $ = id => document.getElementById(id);
+const stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
+
+const NOTES = {
+  projected: 'One drawing at a time, bent by her hidden 3D shape so it turns with her body. The next key drawing takes over halfway between keys.',
+  flipbook: 'The nearest key drawing laid flat, like a 2D game sprite. It stays still and jumps every 15°.',
+};
+
+const state = { yaw: 20, pitch: 6, mode: 'projected', spin: false };
+try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
+if (!['projected', 'flipbook'].includes(state.mode)) state.mode = 'projected';
+const hot = window.claude?.hot;
+if (hot?.data?.state) Object.assign(state, hot.data.state);
+hot?.snapshot?.(() => ({ state }));
+
+let K, keyGrid, renderer, scene, backdrop, camera, mesh, projMat, card, cardMat, floor;
+const NEAR_PAD = 2.2;
+
+async function load() {
+  K = await (await fetch('keys.json')).json();
+  keyGrid = new Map(K.keys.map(k => [`${k.yaw}|${k.pitch}`, k]));
+  let done = 0;
+  const total = K.keys.length + 1;
+  const tick = () => { $('progress').textContent = `${++done} of ${total} files`; };
+  const images = await Promise.all(K.keys.map(k => new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => { tick(); res(img); };
+    img.onerror = () => rej(new Error(`Could not load ${k.file}`));
+    img.src = k.file;
+  })));
+  K.keys.forEach((k, i) => { k.img = images[i]; });
+  const gltf = await new GLTFLoader().loadAsync('model.glb');
+  tick();
+  return gltf;
+}
+
+// The renders were made from a posed, skinned mesh. Bake that pose into plain world-space geometry
+// so the projection shader stays simple and matches the renders exactly.
+function bake(root) {
+  if (K.pose === 'relaxed') relaxArms(THREE, root);
+  root.updateMatrixWorld(true);
+  const parts = [];
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const src = o.geometry, pos = src.attributes.position, out = new Float32Array(pos.count * 3), v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      if (o.isSkinnedMesh) o.applyBoneTransform(i, v);
+      v.applyMatrix4(o.matrixWorld);
+      out.set([v.x, v.y, v.z], i * 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(out, 3));
+    if (src.attributes.uv) g.setAttribute('uv', src.attributes.uv);
+    if (src.index) g.setIndex(src.index);
+    g.computeVertexNormals();
+    parts.push({ geometry: g, material: o.material });
+  });
+  return parts[0];
+}
+
+// Each key drawing's camera, rebuilt exactly as scripts/render-page.html placed it.
+function placeCamera(cam, yaw, pitch, radius) {
+  const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch), t = K.target;
+  cam.position.set(t[0] + radius * Math.cos(p) * Math.sin(y), t[1] + radius * Math.sin(p), t[2] + radius * Math.cos(p) * Math.cos(y));
+  cam.lookAt(t[0], t[1], t[2]);
+  cam.updateMatrixWorld(true);
+}
+
+const DEPTH_W = 400, DEPTH_H = 600;
+let depthScene;
+const keyCache = new Map(); // key -> { tex, depth, vp, dir }, least recently used first
+function keyData(k) {
+  let d = keyCache.get(k);
+  if (d) { keyCache.delete(k); keyCache.set(k, d); return d; }
+  const cam = new THREE.PerspectiveCamera(K.fov, K.aspect, K.radius - NEAR_PAD, K.radius + NEAR_PAD);
+  placeCamera(cam, k.yaw, k.pitch, K.radius);
+  const depth = new THREE.WebGLRenderTarget(DEPTH_W, DEPTH_H, { depthTexture: new THREE.DepthTexture(DEPTH_W, DEPTH_H) });
+  renderer.setRenderTarget(depth);
+  renderer.render(depthScene, cam);
+  renderer.setRenderTarget(null);
+  const tex = new THREE.Texture(k.img);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  d = {
+    tex, depth,
+    vp: new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
+    dir: cam.position.clone().sub(new THREE.Vector3(...K.target)).normalize(),
+  };
+  keyCache.set(k, d);
+  // 16 drawings cover any drag; older ones are released so phones keep their GPU memory.
+  while (keyCache.size > 16) {
+    const [oldKey, old] = keyCache.entries().next().value;
+    old.tex.dispose(); old.depth.depthTexture.dispose(); old.depth.dispose();
+    keyCache.delete(oldKey);
+  }
+  return d;
+}
+
+// The four key drawings around (yaw, pitch), weighted by closeness. The weights only rank them;
+// no two drawings are ever mixed on screen.
+function surrounding(yaw, pitch) {
+  const step = K.yawStep, ps = K.pitches;
+  const y0 = Math.floor(yaw / step) * step, fy = (yaw - y0) / step;
+  let i = 0;
+  while (i < ps.length - 2 && pitch > ps[i + 1]) i++;
+  const p0 = ps[i], p1 = ps[Math.min(i + 1, ps.length - 1)];
+  const fp = p1 === p0 ? 0 : THREE.MathUtils.clamp((pitch - p0) / (p1 - p0), 0, 1);
+  const wrap = a => ((a % 360) + 360) % 360;
+  return [
+    [wrap(y0), p0, (1 - fy) * (1 - fp)], [wrap(y0 + step), p0, fy * (1 - fp)],
+    [wrap(y0), p1, (1 - fy) * fp], [wrap(y0 + step), p1, fy * fp],
+  ].map(([y, p, w]) => ({ key: keyGrid.get(`${y}|${p}`), w }));
+}
+
+// The surrounding drawings in the order they are used: the nearest first, the rest only to fill
+// surfaces it could not see. The lead changes halfway between keys, with a little hysteresis so it
+// does not flicker back and forth while the camera rests near the midpoint.
+let lead = null;
+function ranked(yaw, pitch) {
+  const seen = new Set();
+  const list = surrounding(yaw, pitch).filter(a => a.key && !seen.has(a.key) && seen.add(a.key)).sort((a, b) => b.w - a.w);
+  const held = list.findIndex(a => a.key === lead);
+  if (held > 0 && list[0].w - list[held].w < 0.06) list.unshift(...list.splice(held, 1));
+  lead = list[0].key;
+  return list;
+}
+
+const SAMPLE = /* glsl */`
+  uniform sampler2D uTex0, uTex1, uTex2, uTex3;
+  uniform mat4 uVP[4];
+  uniform vec4 uAlign[4];
+  uniform float uUse[4];
+  // Where world point lands in key drawing i: through key camera i, then from render image
+  // coords (y down) to drawing coords via the measured scale and offset.
+  vec2 keyUV(int i, vec3 world) {
+    vec4 c = uVP[i] * vec4(world, 1.0);
+    vec2 uv = c.xy / c.w * 0.5 + 0.5;
+    vec2 img = (vec2(uv.x, 1.0 - uv.y) - uAlign[i].yz) / uAlign[i].x;
+    return vec2(img.x, 1.0 - img.y);
+  }
+  // Key drawing i at a world point: colour (rgb) and coverage (a).
+  vec4 keySample(sampler2D tex, int i, vec3 world) {
+    vec2 uv = keyUV(i, world);
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+    return texture2D(tex, uv);
+  }
+`;
+
+function makeProjectionMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTex0: { value: null }, uTex1: { value: null }, uTex2: { value: null }, uTex3: { value: null },
+      uDep0: { value: null }, uDep1: { value: null }, uDep2: { value: null }, uDep3: { value: null },
+      uVP: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) },
+      uAlign: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(1, 0, 0, 0)) },
+      uUse: { value: [0, 0, 0, 0] },
+      uDir: { value: [0, 1, 2, 3].map(() => new THREE.Vector3()) },
+      uNear: { value: K.radius - NEAR_PAD }, uFar: { value: K.radius + NEAR_PAD },
+      uTexel: { value: new THREE.Vector2(1 / 600, 1 / 900) },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vWorld; varying vec3 vNormal; varying vec2 vUv;
+      void main() {
+        vWorld = position; vNormal = normal; vUv = uv;
+        gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      ${SAMPLE}
+      uniform sampler2D uDep0, uDep1, uDep2, uDep3;
+      uniform vec3 uDir[4];
+      uniform float uNear, uFar;
+      uniform vec2 uTexel;
+      varying vec3 vWorld; varying vec3 vNormal; varying vec2 vUv;
+      float viewDepth(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
+      // Drawing i's paint at this surface point, or the nearest paint within ~35 texels; alpha 0 if none.
+      vec4 nearestPaint(sampler2D tex, int i) {
+        vec2 duv = keyUV(i, vWorld);
+        vec4 s = texture2D(tex, duv);
+        if (s.a > 0.5) return vec4(s.rgb, 1.0);
+        for (int r = 1; r <= 4; r++) {
+          float rad = float(r * r) * 2.0 + 1.0;
+          for (int k = 0; k < 8; k++) {
+            float a = float(k) * 0.7853982;
+            vec4 t = texture2D(tex, duv + vec2(cos(a), sin(a)) * rad * uTexel);
+            if (t.a > 0.5) return vec4(t.rgb, 1.0);
+          }
+        }
+        return vec4(0.0);
+      }
+      // Drawing i at this surface point, if its camera saw the point clearly; alpha 0 otherwise.
+      vec4 fromKey(sampler2D tex, sampler2D dep, int i, vec3 n) {
+        if (uUse[i] < 0.5) return vec4(0.0);
+        vec4 c = uVP[i] * vec4(vWorld, 1.0);
+        vec3 ndc = c.xyz / c.w;
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        // Hidden: something nearer sits in that camera's depth map. Edge-on: the drawing would smear.
+        float gap = viewDepth(ndc.z * 0.5 + 0.5) - viewDepth(texture2D(dep, uv).r);
+        if (gap > 0.02 || dot(n, uDir[i]) < 0.12) return vec4(0.0);
+        // The mesh can be a little wider than the drawing. Where this camera saw the surface but
+        // the drawing has no paint, stretch the drawing's nearest painted pixel over it rather than
+        // switching to another drawing: the raster is fitted to the 3D shape, not mixed.
+        return nearestPaint(tex, i);
+      }
+      void main() {
+        vec3 n = normalize(vNormal);
+        // First drawing in rank order that saw this point wins outright. Nothing is averaged.
+        vec4 s = fromKey(uTex0, uDep0, 0, n);
+        if (s.a < 0.5) s = fromKey(uTex1, uDep1, 1, n);
+        if (s.a < 0.5) s = fromKey(uTex2, uDep2, 2, n);
+        if (s.a < 0.5) s = fromKey(uTex3, uDep3, 3, n);
+        // No nearby drawing saw it (rare): the lead drawing anyway, never the mesh's own colours.
+        if (s.a < 0.5) s = nearestPaint(uTex0, 0);
+        gl_FragColor = vec4(s.rgb, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+function makeCardMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: {
+      uTex0: { value: null }, uTex1: { value: null }, uTex2: { value: null }, uTex3: { value: null },
+      uVP: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) },
+      uAlign: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(1, 0, 0, 0)) },
+      uUse: { value: [0, 0, 0, 0] },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vWorld;
+      void main() {
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vWorld = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }`,
+    fragmentShader: /* glsl */`
+      ${SAMPLE}
+      varying vec3 vWorld;
+      void main() {
+        // Only the lead drawing: a second one would put a second set of ribbons beside the first.
+        vec4 s0 = keySample(uTex0, 0, vWorld);
+        if (s0.a < 0.01) discard;
+        gl_FragColor = s0;
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+function makeFloor(minY) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d'), grad = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(0,0,0,0.32)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.12)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(K.target[0], minY + 0.002, K.target[2]);
+  return m;
+}
+
+function init(gltf) {
+  renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  const baked = bake(gltf.scene);
+  baked.geometry.computeBoundingBox();
+  depthScene = new THREE.Scene();
+  depthScene.add(new THREE.Mesh(baked.geometry, new THREE.MeshBasicMaterial({ colorWrite: false })));
+
+  scene = new THREE.Scene();
+
+  projMat = makeProjectionMaterial();
+  mesh = new THREE.Mesh(baked.geometry, projMat);
+  scene.add(mesh);
+
+  // Drawn first in its own pass: three.js draws transparent objects after opaque ones whatever
+  // their renderOrder, and the card must sit behind the mesh, showing only around it.
+  backdrop = new THREE.Scene();
+  floor = makeFloor(baked.geometry.boundingBox.min.y);
+  backdrop.add(floor);
+  cardMat = makeCardMaterial();
+  card = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), cardMat);
+  card.renderOrder = 1;
+  backdrop.add(card);
+
+  camera = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+  new ResizeObserver(resize).observe(stageEl);
+  resize();
+  $('loading').hidden = true;
+  setMode(state.mode);
+  requestAnimationFrame(frame);
+}
+
+function resize() {
+  const r = stageEl.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  const dpr = Math.min(devicePixelRatio, 2);
+  flat.width = Math.round(r.width * dpr);
+  flat.height = Math.round(r.height * dpr);
+  dirty = true;
+}
+
+// Draw a key drawing on the flat canvas exactly where its render sat in the frame.
+function drawKey(k, alpha) {
+  const W = flat.width, H = flat.height;
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(k.img, k.ox * W, k.oy * H, k.s * W, k.s * H);
+}
+
+let dirty = true, last = 0;
+function frame(t) {
+  const dt = Math.min(0.05, (t - last) / 1000 || 0);
+  last = t;
+  if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
+  if (dirty) { render(); dirty = false; }
+  requestAnimationFrame(frame);
+}
+
+function render() {
+  placeCamera(camera, state.yaw, state.pitch, K.radius);
+  const around = ranked(state.yaw, state.pitch);
+  const nearest = around[0];
+  const mode = state.mode;
+
+  mesh.visible = mode === 'projected';
+  card.visible = mode === 'projected';
+  if (mode === 'projected') {
+    for (let i = 0; i < 4; i++) {
+      const entry = around[i];
+      projMat.uniforms.uUse.value[i] = entry ? 1 : 0;
+      if (!entry) continue;
+      const { key } = entry, d = keyData(key);
+      for (const m of [projMat, cardMat]) {
+        m.uniforms[`uTex${i}`].value = d.tex;
+        m.uniforms.uVP.value[i].copy(d.vp);
+        m.uniforms.uAlign.value[i].set(key.s, key.ox, key.oy, 0);
+      }
+      projMat.uniforms[`uDep${i}`].value = d.depth.depthTexture;
+      projMat.uniforms.uDir.value[i].copy(d.dir);
+    }
+    card.position.set(...K.target);
+    card.quaternion.copy(camera.quaternion);
+  }
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(backdrop, camera);
+  renderer.clearDepth();
+  renderer.render(scene, camera);
+
+  // The flat canvas carries the 2D modes, and the exact drawing when the camera sits on a key.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, flat.width, flat.height);
+  if (mode === 'flipbook') drawKey(nearest.key, 1);
+  const off = Math.hypot(angleGap(state.yaw, nearest.key.yaw), state.pitch - nearest.key.pitch);
+  ctx.globalAlpha = 1;
+
+  updateSheet(around, off < 0.5);
+}
+
+const angleGap = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
+
+function updateSheet(around, onKey) {
+  $('yaw').textContent = Math.round(state.yaw);
+  $('pitch').textContent = Math.round(state.pitch);
+  const chip = $('state');
+  chip.textContent = onKey ? 'On a key angle' : state.mode === 'flipbook' ? 'Held drawing' : 'Fitted to 3D';
+  chip.classList.toggle('key', onKey);
+  $('weights').innerHTML = around.map(({ key }, i) => {
+    const dist = Math.hypot(angleGap(state.yaw, key.yaw), state.pitch - key.pitch);
+    const role = i === 0 ? 'Drawing on screen' : (state.mode === 'projected' ? 'Fills hidden surfaces' : 'Not used');
+    return `<li class="${i === 0 ? 'lead' : ''}"><span>${keyName(key)}</span><span class="role">${role}</span><span class="pct">${dist.toFixed(1)}° away</span></li>`;
+  }).join('');
+  drawRadar(around);
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode })); } catch {}
+}
+
+const radar = $('radar'), rctx = radar.getContext('2d');
+const RADAR = { padX: 14, padY: 22, rowGap: 52 };
+function radarPos(yaw, pitch) {
+  const ps = K.pitches, w = radar.width - RADAR.padX * 2;
+  const row = (ps[ps.length - 1] - pitch) / (ps[ps.length - 1] - ps[0]);
+  return [RADAR.padX + (yaw / 360) * w, RADAR.padY + row * RADAR.rowGap * (ps.length - 1)];
+}
+function drawRadar(around) {
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue('--ink').trim(), muted = css.getPropertyValue('--muted').trim();
+  const rule = css.getPropertyValue('--rule').trim(), em = css.getPropertyValue('--emerald').trim();
+  rctx.clearRect(0, 0, radar.width, radar.height);
+  rctx.font = '20px "Azeret Mono", monospace';
+  rctx.textBaseline = 'middle';
+  for (const p of K.pitches) {
+    const [, y] = radarPos(0, p);
+    rctx.strokeStyle = rule; rctx.lineWidth = 2;
+    rctx.beginPath(); rctx.moveTo(RADAR.padX, y); rctx.lineTo(radar.width - RADAR.padX, y); rctx.stroke();
+  }
+  for (const k of K.keys) {
+    const [x, y] = radarPos(k.yaw, k.pitch);
+    rctx.fillStyle = muted; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, Math.PI * 2); rctx.fill();
+  }
+  around.forEach(({ key }, i) => {
+    const [x, y] = radarPos(key.yaw, key.pitch);
+    rctx.beginPath(); rctx.arc(x, y, i === 0 ? 11 : 7, 0, Math.PI * 2);
+    if (i === 0) { rctx.fillStyle = em; rctx.fill(); } else { rctx.strokeStyle = em; rctx.lineWidth = 2.5; rctx.stroke(); }
+  });
+  const [cx, cy] = radarPos(state.yaw, state.pitch);
+  rctx.strokeStyle = ink; rctx.lineWidth = 2.5;
+  rctx.beginPath(); rctx.arc(cx, cy, 9, 0, Math.PI * 2); rctx.stroke();
+  rctx.beginPath(); rctx.moveTo(cx - 15, cy); rctx.lineTo(cx + 15, cy); rctx.moveTo(cx, cy - 15); rctx.lineTo(cx, cy + 15); rctx.stroke();
+}
+radar.addEventListener('click', e => {
+  const r = radar.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (radar.width / r.width), y = (e.clientY - r.top) * (radar.height / r.height);
+  let best = null, bd = Infinity;
+  for (const k of K.keys) {
+    const [kx, ky] = radarPos(k.yaw, k.pitch), d = Math.hypot(kx - x, ky - y);
+    if (d < bd) { bd = d; best = k; }
+  }
+  state.yaw = best.yaw; state.pitch = best.pitch; state.spin = false; $('spin').checked = false;
+  dirty = true;
+});
+
+function setMode(mode) {
+  state.mode = mode;
+  for (const b of document.querySelectorAll('.modes button')) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+  $('mode-note').textContent = NOTES[mode];
+  dirty = true;
+}
+for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+$('spin').checked = state.spin;
+$('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
+
+const clampPitch = p => THREE.MathUtils.clamp(p, K.pitches[0], K.pitches[K.pitches.length - 1]);
+let drag = null;
+stageEl.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY, yaw: state.yaw, pitch: state.pitch };
+  stageEl.setPointerCapture(e.pointerId);
+  stageEl.classList.add('dragging');
+});
+stageEl.addEventListener('pointermove', e => {
+  if (!drag || !K) return;
+  state.yaw = (((drag.yaw - (e.clientX - drag.x) * 0.45) % 360) + 360) % 360;
+  state.pitch = clampPitch(drag.pitch + (e.clientY - drag.y) * 0.2);
+  dirty = true;
+});
+const endDrag = () => { drag = null; stageEl.classList.remove('dragging'); };
+stageEl.addEventListener('pointerup', endDrag);
+stageEl.addEventListener('pointercancel', endDrag);
+stageEl.addEventListener('keydown', e => {
+  if (!K) return;
+  const step = { ArrowLeft: [-15, 0], ArrowRight: [15, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+  if (!step) return;
+  e.preventDefault();
+  // Arrow keys land on key angles so each press shows a finished drawing.
+  state.yaw = (Math.round((state.yaw + step[0]) / 15) * 15 + 360) % 360;
+  if (step[1]) {
+    const ps = K.pitches, i = ps.findIndex(p => p >= Math.round(state.pitch));
+    state.pitch = ps[THREE.MathUtils.clamp((i < 0 ? ps.length - 1 : i) + step[1], 0, ps.length - 1)];
+  } else state.pitch = K.pitches.reduce((a, b) => (Math.abs(b - state.pitch) < Math.abs(a - state.pitch) ? b : a));
+  dirty = true;
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
+new MutationObserver(() => { dirty = true; }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+load().then(init).catch(err => {
+  $('loading').innerHTML = `<div class="error">The viewer could not start: ${err.message}. Reload the page to try again.</div>`;
+  console.error(err);
+});
+</script>
