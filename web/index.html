@@ -134,6 +134,10 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 
 #radar { width: 100%; height: auto; display: block; cursor: pointer; }
 .radar-axis { display: flex; justify-content: space-between; font: 11px/1 var(--font-data); color: var(--muted); }
+.keyid { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); }
+.keyid code { font: 500 12.5px/1.2 var(--font-data); color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.keyid button { font: 500 12px/1.2 var(--font-body); color: var(--emerald); background: transparent; border: 1px solid var(--rule); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+.keyid button:focus-visible { outline: 2px solid var(--emerald); outline-offset: 1px; }
 .anim-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .seg { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
 .seg button { font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0; border-left: 1px solid var(--rule); padding: 7px 14px; cursor: pointer; }
@@ -197,6 +201,11 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
           <div class="angles"><span id="yaw">0</span><span>° yaw</span>&nbsp; <span id="pitch">0</span><span>° pitch</span></div>
           <div class="chip" id="state">In-between</div>
         </div>
+        <div class="keyid">
+          <span id="keyid-label">Drawing</span>
+          <code id="keyid" title="Key ID: redraw it with node scripts/redraw.mjs, or open it with #ID after the page address"></code>
+          <button type="button" id="copy-key">Copy ID</button>
+        </div>
         <ul class="weights" id="weights"></ul>
       </section>
 
@@ -217,7 +226,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="scrub" id="scrub">
           <button type="button" id="play">Pause</button>
           <input type="range" id="frame" min="1" max="12" step="1" value="1" aria-label="Animation frame">
-          <output id="frame-out">Frame 1 / 12</output>
+          <output id="frame-out">f00 · 1 of 12</output>
         </div>
       </section>
 
@@ -953,6 +962,7 @@ fetch('walk.json').then(r => r.ok ? r.json() : null).then(d => {
   for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
   anim.data = d;
   $('frame').max = d.frames;
+  anim.pending?.();
   showAnim();
   dirty = true;
 }).catch(() => {});
@@ -1244,6 +1254,9 @@ function updateSheet(around, onKey, towards) {
   chip.textContent = anim.shown ? `Walk frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
   chip.classList.toggle('key', onKey);
   const lead = around[0].key;
+  showKeyId(anim.shown
+    ? { id: `walk/f${String(anim.shown.n).padStart(2, '0')}/y${anim.shown.angle.yaw}/p${anim.shown.angle.pitch}`, exact: angleBetween(dirOf(state.yaw, state.pitch), anim.shown.angle.dir) < 0.25 }
+    : { id: `still/y${around[0].key.yaw}/p${around[0].key.pitch}`, exact: onKey });
   if (anim.shown) {
     const a = anim.shown.angle;
     $('weights').innerHTML = `<li class="lead"><span>walk y${a.yaw} p${a.pitch}</span><span class="role">Nearest of ${anim.data.angles.length} drawn walk angles</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
@@ -1332,6 +1345,33 @@ function setMode(mode) {
 }
 for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
 $('spin').checked = state.spin;
+// One key ID for every drawing, still or animated: still/y045/p15, walk/f06/y135/p15. The same IDs
+// name drawings in scripts/redraw.mjs, and #<ID> after the page address opens one.
+function showKeyId({ id, exact }) {
+  $('keyid').textContent = id;
+  $('keyid-label').textContent = exact ? 'Drawing' : 'Nearest drawing';
+}
+$('copy-key').addEventListener('click', async () => {
+  const b = $('copy-key');
+  try { await navigator.clipboard.writeText($('keyid').textContent); b.textContent = 'Copied'; }
+  catch { getSelection().selectAllChildren($('keyid')); b.textContent = 'Selected'; }
+  setTimeout(() => { b.textContent = 'Copy ID'; }, 1400);
+});
+function openKey(id) {
+  const m = /^(\w+)\/(?:f(\d+)\/)?y(-?[\d.]+)\/p(-?[\d.]+)$/.exec(decodeURIComponent(id).trim());
+  if (!m) return false;
+  state.yaw = Number(m[3]); state.pitch = Number(m[4]); state.spin = false; $('spin').checked = false;
+  state.anim = m[1] === 'walk' ? 'walk' : '';
+  if (m[1] === 'walk') {
+    const go = () => setFrame(Number(m[2] || 0));
+    anim.data ? go() : (anim.pending = go);
+  }
+  showAnim();
+  dirty = true;
+  return true;
+}
+addEventListener('hashchange', () => openKey(location.hash.slice(1)));
+
 function showAnim() {
   for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b.dataset.anim === state.anim));
   const on = !!(state.anim && anim.data);
@@ -1340,7 +1380,7 @@ function showAnim() {
   if (!anim.data) return;
   const n = animFrame() + 1;
   $('frame').value = n;
-  $('frame-out').textContent = `Frame ${n} / ${anim.data.frames}`;
+  $('frame-out').textContent = `f${String(n - 1).padStart(2, '0')} · ${n} of ${anim.data.frames}`;
 }
 function setFrame(n) {
   const d = anim.data, f = ((n % d.frames) + d.frames) % d.frames;
@@ -1415,7 +1455,7 @@ stageEl.addEventListener('keydown', e => {
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
 new MutationObserver(() => { dirty = true; }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-load().then(init).catch(err => {
+load().then(init).then(() => { if (location.hash.length > 1) openKey(location.hash.slice(1)); }).catch(err => {
   $('loading').innerHTML = `<div class="error">The viewer could not start: ${err.message}. Reload the page to try again.</div>`;
   console.error(err);
 });
