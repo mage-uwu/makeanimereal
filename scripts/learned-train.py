@@ -12,8 +12,8 @@ screen-space things a texture can't: outlines, rim shading, hair drawn past the 
 
 Targets are the key drawings moved onto their renders by each drawing's fit (from build-web.py),
 so every training pair is pixel-aligned. A few keys are held out to measure how well the render
-does at angles it never saw. Writes net.json + net.bin (float16 weights, TensorFlow.js layout) and
-grid.json + grid.bin (uint8) into <web>/learned, and a comparison sheet of the held-out keys.
+does at angles it never saw. Writes net.json + net.png (float16 weights, TensorFlow.js layout) and
+grid.json + grid.png (uint8) into <web>/learned, and a comparison sheet of the held-out keys.
 """
 import argparse
 import gzip
@@ -74,6 +74,13 @@ class Net(nn.Module):
             x = F.interpolate(x, size=s.shape[-2:], mode='nearest')
             x = self.run(b, torch.cat([x, s], 1))
         return torch.sigmoid(self.out(x))
+
+
+def save_bytes(path, data):
+    """Raw bytes as a lossless greyscale PNG, 1024 per row (fetchBytes() in web/learned.js)."""
+    a = np.frombuffer(data, np.uint8)
+    a = np.pad(a, (0, -len(a) % 1024)).reshape(-1, 1024)
+    Image.fromarray(a, 'L').save(path, optimize=True)
 
 
 def load_gbuffer(path):
@@ -216,14 +223,15 @@ def main():
             a = arr.contiguous().numpy().astype(np.float16)
             tensors[f'{name}.{part}'] = {'shape': list(a.shape), 'offset': offset}
             chunks.append(a.ravel()); offset += a.size
-    (dest / 'net.bin').write_bytes(np.concatenate(chunks).tobytes())
-    (dest / 'net.json').write_text(json.dumps({'levels': len(CHANNELS), 'tensors': tensors}))
+    net_bytes = np.concatenate(chunks).tobytes()
+    save_bytes(dest / 'net.png', net_bytes)
+    (dest / 'net.json').write_text(json.dumps({'levels': len(CHANNELS), 'bytes': len(net_bytes), 'tensors': tensors}))
     gr = grid.detach()[0].numpy()  # C, z, y, x
     lo = gr.reshape(FEATURES, -1).min(1); hi = gr.reshape(FEATURES, -1).max(1)
     span = np.maximum(hi - lo, 1e-6)
     q = np.round((gr - lo[:, None, None, None]) / span[:, None, None, None] * 255).astype(np.uint8)
-    (dest / 'grid.bin').write_bytes(q.tobytes())
-    (dest / 'grid.json').write_text(json.dumps({'dims': [nx, GRID_Y, nz], 'lo': lo.tolist(), 'span': span.tolist(), 'box': box}))
+    save_bytes(dest / 'grid.png', q.tobytes())
+    (dest / 'grid.json').write_text(json.dumps({'dims': [nx, GRID_Y, nz], 'bytes': q.size, 'lo': lo.tolist(), 'span': span.tolist(), 'box': box}))
     torch.save({'net': net.state_dict(), 'grid': grid.detach()}, data / 'model.pt')
 
     # Held-out keys: G-buffer base colour | learned render | the drawing (aligned), on grey.

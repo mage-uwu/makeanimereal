@@ -46,6 +46,20 @@ const fragment = /* glsl */ `
     else gl_FragColor = vec4(vGrid, 1.0);
   }`;
 
+// Raw bytes packed into a lossless greyscale PNG, 1024 per row (artifact hosts serve images, not
+// .bin files). Decoded with no colour management, so every byte comes back exactly.
+export async function fetchBytes(url, length) {
+  const blob = await (await fetch(url)).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const c = document.createElement('canvas');
+  c.width = bmp.width; c.height = bmp.height;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(bmp, 0, 0);
+  const px = g.getImageData(0, 0, bmp.width, bmp.height).data, out = new Uint8Array(length);
+  for (let i = 0; i < length; i++) out[i] = px[i * 4];
+  return out;
+}
+
 // mesh: mesh.json (position, index, uv); albedo: a THREE.Texture of the base colour; box: the
 // feature grid's bounds { min: [x,y,z], size: [x,y,z] }.
 export function makeGBuffer(THREE, mesh, albedo, box, radius) {
@@ -116,7 +130,7 @@ export function makeGBuffer(THREE, mesh, albedo, box, radius) {
 // the G-buffer passes 0-3 (16 channels). Returns straight RGBA in 0..1, top row first.
 export async function loadNet(tf, base) {
   const spec = await (await fetch(`${base}/net.json`)).json();
-  const raw = new Uint16Array(await (await fetch(`${base}/net.bin`)).arrayBuffer());
+  const raw = new Uint16Array((await fetchBytes(`${base}/net.png`, spec.bytes)).buffer);
   const half = h => {
     const s = h >> 15, e = (h >> 10) & 31, f = h & 1023;
     const v = e === 0 ? f / 1024 * 2 ** -14 : e === 31 ? (f ? NaN : Infinity) : (1 + f / 1024) * 2 ** (e - 15);
