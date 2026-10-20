@@ -48,8 +48,8 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
   background: radial-gradient(90% 60% at 50% 90%, color-mix(in srgb, var(--emerald) 10%, var(--stage)), var(--stage) 65%);
 }
 .viewport.dragging { cursor: grabbing; }
-.viewport.room { background: url(room.webp) center / cover no-repeat, var(--stage); }
-.viewport.room + .hint { background: color-mix(in srgb, var(--sheet) 85%, transparent); color: var(--ink); padding: 3px 10px; border-radius: 999px; }
+.viewport #roomgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.viewport .stage { z-index: 1; }
 /* The drawings are 2:3, so the character frame is the largest 2:3 box that fits the window. */
 .stage {
   position: relative; height: min(100%, 150vw); aspect-ratio: 2 / 3; max-width: 100%;
@@ -140,6 +140,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 
 <main>
     <div class="viewport" id="viewport">
+      <canvas id="roomgl" hidden></canvas>
       <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
         <canvas id="gl"></canvas>
         <canvas id="flat"></canvas>
@@ -166,7 +167,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
-          <label><input type="checkbox" id="room"> Room backdrop</label>
+          <label><input type="checkbox" id="room"> 3D room</label>
         </div>
         </div>
         </details>
@@ -221,7 +222,7 @@ const NOTES = {
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: false };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -704,6 +705,62 @@ function makeFloor(minY) {
   return m;
 }
 
+// A plain white room around her, drawn on its own full-window canvas from the same camera as the
+// character, so it turns with her as you orbit. The floor sits at her feet.
+let roomRenderer, roomScene, roomCam;
+function floorTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ece9e3'; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = 'rgba(120, 112, 100, 0.22)'; g.lineWidth = 2;
+  g.strokeRect(1, 1, 254, 254);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  return t;
+}
+function makeRoom(floorY) {
+  roomRenderer = new THREE.WebGLRenderer({ canvas: $('roomgl'), antialias: true });
+  roomRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  roomRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  roomScene = new THREE.Scene();
+  roomScene.background = new THREE.Color('#f3f1ed');
+  const W = 14, H = 7.5, t = K.target;
+  const wall = new THREE.MeshStandardMaterial({ color: '#f6f4f0', roughness: 0.95 });
+  const base = new THREE.MeshStandardMaterial({ color: '#dedad3', roughness: 0.8 });
+  const tex = floorTexture();
+  tex.repeat.set(W / 1.2, W / 1.2);
+  // Double-sided: low camera angles sit below floor level and look up through it, like a glass floor.
+  const floorMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, side: THREE.DoubleSide });
+  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); roomScene.add(m); return m; };
+  add(new THREE.PlaneGeometry(W, W), floorMat, [t[0], floorY, t[2]], [-Math.PI / 2, 0, 0]);
+  add(new THREE.PlaneGeometry(W, W), wall, [t[0], floorY + H, t[2]], [Math.PI / 2, 0, 0]);
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2, dx = Math.sin(a) * W / 2, dz = Math.cos(a) * W / 2;
+    // Walls reach a little below the floor so a camera looking up from below still sees them.
+    add(new THREE.PlaneGeometry(W, H + 3), wall, [t[0] - dx, floorY + (H - 3) / 2, t[2] - dz], [0, a, 0]);
+    add(new THREE.BoxGeometry(W, 0.14, 0.03), base, [t[0] - dx * 0.998, floorY + 0.07, t[2] - dz * 0.998], [0, a, 0]);
+  }
+  roomScene.add(new THREE.HemisphereLight('#ffffff', '#cfc8bd', 2.2));
+  const sun = new THREE.DirectionalLight('#fff6ea', 1.1);
+  sun.position.set(t[0] + 4, floorY + 6, t[2] + 3);
+  roomScene.add(sun);
+  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 60);
+}
+function renderRoom() {
+  if (!state.room || !roomRenderer) return;
+  const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
+  // Same camera as the character's frame, widened to the whole window around that frame.
+  roomCam.fov = 2 * Math.atan(Math.tan(K.fov * D2R / 2) * vr.height / fr.height) / D2R;
+  roomCam.aspect = vr.width / vr.height;
+  roomCam.updateProjectionMatrix();
+  roomCam.position.copy(camera.position);
+  roomCam.quaternion.copy(camera.quaternion);
+  roomRenderer.render(roomScene, roomCam);
+}
+
 function init(data) {
   renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: true, stencil: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -722,6 +779,7 @@ function init(data) {
   // their renderOrder, and the card must sit behind the mesh, showing only around it.
   backdrop = new THREE.Scene();
   floor = makeFloor(geometry.boundingBox.min.y);
+  makeRoom(geometry.boundingBox.min.y);
   backdrop.add(floor);
   cardMat = makeCardMaterial();
   card = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), cardMat);
@@ -757,6 +815,7 @@ function init(data) {
   const rings = new Set(K.keys.map(k => k.pitch)).size;
   $('facts').textContent = `${K.keys.length} drawings · Tencent Hy Image 3.5 · $0.024 each · ${K.frame[0]} × ${K.frame[1]} WebP`;
   new ResizeObserver(resize).observe(stageEl);
+  new ResizeObserver(resize).observe(viewportEl);
   resize();
   $('loading').hidden = true;
   setMode(state.mode);
@@ -764,6 +823,8 @@ function init(data) {
 }
 
 function resize() {
+  const vr = viewportEl.getBoundingClientRect();
+  roomRenderer?.setSize(vr.width, vr.height, false);
   const r = stageEl.getBoundingClientRect();
   renderer.setSize(r.width, r.height, false);
   const dpr = Math.min(devicePixelRatio, 2);
@@ -824,6 +885,7 @@ function render() {
   }
   renderer.autoClear = false;
   renderer.clear();
+  renderRoom();
   renderer.render(backdrop, camera);
   renderer.clearDepth();
   renderer.render(scene, camera);
@@ -1039,7 +1101,7 @@ const showRelief = () => { $('relief').value = state.relief; $('relief-out').tex
 showRelief();
 $('relief').addEventListener('input', e => { state.relief = +e.target.value; showRelief(); dirty = true; });
 $('skeleton').addEventListener('change', e => { state.skeleton = e.target.checked; dirty = true; });
-const showRoom = () => { $('room').checked = state.room; viewportEl.classList.toggle('room', state.room); };
+const showRoom = () => { $('room').checked = state.room; $('roomgl').hidden = !state.room; };
 showRoom();
 $('room').addEventListener('change', e => { state.room = e.target.checked; showRoom(); dirty = true; });
 $('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
