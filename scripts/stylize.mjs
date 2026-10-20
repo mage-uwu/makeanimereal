@@ -39,34 +39,35 @@ Art style (enforce strictly, copy it from the reference image):
 - full body, entire character visible head to toe, same framing and scale as the RENDER image
 `.trim();
 
+// What the camera sees at each yaw. Image models drift toward the front-facing reference, so
+// spell out which features must and must not be visible.
 function describeView({ yaw, pitch }) {
   const y = ((yaw % 360) + 360) % 360;
-  const facing =
-    y < 22.5 || y >= 337.5 ? 'facing the viewer (front view)'
-    : y < 67.5 ? 'three-quarter view, turned toward her left (we see her left side)'
-    : y < 112.5 ? 'side profile, we see her left side'
-    : y < 157.5 ? 'three-quarter back view, we see her back and left side'
-    : y < 202.5 ? 'back view, facing away from the viewer, face NOT visible'
-    : y < 247.5 ? 'three-quarter back view, we see her back and right side'
-    : y < 292.5 ? 'side profile, we see her right side'
-    : 'three-quarter view, turned toward her right (we see her right side)';
+  const side = s => `her ${s} side`;
+  const [facing, visible] =
+    y < 22.5 || y >= 337.5 ? ['FRONT view, she faces the viewer', 'face, both eyes, chest bow and front buttons are visible']
+    : y < 67.5 ? [`THREE-QUARTER FRONT view, body turned so we see the front and ${side('left')}`, 'face is seen at an angle, the far eye is partly hidden']
+    : y < 112.5 ? [`exact SIDE PROFILE of ${side('left')}, she faces toward the LEFT edge of the image`, 'only ONE eye visible, nose and chin in silhouette, torso seen edge-on, the chest bow sticks out in profile, one arm in front of the body']
+    : y < 157.5 ? [`THREE-QUARTER BACK view, we see her back and ${side('left')}`, 'face mostly hidden (at most a sliver of cheek), the chest bow and front buttons are NOT visible, mostly back of the hair and back of the dress']
+    : y < 202.5 ? ['BACK view, she faces directly away from the viewer', 'NO face, NO eyes, NO chest bow, NO front buttons; show the back of the head, the back of the dress and the backs of the legs and shoes']
+    : y < 247.5 ? [`THREE-QUARTER BACK view, we see her back and ${side('right')}`, 'face mostly hidden (at most a sliver of cheek), the chest bow and front buttons are NOT visible, mostly back of the hair and back of the dress']
+    : y < 292.5 ? [`exact SIDE PROFILE of ${side('right')}, she faces toward the RIGHT edge of the image`, 'only ONE eye visible, nose and chin in silhouette, torso seen edge-on, the chest bow sticks out in profile, one arm in front of the body']
+    : [`THREE-QUARTER FRONT view, body turned so we see the front and ${side('right')}`, 'face is seen at an angle, the far eye is partly hidden'];
   const cam = pitch > 5 ? `camera slightly above, looking down ${pitch}°`
     : pitch < -5 ? `camera slightly below, looking up ${-pitch}°` : 'camera at eye level';
-  return `${facing}; ${cam}`;
+  return { facing: `${facing}; ${cam}`, visible };
 }
 
 function buildPrompt(view, hasAnchor) {
+  const { facing, visible } = describeView(view);
   return [
-    `You are redrawing a 3D model render as a polished 2D anime illustration.`,
+    `Redraw the 3D model RENDER as a polished 2D anime illustration.`,
+    `VIEWING ANGLE (most important rule): ${facing}. ${visible}.`,
+    `The RENDER image is the ground truth for the angle, pose and silhouette. Match it exactly. Never turn the character toward the viewer just because the reference images face forward.`,
     opt['style-only']
-      ? `Images provided: (1) STYLE REFERENCE — copy ONLY its art style, NOT its character, outfit or colors.`
-      : `Images provided: (1) CHARACTER REFERENCE — the official front-view art of this exact character. Copy its art style AND its character design: face, hair, accessories, outfit details and colors.`,
-    `(2) RENDER — the 3D model from a specific camera angle. Reproduce this exact pose, viewing angle,`,
-    opt['style-only']
-      ? `silhouette, proportions, outfit design and color palette, just drawn in the reference art style.`
-      : `silhouette and proportions. Where the render lacks or simplifies a detail that the reference shows, follow the reference; work out how it looks from this angle.`,
-    hasAnchor ? `(3) CHARACTER ANCHOR — an already-finished front view of this same character in the target style; keep hair, face, outfit details and colors consistent with it.` : '',
-    `Camera: ${describeView(view)}. Do not rotate the character to face the viewer if the render does not.`,
+      ? `The STYLE REFERENCE is a different character: copy ONLY its art style, NOT its character, outfit or colors.`
+      : `The CHARACTER REFERENCE is official front-view art of this exact character: copy its art style and design (face, hair, accessories, outfit details, exact colors). Where the render lacks or simplifies a detail the reference shows, add it as it would look from this angle.`,
+    hasAnchor ? `The FRONT ANCHOR is an already-finished front view in the target style: keep identity, colors and details consistent with it, but do NOT copy its angle.` : '',
     `Remove all 3D-render artifacts (plastic shading, specular glare, blurry or low-poly textures); interpret them as clean fabric, hair and skin.`,
     STYLE_RULES,
     opt.prompt,
@@ -76,15 +77,22 @@ function buildPrompt(view, hasAnchor) {
 const mimeOf = f => ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' })[path.extname(f).toLowerCase()];
 const dataUrl = async f => `data:${mimeOf(f)};base64,${(await fs.readFile(f)).toString('base64')}`;
 
+// images: [{ label, url }] — each image is preceded by its label so the model knows which is which.
 async function generate(view, images) {
   const body = {
     model: opt.model,
     modalities: ['image', 'text'],
+    // OpenRouter reserves credit for the worst case up front; one image is ~1.3k tokens, so cap it.
+    max_tokens: 4096,
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: buildPrompt(view, images.length > 2) },
-        ...images.map(url => ({ type: 'image_url', image_url: { url } })),
+        { type: 'text', text: buildPrompt(view, images.some(i => i.label.startsWith('FRONT ANCHOR'))) },
+        ...images.flatMap(({ label, url }) => [
+          { type: 'text', text: `${label}:` },
+          { type: 'image_url', image_url: { url } },
+        ]),
+        { type: 'text', text: `Now draw the illustration. Remember: ${describeView(view).facing}.` },
       ],
     }],
   };
@@ -98,8 +106,10 @@ async function generate(view, images) {
     const img = json?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
     if (res.ok && img) return img;
     const err = json?.error?.message || text.slice(0, 300);
-    // 401/402/403 won't fix themselves; everything else (429, 5xx, empty image) gets retried.
-    if ([400, 401, 402, 403].includes(res.status) || attempt >= 4) {
+    // Auth and real out-of-credit errors won't fix themselves; everything else (429, 5xx, empty
+    // image, a 402 that only means credit is reserved by in-flight requests) gets retried.
+    const fatal = [400, 401, 403].includes(res.status) || (res.status === 402 && !/in-flight/i.test(err));
+    if (fatal || attempt >= 4) {
       throw new Error(`OpenRouter ${res.status}: ${err || 'no image in response'}`);
     }
     const wait = 2 ** attempt * 1000;
@@ -136,8 +146,11 @@ async function run(view, anchorUrl) {
     console.log(`--- ${view.file}\n${buildPrompt(view, !!anchorUrl)}\n`);
     return;
   }
-  const images = [styleUrl, await dataUrl(path.join(rendersDir, view.file))];
-  if (anchorUrl) images.push(anchorUrl);
+  const images = [
+    { label: `RENDER (the angle and pose to draw)`, url: await dataUrl(path.join(rendersDir, view.file)) },
+    { label: opt['style-only'] ? 'STYLE REFERENCE' : 'CHARACTER REFERENCE (front view, for design and style only)', url: styleUrl },
+  ];
+  if (anchorUrl) images.push({ label: 'FRONT ANCHOR (for identity only, not the angle)', url: anchorUrl });
   const t = Date.now();
   try {
     await save(await generate(view, images), outFile);
@@ -165,11 +178,12 @@ try {
   }));
 } catch (e) {
   console.error(`stopping: ${e.message}`);
-  process.exit(1);
+  process.exitCode = 1;
 }
 
 if (!opt['dry-run']) {
-  const doneFiles = new Set(done.map(v => v.file));
+  // List every view that has a drawing on disk, including ones from earlier or --only runs.
+  const doneFiles = new Set((await fs.readdir(outDir)).filter(f => f.endsWith('.png')));
   await fs.writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({
     ...manifest, model: opt.model, style: opt.style, renders: path.relative(outDir, rendersDir),
     views: manifest.views.filter(v => doneFiles.has(v.file)),
