@@ -10,7 +10,8 @@ and the model's posed shape.
 --keys     the stylized drawings (from stylize.mjs)
 
 Key drawings ship untouched: the viewer shows them exactly as drawn on their key angle. Beside each
-one goes a warp atlas (warps/*.png), a few smooth displacement fields at quarter resolution:
+one goes a warp atlas (packed 16 to a sheet in warps/sheetNN.webp), a few smooth displacement
+fields at quarter resolution:
 
   tile 0     fit to mesh: moves the drawing's features (eyes, bow, buttons, hems) onto the render's,
              so the hidden mesh can bend it ("projected" mode)
@@ -59,6 +60,7 @@ HANDOFF_SIGMA = 70.0  # px at the output size
 RELIEF_SIGMA = 4.0  # lattice cells (about 32 px at 600 wide) over which a drawing's depth is smoothed
 RESIDUAL_RANGE = 0.08  # metres either way for a drawing's 8-bit offset from the latent surface
 MAX_NEIGHBOURS = 6
+WARP_SHEET = 16  # warp atlases per published sheet
 
 
 def cut_out_white(im):
@@ -489,7 +491,7 @@ def main():
 
     # Pass 2: correspondences between neighbouring drawings, packed with the fit into one atlas.
     th, tw = size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE
-    keys = []
+    keys, atlases = [], []
     measured_tiles = {}
 
     def measured(i, j):
@@ -522,7 +524,7 @@ def main():
             atlas[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
         wname = Path(it['v']['file']).with_suffix('.webp').name
         # Lossless: the fields are displacements, and lossy noise would make the drawing shimmer.
-        Image.fromarray((atlas * 255 + 0.5).astype(np.uint8)).save(out / 'warps' / wname, 'WEBP', lossless=True, quality=100, method=6)
+        atlases.append((atlas * 255 + 0.5).astype(np.uint8))
         keys.append({'file': f'keys/{it["name"]}', 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
                      's': round(it['s'], 5), 'ox': round(it['ox'], 5), 'oy': round(it['oy'], 5),
                      'neighbours': [int(j) for j in near[i]],
@@ -531,6 +533,17 @@ def main():
         print(f'{wname}  {len(near[i])} neighbours')
 
     cam = manifest['cameras'][0]
+    # Pack the warp atlases into sheets of WARP_SHEET keys, neighbours together, so the published
+    # bundle stays well under the artifact's file limit. The viewer cuts each key's atlas back out.
+    order = sorted(range(len(keys)), key=lambda i: (keys[i]['pitch'], keys[i]['yaw']))
+    for old in (out / 'warps').glob('*.webp'):
+        old.unlink()
+    for n in range(0, len(order), WARP_SHEET):
+        group = order[n:n + WARP_SHEET]
+        sheet = f'warps/sheet{n // WARP_SHEET:02d}.webp'
+        Image.fromarray(np.concatenate([atlases[i] for i in group], 0)).save(out / sheet, 'WEBP', lossless=True, quality=100, method=6)
+        for row, i in enumerate(group):
+            keys[i]['warps'] = {'sheet': sheet, 'row': row}
     (out / 'keys.json').write_text(json.dumps({
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),

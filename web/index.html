@@ -249,8 +249,20 @@ const image = src => new Promise((res, rej) => {
   img.onerror = () => rej(new Error(`Could not load ${src}`));
   img.src = src;
 });
+// Warp atlases come 16 to a sheet; each key's is cut back out onto its own canvas.
+const sheets = new Map();
+async function warpAtlas(w) {
+  if (typeof w === 'string') return image(w);
+  if (!sheets.has(w.sheet)) sheets.set(w.sheet, image(w.sheet));
+  const sheet = await sheets.get(w.sheet);
+  const h = sheet.width / K.atlas[0] * K.atlas[1] * K.frame[1] / K.frame[0];
+  const c = document.createElement('canvas');
+  c.width = sheet.width; c.height = Math.round(h);
+  c.getContext('2d').drawImage(sheet, 0, w.row * c.height, c.width, c.height, 0, 0, c.width, c.height);
+  return c;
+}
 async function fetchKey(k) {
-  if (!k.loading) k.loading = Promise.all([image(k.file), image(k.warps)]).then(([img, warpImg]) => {
+  if (!k.loading) k.loading = Promise.all([image(k.file), warpAtlas(k.warps)]).then(([img, warpImg]) => {
     Object.assign(k, { img, warpImg, ready: true });
     K.loaded++;
     dirty = true;
