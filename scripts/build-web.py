@@ -17,9 +17,18 @@ one goes a warp atlas (warps/*.png), a few smooth displacement fields at quarter
   tiles 1-6  stretch toward each neighbouring key drawing (lossless WebP): dense correspondences between the two
              drawings, so one drawing can be stretched toward the next with no model ("flipstretch")
   tile 7     Neuromation lattice tensor: for each vertex of a shared 75 x 112 grid laid over the
-             drawing, the 3D point of the character it shows (16-bit, split in high and low byte
-             planes), whether the drawing has paint there, and its nearest bone. Every drawing is
-             a view of one latent object, and this is where on it each part of the drawing sits.
+             drawing, the latent surface point it shows (16-bit, split in high and low byte
+             planes), the drawing's own offset from that point (8-bit, within RESIDUAL_RANGE),
+             whether the drawing has paint there, its nearest bone, and how far off her surface it
+             lies (art beyond the mesh, like ribbons, swings toward where neighbours drew it).
+
+Latent rotation: each drawing depicts the character from a slightly different vantage than the
+camera it was asked for (the "30 degree" drawing may really be turned 27 degrees and seen from a
+little higher). build-web.py learns that vantage per key (yaw and pitch offsets, roll, framing) from
+the surface points visible in its render and where the drawing's fit puts them, and places every
+lattice vertex on the ray from that vantage through its pixel, at the surface depth. Viewed from
+its learned vantage, a lattice reproduces its drawing exactly; between keys the viewer rotates the
+whole rigid latent object, with the vantage corrections blended, instead of morphing 2D warps.
 
 A drawing on a flat chroma background (the manifest's background colour) is keyed out; one on
 white falls back to a flood fill from the border.
@@ -34,7 +43,7 @@ from pathlib import Path
 
 import cv2
 
-from latent import KeyCamera, read_depth
+from latent import KeyCamera, VantageCamera, read_depth, solve_vantage
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -45,6 +54,7 @@ FIELD_DOWNSAMPLE = 4  # fields are smooth, so quarter resolution holds them
 ATLAS_COLS, ATLAS_ROWS = 4, 2  # tile 0 = fit to mesh, tiles 1..6 = neighbours, tile 7 = lattice tensor
 LATTICE = (75, 112)  # Neuromation grid: vertices across and down, shared by every key
 LATTICE_RANGE = 1.25  # metres either side of the target that the 16-bit latent coordinates cover
+RESIDUAL_RANGE = 0.08  # metres either way for a drawing's 8-bit offset from the latent surface
 MAX_NEIGHBOURS = 6
 
 
@@ -192,7 +202,7 @@ def fill_depth(dist):
     return np.where(hole, soft, filled).astype(np.float32)
 
 
-def lattice_tensor(cam, dist, fit, alpha, size, target, verts, vert_bone):
+def lattice_tensor(cam, vantage, dist, fit, alpha, size, target, verts, vert_bone, raw):
     """Tile 7 for one key: where on the character each lattice vertex of the drawing sits.
 
     A vertex at frame point x shows the drawing's paint there. The drawing's fit says the render
@@ -213,21 +223,34 @@ def lattice_tensor(cam, dist, fit, alpha, size, target, verts, vert_bone):
         yx, yy = (X * W - fx).astype(np.float32), (Y * H - fy).astype(np.float32)
     dh, dw = dist.shape
     d = cv2.remap(dist, yx / W * dw, yy / H * dh, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    pts = cam.lift(yx / W, yy / H, d.astype(np.float64))
+    surface = cam.lift(yx / W, yy / H, d.astype(np.float64))
+    # How far off her actual surface the vertex lies (ribbons, hair beyond the mesh), in output
+    # pixels, saturating at 16: the viewer lets such art swing toward where neighbours drew it.
+    off_px = cv2.distanceTransform(np.isnan(raw).astype(np.uint8), cv2.DIST_L2, 5) * (W / raw.shape[1])
+    offness = np.clip(cv2.remap(off_px.astype(np.float32), yx / W * raw.shape[1], yy / H * raw.shape[0], cv2.INTER_LINEAR) / 16, 0, 1)
+    # The vertex's latent position: on the ray from the drawing's learned vantage through its
+    # pixel, at the depth of the surface point the drawing shows there. Rigid from then on.
+    depth_from_vantage = (surface - vantage.pos) @ vantage.forward
+    pts = vantage.lift(X, Y, depth_from_vantage)
+    # Stored as the surface point plus the drawing's own offset from it, so the viewer can relax
+    # the offset away near hand-offs, where neighbouring drawings must meet on the same shape.
+    offset = np.clip((pts - surface) / (2 * RESIDUAL_RANGE) + 0.5, 0, 1)
     # Nearest bone, from the nearest mesh vertex.
     bone = np.zeros(X.shape, np.uint8)
-    flat = pts[valid]
+    flat = surface[valid]
     for start in range(0, len(flat), 1024):
         chunk = flat[start:start + 1024]
         nearest = ((chunk[:, None, :] - verts[None]) ** 2).sum(-1).argmin(1)
         bone[np.nonzero(valid)[0][start:start + 1024], np.nonzero(valid)[1][start:start + 1024]] = vert_bone[nearest]
-    q = np.clip((pts - np.asarray(target) + LATTICE_RANGE) / (2 * LATTICE_RANGE), 0, 1)
+    q = np.clip((surface - np.asarray(target) + LATTICE_RANGE) / (2 * LATTICE_RANGE), 0, 1)
     q = (q * 65535 + 0.5).astype(np.uint32)
     tile = np.zeros((size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE, 3), np.float32)
     tile[:gy, :gx] = (q >> 8) / 255            # high bytes of x, y, z
     tile[gy:2 * gy, :gx] = (q & 255) / 255     # low bytes
     tile[:gy, gx:2 * gx, 0] = valid            # paint here
     tile[:gy, gx:2 * gx, 1] = bone / 255       # nearest bone
+    tile[:gy, gx:2 * gx, 2] = offness          # 0 on her surface, 1 well off it
+    tile[gy:2 * gy, gx:2 * gx] = offset         # the drawing's offset from the latent surface
     return tile, int(valid.sum())
 
 
@@ -245,6 +268,54 @@ def invert_tile(tile):
     out = tile.copy()
     out[..., :2] = np.clip(g * FIELD_DOWNSAMPLE / FIELD_RANGE + 0.5, 0, 1)
     return out
+
+
+def learn_vantage(view, cam0, fov, aspect, cam, raw_depth, fit, verts, size):
+    """The vantage this drawing actually depicts, from where its fit puts the surface points
+    visible in its render. Also reports the median distance left over, in output pixels."""
+    W, H = size
+    fx, fy, dist = cam.project(verts)
+    dh, dw = raw_depth.shape
+    px, py = np.clip((fx * dw).astype(int), 0, dw - 1), np.clip((fy * dh).astype(int), 0, dh - 1)
+    seen = np.abs(raw_depth[py, px] - dist) < 0.015
+    gx, gy = (fx[seen] * W).astype(np.float32), (fy[seen] * H).astype(np.float32)
+    ffx = cv2.remap(fit[..., 0], gx, gy, cv2.INTER_LINEAR).ravel()
+    ffy = cv2.remap(fit[..., 1], gx, gy, cv2.INTER_LINEAR).ravel()
+    targets = np.stack([fx[seen] + ffx / W, fy[seen] + ffy / H], 1)
+    vantage, r = solve_vantage(view, cam0, fov, aspect, verts[seen], targets)
+    n = len(r) // 2
+    vantage['residual_px'] = float(np.median(np.hypot(r[:n], r[n:])) * W)
+    return vantage
+
+
+VANTAGE_KEYS = ('d_yaw', 'd_pitch', 'roll', 'scale', 'tx', 'ty')
+
+
+def smooth_vantages(views, learned, near, max_rounds=12):
+    """Where two neighbouring keys' learned yaw or pitch corrections would swap their order (making
+    the rotation run backwards for a moment), blend those keys' yaw and pitch corrections with
+    their neighbours' until the order holds. Everything else keeps its learned value."""
+    vals = [{k: float(l[k]) for k in VANTAGE_KEYS} for l in learned]
+
+    def flipped():
+        keys = set()
+        for i, js in enumerate(near):
+            for j in js:
+                for ang, d in (('yaw', 'd_yaw'), ('pitch', 'd_pitch')):
+                    a, b = views[i][ang], views[j][ang]
+                    gap = (b - a + 180) % 360 - 180 if ang == 'yaw' else b - a
+                    if abs(gap) > 1e-6 and (gap + vals[j][d] - vals[i][d]) * gap <= 0:
+                        keys.update((i, j))
+        return keys
+
+    rounds = 0
+    while (bad := flipped()) and rounds < max_rounds:
+        for i in bad:
+            for k in ('d_yaw', 'd_pitch'):
+                vals[i][k] = 0.5 * vals[i][k] + 0.5 * float(np.mean([vals[j][k] for j in near[i]]))
+        rounds += 1
+    print(f'vantage field: {rounds} smoothing rounds, {len(flipped())} keys still out of order')
+    return [{k: round(v[k], 5) for k in VANTAGE_KEYS} for v in vals]
 
 
 def encode_tile(field, size):
@@ -284,7 +355,8 @@ def main():
     vert_bone = np.asarray(mesh.get('bone', [0] * len(verts)), np.int64).clip(0, 255)
     assert 2 * LATTICE[1] <= size[1] // FIELD_DOWNSAMPLE and 2 * LATTICE[0] <= size[0] // FIELD_DOWNSAMPLE
 
-    # Pass 1: cut out, place in the render frame, fit to the render, place on the latent object.
+    # Pass 1: cut out, place in the render frame, fit to the render, learn the vantage it depicts.
+    aspect = manifest['width'] / manifest['height']
     placed, items = [], []
     for v in views:
         src = keys_dir / v['file']
@@ -314,21 +386,43 @@ def main():
         # The key drawing itself, untouched apart from the background cut-out and resize.
         if not (out / 'keys' / name).exists() or (out / 'keys' / name).stat().st_mtime < cached.stat().st_mtime:
             Image.fromarray((drawing * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=90, method=6)
-        tensor_file = cache / (src.stem + '.lattice.npy')
-        if tensor_file.exists() and tensor_file.stat().st_mtime >= fit_file.stat().st_mtime:
-            tensor = np.load(tensor_file)
-            used = int((tensor[:LATTICE[1], LATTICE[0]:2 * LATTICE[0], 0] > 0.5).sum())
+        vantage_file = cache / (src.stem + '.vantage.json')
+        if vantage_file.exists() and vantage_file.stat().st_mtime >= fit_file.stat().st_mtime:
+            learned = json.loads(vantage_file.read_text())
         else:
-            cam = KeyCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], manifest['width'] / manifest['height'])
-            dist = fill_depth(read_depth(renders / manifest['depth']['dir'] / v['file'], cam0['radius'], manifest['depth']['pad']))
-            tensor, used = lattice_tensor(cam, dist, fit, pl[..., 3], size, cam0['target'], verts, vert_bone)
-            np.save(tensor_file, tensor)
+            cam = KeyCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], aspect)
+            raw = read_depth(renders / manifest['depth']['dir'] / v['file'], cam0['radius'], manifest['depth']['pad'])
+            learned = learn_vantage(v, cam0, manifest['fov'], aspect, cam, raw, fit, verts, size)
+            vantage_file.write_text(json.dumps(learned))
         placed.append(pl)
-        items.append({'v': v, 'name': name, 's': s, 'ox': ox, 'oy': oy, 'fit': fit, 'tensor': tensor})
-        print(f'{name}  scale {s:.3f}  offset {ox:+.3f},{oy:+.3f}  lattice {used} vertices')
+        items.append({'v': v, 'name': name, 's': s, 'ox': ox, 'oy': oy, 'fit': fit, 'learned': learned})
+        print(f'{name}  scale {s:.3f}  offset {ox:+.3f},{oy:+.3f}  '
+              f'vantage {learned["d_yaw"]:+.1f} {learned["d_pitch"]:+.1f} deg, residual {learned["residual_px"]:.1f}px')
+
+    # The vantage corrections as a smooth field over the view sphere: each key's blended with its
+    # neighbours' until no two neighbours swap order (which would make the rotation run backwards
+    # for a moment). Whatever a key's own correction loses stays in its lattice, rigidly.
+    near = neighbours([it['v'] for it in items])
+    vantages = smooth_vantages([it['v'] for it in items], [it['learned'] for it in items], near)
+
+    # Pass 1b: each lattice vertex's fixed place in the latent object, seen from its key's vantage.
+    for it, vantage in zip(items, vantages):
+        v, src = it['v'], keys_dir / it['v']['file']
+        tensor_file = cache / (src.stem + '.latent.npy')
+        stamp = cache / (src.stem + '.latent.json')
+        if tensor_file.exists() and stamp.exists() and json.loads(stamp.read_text()) == {**vantage, 'format': 3}:
+            tensor = np.load(tensor_file)
+        else:
+            cam = KeyCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], aspect)
+            raw = read_depth(renders / manifest['depth']['dir'] / v['file'], cam0['radius'], manifest['depth']['pad'])
+            vcam = VantageCamera(v['yaw'], v['pitch'], cam0['target'], cam0['radius'], manifest['fov'], aspect,
+                                 vantage['d_yaw'], vantage['d_pitch'], vantage['roll'], vantage['scale'], vantage['tx'], vantage['ty'])
+            tensor, _ = lattice_tensor(cam, vcam, fill_depth(raw), it['fit'], placed[items.index(it)][..., 3], size, cam0['target'], verts, vert_bone, raw)
+            np.save(tensor_file, tensor)
+            stamp.write_text(json.dumps({**vantage, 'format': 3}))
+        it['tensor'], it['vantage'] = tensor, vantage
 
     # Pass 2: correspondences between neighbouring drawings, packed with the fit into one atlas.
-    near = neighbours([it['v'] for it in items])
     th, tw = size[1] // FIELD_DOWNSAMPLE, size[0] // FIELD_DOWNSAMPLE
     keys = []
     measured_tiles = {}
@@ -364,7 +458,8 @@ def main():
         Image.fromarray((atlas * 255 + 0.5).astype(np.uint8)).save(out / 'warps' / wname, 'WEBP', lossless=True, quality=100, method=6)
         keys.append({'file': f'keys/{it["name"]}', 'warps': f'warps/{wname}', 'yaw': it['v']['yaw'], 'pitch': it['v']['pitch'],
                      's': round(it['s'], 5), 'ox': round(it['ox'], 5), 'oy': round(it['oy'], 5),
-                     'neighbours': [int(j) for j in near[i]]})
+                     'neighbours': [int(j) for j in near[i]],
+                     'vantage': it['vantage']})
         print(f'{wname}  {len(near[i])} neighbours')
 
     cam = manifest['cameras'][0]
@@ -372,7 +467,7 @@ def main():
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),
         'fieldRange': FIELD_RANGE, 'frame': list(size), 'atlas': [ATLAS_COLS, ATLAS_ROWS],
-        'lattice': {'size': list(LATTICE), 'range': LATTICE_RANGE, 'tile': ATLAS_COLS * ATLAS_ROWS - 1},
+        'lattice': {'size': list(LATTICE), 'range': LATTICE_RANGE, 'residual': RESIDUAL_RANGE, 'tile': ATLAS_COLS * ATLAS_ROWS - 1},
         'keys': keys,
     }, indent=1))
     # The viewer never shows the model, so it gets only the posed shape (render.mjs --export-mesh).

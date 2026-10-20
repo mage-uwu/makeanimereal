@@ -53,3 +53,55 @@ def read_depth(path, radius, pad):
     dist = 2 * near * far / (far + near - zn * (far - near))
     dist[a[..., 3] < 0.5] = np.nan
     return dist
+
+
+class VantageCamera(KeyCamera):
+    """A key camera turned by a learned correction: the vantage a drawing actually depicts.
+
+    yaw/pitch offsets move it on the orbit, roll turns it about its view axis (as three.js
+    camera.rotateZ), and scale/tx/ty reframe the image about its centre: x' = s (x - .5) + .5 + tx.
+    """
+
+    def __init__(self, yaw, pitch, target, radius, fov, aspect, d_yaw=0.0, d_pitch=0.0, roll=0.0, scale=1.0, tx=0.0, ty=0.0):
+        super().__init__(yaw + d_yaw, pitch + d_pitch, target, radius, fov, aspect)
+        c, s = math.cos(math.radians(roll)), math.sin(math.radians(roll))
+        self.right, self.up = c * self.right + s * self.up, -s * self.right + c * self.up
+        self.scale, self.tx, self.ty = scale, tx, ty
+
+    def project(self, pts):
+        fx, fy, dist = super().project(pts)
+        return self.scale * (fx - 0.5) + 0.5 + self.tx, self.scale * (fy - 0.5) + 0.5 + self.ty, dist
+
+    def lift(self, fx, fy, dist):
+        return super().lift((fx - 0.5 - self.tx) / self.scale + 0.5, (fy - 0.5 - self.ty) / self.scale + 0.5, dist)
+
+
+def solve_vantage(view, cam0, fov, aspect, pts, targets, iters=15, huber=0.01):
+    """The vantage a drawing actually depicts.
+
+    pts: surface points visible in the key's render; targets: where the drawing puts each one
+    (frame fractions, from the drawing's fit to the render). Gauss-Newton with Huber weights over
+    (yaw offset, pitch offset, roll in degrees, log scale, tx, ty).
+    """
+    p = np.zeros(6)
+
+    def residual(q):
+        c = VantageCamera(view['yaw'], view['pitch'], cam0['target'], cam0['radius'], fov, aspect,
+                          q[0], q[1], q[2], math.exp(q[3]), q[4], q[5])
+        fx, fy, _ = c.project(pts)
+        return np.concatenate([fx - targets[:, 0], fy - targets[:, 1]])
+
+    steps = np.array([0.05, 0.05, 0.05, 0.001, 0.0005, 0.0005])
+    for _ in range(iters):
+        r = residual(p)
+        J = np.stack([(residual(p + np.eye(6)[i] * steps[i]) - r) / steps[i] for i in range(6)], 1)
+        a = np.abs(r)
+        w = np.where(a <= huber, 1.0, huber / np.maximum(a, 1e-12))
+        JW = J * w[:, None]
+        delta = np.linalg.solve(JW.T @ J + 1e-6 * np.eye(6), -(JW.T @ r))
+        p += delta
+        if np.abs(delta).max() < 1e-5:
+            break
+    r = residual(p)
+    return {'d_yaw': float(p[0]), 'd_pitch': float(p[1]), 'roll': float(p[2]), 'scale': float(math.exp(p[3])),
+            'tx': float(p[4]), 'ty': float(p[5])}, r

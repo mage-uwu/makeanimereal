@@ -63,15 +63,18 @@ mixes two drawings on a pixel:
   drawings along dense correspondences matched between the drawings themselves (optical flow),
   as far as the camera has moved toward each. It hands over halfway to the next key.
 - **Flipbook**: the nearest drawing held still, like a 2D game sprite.
-- **Neuromation**: every key drawing is treated as one view of a single latent object. Each vertex
-  of a 75 x 112 lattice over each drawing knows the 3D point of the character it shows, traced
-  through the drawing's fit to its render and the render's depth map. At any camera, a point sits
-  at its 3D position plus the drawn proportions of up to three nearby keys, blended by closeness.
-  That offset depends only on the 3D point, so every drawing lands on the same shape and a hand-off
-  swaps paint, not shape. Art off the mesh (ribbons) follows the drawing-to-drawing correspondences
-  (each pair measured once and inverted for the reverse direction). Triangles that fold or stretch
-  past 3x are dropped and filled, only inside the lead drawing's outline and only where it left a
-  hole, by the next drawing. No depth maps or mesh are needed at runtime.
+- **Neuromation** (latent rotation): every key drawing is one view of a single latent object, but
+  each was drawn from a slightly different vantage than requested (often turned a few degrees less,
+  or seen from higher). `build-web.py` learns that vantage per key (yaw and pitch offsets, roll,
+  framing; Gauss-Newton with Huber weights over the surface points visible in its render, then
+  smoothed only where neighbours would swap order) and fixes each vertex of a 75 x 112 lattice over
+  the drawing in the latent object, on the ray from that vantage through its pixel at the surface
+  depth. Viewed from its vantage, a lattice reproduces its drawing exactly. Between keys your angle
+  maps to a latent angle that blends the nearby keys' vantages, and the whole object rotates
+  rigidly; no 2D warp fields are interpolated. Each drawing's small offset from the shared surface
+  relaxes away by the hand-off, art off the mesh (ribbons) swings toward where the neighbouring
+  drawing put it, and the lattice is depth-tested like a mesh. Parts stretched past 5x count as
+  tears and are filled, only inside the lead drawing's outline, by the next drawing.
 
 `build-web.py` writes per key the untouched drawing (`keys/`) and a warp atlas (`warps/`, lossless
 WebP): tile 0 is the fit to the mesh, tiles 1-6 the correspondences to each neighbouring key (the

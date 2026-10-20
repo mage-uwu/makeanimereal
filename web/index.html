@@ -171,7 +171,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="label">How each mode fills the gaps</div>
         <dl class="method">
           <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
-          <div><dt>Neuromation</dt><dd>Every drawing is treated as a view of one latent object. Each point of each drawing knows where on her it sits in 3D. Between keys, the points move with that object and take on the nearby drawings' proportions, blended by distance to each. All the drawings share one shape at any angle, so a hand-off swaps only the paint. Triangles that would fold or tear give way to the next drawing behind.</dd></div>
+          <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and each point of the drawing is fixed in the latent object so the drawing's own vantage sees it exactly where it was drawn. Between keys the object rotates rigidly; your angle maps to a latent angle that blends the nearby drawings' vantages. Folded or torn parts give way to the next drawing, only inside the lead drawing's outline.</dd></div>
           <div><dt>Projected</dt><dd>The nearest drawing is projected onto an invisible 3D model of her from the camera it was drawn for, then seen from your camera, so it bends with her shape. Surfaces it could not see come whole from the next drawing that did.</dd></div>
           <div><dt>Flipstretch</dt><dd>No model. The nearest drawing is stretched toward its neighbouring drawings, along correspondences matched between the drawings themselves. It hands over halfway to the next key.</dd></div>
           <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
@@ -195,7 +195,7 @@ const stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.get
 
 const MODES = ['neuro', 'projected', 'flipstretch', 'flipbook'];
 const NOTES = {
-  neuro: 'Between keys, the drawings ride one latent 3D object with blended proportions, so hand-offs swap paint, not shape.',
+  neuro: 'Between keys, the drawings rotate rigidly with one latent object, seen from the vantages the drawings really depict.',
   projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
   flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
@@ -519,10 +519,10 @@ function makeStretchMaterial() {
   });
 }
 
-// Neuromation: one drawing on its lattice. Each vertex's 3D point on the latent object comes from
-// the drawing's tensor (atlas tile 7); it moves with the camera like a point on her, offset by the
-// drawn proportions of up to three nearby keys, blended by closeness. The offsets depend only on the
-// 3D point, so every drawing's lattice lands on the same shape at any camera angle.
+// Neuromation: one drawing on its lattice. Each vertex has a fixed position in the latent object
+// (atlas tile 7), placed so that the drawing's learned vantage sees it exactly where it was drawn.
+// Every lattice is drawn through the same latent camera, so between keys the whole object simply
+// rotates: rigid, with nothing morphing.
 function makeNeuroMaterial(shared, footprint) {
   return new THREE.ShaderMaterial({
     side: THREE.DoubleSide,
@@ -531,30 +531,50 @@ function makeNeuroMaterial(shared, footprint) {
       ...atlasUniforms(),
       uOwn: { value: null }, uTex: { value: null },
       uAlign: { value: new THREE.Vector4(1, 0, 0, 0) },
-      uD0: { value: null }, uD1: { value: null }, uD2: { value: null },
-      uDVP: { value: [0, 1, 2].map(() => new THREE.Matrix4()) },
-      uDPos: { value: [0, 1, 2].map(() => new THREE.Vector3()) },
-      uDRight: { value: [0, 1, 2].map(() => new THREE.Vector3()) },
-      uDUp: { value: [0, 1, 2].map(() => new THREE.Vector3()) },
-      uDFwd: { value: [0, 1, 2].map(() => new THREE.Vector3()) },
-      uDW: { value: [0, 0, 0] },
-      uRes: { value: [0, 0, 0] }, uResTile: { value: [1, 1, 1] },
+      uLatentVP: { value: new THREE.Matrix4() },
       uTarget: { value: new THREE.Vector3(...K.target) },
       uRange: { value: K.lattice.range },
+      uResidual: { value: K.lattice.residual }, uRho: { value: 1 },
+      uNVP: { value: [0, 1].map(() => new THREE.Matrix4()) },
+      uNPos: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNRight: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNUp: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNFwd: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNScale: { value: [1, 1] }, uNTile: { value: [1, 1] }, uNT: { value: [0, 0] },
+      uTan: { value: Math.tan(K.fov * D2R / 2) }, uAspect: { value: K.aspect },
       uLattice: { value: new THREE.Vector2(...K.lattice.size) },
       uLatTile: { value: K.lattice.tile },
-      uTan: { value: Math.tan(K.fov * D2R / 2) }, uAspect: { value: K.aspect },
       uFrame: { value: new THREE.Vector2(...K.frame) },
-      uK0: { value: 1 }, uMaxStretch: { value: 3 },
+      uK0: { value: 1 }, uMaxStretch: { value: 5 },
     },
     vertexShader: /* glsl */`
-      ${ATLAS_GLSL}
-      uniform sampler2D uOwn, uD0, uD1, uD2;
-      uniform mat4 uDVP[3];
-      uniform vec3 uDPos[3], uDRight[3], uDUp[3], uDFwd[3];
-      uniform float uDW[3], uRes[3], uResTile[3];
+      uniform vec2 uAtlas;
+      uniform sampler2D uOwn;
+      uniform mat4 uLatentVP;
       uniform vec3 uTarget;
-      uniform float uRange, uLatTile, uTan, uAspect;
+      uniform float uRange, uLatTile, uResidual, uRho, uTan, uAspect;
+      uniform vec2 uFieldScale;
+      uniform mat4 uNVP[2];
+      uniform vec3 uNPos[2], uNRight[2], uNUp[2], uNFwd[2];
+      uniform float uNScale[2], uNTile[2], uNT[2];
+      // A correspondence field (atlas tile t) at drawing frame point x, as a frame fraction.
+      vec2 warpAt(float t, vec2 x) {
+        vec2 e = 0.5 / (vec2(textureSize(uOwn, 0)) / uAtlas);
+        vec2 cell = vec2(mod(t, uAtlas.x), floor(t / uAtlas.x));
+        vec2 q = (cell + clamp(x, e, 1.0 - e)) / uAtlas;
+        return (texture(uOwn, vec2(q.x, 1.0 - q.y)).rg - 0.5) * uFieldScale;
+      }
+      // Art off her surface swings toward where neighbour k drew it: the gap, in k's own drawing,
+      // between where the correspondence puts this point and where the latent object shows it,
+      // lifted back into 3D in k's image plane.
+      vec3 swing(int k, vec3 p, vec2 x) {
+        vec4 c = uNVP[k] * vec4(p, 1.0);
+        vec2 uv = c.xy / c.w * 0.5 + 0.5;
+        vec2 r = x + warpAt(uNTile[k], x) - vec2(uv.x, 1.0 - uv.y);
+        r *= min(1.0, 0.08 / max(length(r), 1e-6));
+        float dist = dot(p - uNPos[k], uNFwd[k]);
+        return (uNRight[k] * (r.x * uAspect) - uNUp[k] * r.y) * 2.0 * dist * uTan / uNScale[k];
+      }
       uniform vec2 uLattice;
       attribute vec2 aCell;
       varying vec2 vTex;
@@ -564,45 +584,27 @@ function makeNeuroMaterial(shared, footprint) {
         ivec2 size = textureSize(uOwn, 0);
         return texelFetch(uOwn, ivec2(p.x, size.y - 1 - p.y), 0).rgb;
       }
-      // Key k's drawn proportions at latent point s: its fit field, lifted from its image plane
-      // into a 3D offset at s's distance from that key's camera.
-      vec3 drawnOffset(sampler2D atlas, int k, vec3 s) {
-        vec4 c = uDVP[k] * vec4(s, 1.0);
-        vec2 uv = c.xy / c.w * 0.5 + 0.5;
-        vec2 f = warpAt(atlas, 0.0, vec2(uv.x, 1.0 - uv.y));
-        float dist = dot(s - uDPos[k], uDFwd[k]);
-        return uDRight[k] * (f.x * 2.0 * dist * uTan * uAspect) - uDUp[k] * (f.y * 2.0 * dist * uTan);
-      }
-      // What the latent shape can't explain: where this drawing's feature at x lands in neighbour k
-      // (the correspondence between the two drawings, atlas tile uResTile[k]) minus where the
-      // latent shape puts the same point in k's drawing. Near zero on the body; on art off the mesh,
-      // like the ribbons, it carries them to where the neighbour drew them.
-      vec3 leftover(sampler2D atlas, int k, vec3 s, vec2 x) {
-        vec4 c = uDVP[k] * vec4(s, 1.0);
-        vec2 uv = c.xy / c.w * 0.5 + 0.5;
-        vec2 yk = vec2(uv.x, 1.0 - uv.y);
-        vec2 r = x + warpAt(uOwn, uResTile[k], x) - (yk + warpAt(atlas, 0.0, yk));
-        // A bad match can be large; cap it so it never flings paint far off the body.
-        r *= min(1.0, 0.06 / max(length(r), 1e-6));
-        float dist = dot(s - uDPos[k], uDFwd[k]);
-        return uDRight[k] * (r.x * 2.0 * dist * uTan * uAspect) - uDUp[k] * (r.y * 2.0 * dist * uTan);
-      }
       void main() {
         ivec2 cell = ivec2(aCell);
-        ivec2 size = textureSize(uOwn, 0);
-        ivec2 tile = size / ivec2(uAtlas);
+        ivec2 tile = textureSize(uOwn, 0) / ivec2(uAtlas);
         int t = int(uLatTile);
         ivec2 o = ivec2((t % int(uAtlas.x)) * tile.x, (t / int(uAtlas.x)) * tile.y);
         vec3 hi = floor(atlasPx(o + cell) * 255.0 + 0.5);
         vec3 lo = floor(atlasPx(o + ivec2(0, int(uLattice.y)) + cell) * 255.0 + 0.5);
         vValid = atlasPx(o + ivec2(int(uLattice.x), 0) + cell).r;
-        vec3 s = uTarget + (hi * 256.0 + lo) / 65535.0 * 2.0 * uRange - uRange;
-        vec3 p = s + uDW[0] * drawnOffset(uD0, 0, s) + uDW[1] * drawnOffset(uD1, 1, s) + uDW[2] * drawnOffset(uD2, 2, s);
+        vec3 p = uTarget + (hi * 256.0 + lo) / 65535.0 * 2.0 * uRange - uRange;
+        // The drawing's own offset from the latent surface: whole on its key angle, relaxed away by
+        // the hand-off so neighbouring drawings meet on the same shape.
+        vec3 off = atlasPx(o + ivec2(int(uLattice.x), int(uLattice.y)) + cell);
+        p += uRho * (off * 2.0 - 1.0) * uResidual;
+        float offness = atlasPx(o + ivec2(int(uLattice.x), 0) + cell).b;
         vec2 x = aCell / (uLattice - 1.0);
-        if (uRes[1] > 0.0) p += uRes[1] * leftover(uD1, 1, s, x);
-        if (uRes[2] > 0.0) p += uRes[2] * leftover(uD2, 2, s, x);
+        if (offness > 0.0) {
+          if (uNT[0] > 0.0) p += offness * uNT[0] * swing(0, p, x);
+          if (uNT[1] > 0.0) p += offness * uNT[1] * swing(1, p, x);
+        }
         vTex = aCell / (uLattice - 1.0);
-        gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
+        gl_Position = uLatentVP * vec4(p, 1.0);
       }`,
     fragmentShader: /* glsl */`
       uniform sampler2D uTex;
@@ -616,9 +618,9 @@ function makeNeuroMaterial(shared, footprint) {
         #ifndef FOOTPRINT
         // How the drawing maps onto the screen here, in drawing pixels per screen pixel.
         vec2 jx = dFdx(vTex) * uFrame, jy = dFdy(vTex) * uFrame;
-        // Folded over: this part of the drawing faces away now. Leave it to the drawing behind.
-        if (jx.x * jy.y - jx.y * jy.x >= 0.0) discard;
-        // Stretched far beyond its drawn size in some direction: a tear. Same.
+        // The lattice holds real latent depth, so overlapping folds are settled by the depth test
+        // like any mesh. Only a part stretched far beyond its drawn size is a tear; the drawing
+        // behind fills it.
         float e = 0.5 * (dot(jx, jx) + dot(jy, jy)), f = 0.5 * (dot(jx, jx) - dot(jy, jy)), g = dot(jx, jy);
         float squeeze = sqrt(max(e - sqrt(f * f + g * g), 0.0));
         if (squeeze * uMaxStretch < uK0) discard;
@@ -737,7 +739,7 @@ function drawKey(k) {
   ctx.drawImage(k.img, k.ox * W, k.oy * H, k.s * W, k.s * H);
 }
 
-let dirty = true, last = 0;
+let dirty = true, last = 0, onKeyNow = false;
 function frame(t) {
   const dt = Math.min(0.05, (t - last) / 1000 || 0);
   last = t;
@@ -753,6 +755,7 @@ function render() {
   const lead = around[0].key, off = around[0].angle;
   // On a key angle the key drawing is shown exactly as drawn. Keys are never interpolated.
   const onKey = off < 0.25;
+  onKeyNow = onKey;
   const mode = state.mode;
   const projected = mode === 'projected' && !onKey;
   const stretched = mode === 'flipstretch' && !onKey;
@@ -787,11 +790,7 @@ function render() {
   renderer.render(scene, camera);
   if (neuro) {
     towards = stretchTowards(lead, camDir);
-    // Proportion weights: the lead key, and each neighbour by how far the camera has come toward it.
-    const along = towards.reduce((a, t) => a + t.t, 0), norm = Math.max(1, along);
-    const blend = [{ key: lead, w: Math.max(0, 1 - along) / norm, t: 0, tile: 1 },
-      ...towards.map(t => ({ key: lead.near[t.i], w: t.t / norm, t: t.t, tile: t.i + 1 }))].filter(b => b.key.ready);
-    const sum = blend.reduce((a, b) => a + b.w, 0) || 1;
+    const vp = latentViewProjection(lead, towards);
     const back = around[1] ? around[1].key : lead;
     for (const [m, own] of [[neuroLead, lead], [neuroBack, back]]) {
       const u = m.material.uniforms, d = keyData(own);
@@ -799,18 +798,24 @@ function render() {
       u.uOwn.value = d.warps; u.uTex.value = d.tex;
       u.uAlign.value.set(own.s, own.ox, own.oy, 0);
       u.uK0.value = K.frame[0] / glCanvas.width;
-      for (let k = 0; k < 3; k++) {
-        const b = blend[k], kd = keyData(b ? b.key : lead), kc = kd.cam;
-        u[`uD${k}`].value = kd.warps;
-        u.uDW.value[k] = b ? b.w / sum : 0;
-        // Only the lead drawing has correspondences to these neighbours.
-        u.uRes.value[k] = b && own === lead ? b.t : 0;
-        u.uResTile.value[k] = b ? b.tile : 1;
-        u.uDVP.value[k].copy(kd.vp);
-        u.uDPos.value[k].copy(kc.position);
-        u.uDRight.value[k].setFromMatrixColumn(kc.matrixWorld, 0);
-        u.uDUp.value[k].setFromMatrixColumn(kc.matrixWorld, 1);
-        u.uDFwd.value[k].setFromMatrixColumn(kc.matrixWorld, 2).negate();
+      u.uLatentVP.value.copy(vp);
+      const offOwn = angleBetween(camDir, own.dir);
+      u.uRho.value = 1 - THREE.MathUtils.smoothstep(offOwn, 0, own.handoff);
+      // Only the lead drawing has correspondences to these neighbours.
+      for (let k = 0; k < 2; k++) {
+        const t = own === lead ? towards[k] : null;
+        u.uNT.value[k] = t ? t.t : 0;
+        if (!t) continue;
+        const n = lead.near[t.i];
+        n.vantageCam ??= vantageCamera(n);
+        const { cam: nc, vp: nvp } = n.vantageCam;
+        u.uNVP.value[k].copy(nvp);
+        u.uNPos.value[k].copy(nc.position);
+        u.uNRight.value[k].setFromMatrixColumn(nc.matrixWorld, 0);
+        u.uNUp.value[k].setFromMatrixColumn(nc.matrixWorld, 1);
+        u.uNFwd.value[k].setFromMatrixColumn(nc.matrixWorld, 2).negate();
+        u.uNScale.value[k] = n.vantage.scale;
+        u.uNTile.value[k] = t.i + 1;
       }
     }
     renderer.render(neuroScene, camera);
@@ -837,10 +842,49 @@ function render() {
   updateSheet(around, onKey, towards);
 }
 
-// The rig's skeleton, seen from the current camera: the pose every drawing is tied to.
+// Latent rotation. Each key drawing depicts the character from a learned vantage: a small yaw and
+// pitch offset from the camera it was asked for, a roll, and a framing (scale, shift). Your camera
+// angle becomes a latent angle by blending the lead key's and its neighbours' corrections with the
+// same weights that pick the drawings, so at a key it is exactly that drawing's vantage and the
+// corrections change smoothly in between. Returns the view-projection matrix for that vantage.
+const latentCam = new THREE.PerspectiveCamera();
+let latentVP = null;
+// The camera a key drawing really depicts (its learned vantage), with its framing.
+function vantageCamera(k) {
+  const cam = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+  placeCamera(cam, k.yaw + k.vantage.d_yaw, k.pitch + k.vantage.d_pitch, K.radius);
+  cam.rotateZ(k.vantage.roll * D2R);
+  cam.updateMatrixWorld(true);
+  const { scale: sc, tx, ty } = k.vantage;
+  const vp = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1)
+    .multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+  return { cam, vp };
+}
+
+function latentViewProjection(lead, towards) {
+  const along = towards.reduce((a, t) => a + t.t, 0), norm = Math.max(1, along);
+  const parts = [{ v: lead.vantage, w: Math.max(0, 1 - along) / norm }, ...towards.map(t => ({ v: lead.near[t.i].vantage, w: t.t / norm }))];
+  const sum = parts.reduce((a, p) => a + p.w, 0) || 1;
+  const mix = key => parts.reduce((a, p) => a + p.w * (key === 'scale' ? Math.log(p.v.scale) : p.v[key]), 0) / sum;
+  latentCam.fov = K.fov; latentCam.aspect = K.aspect; latentCam.near = 0.05; latentCam.far = 50;
+  latentCam.updateProjectionMatrix();
+  placeCamera(latentCam, state.yaw + mix('d_yaw'), state.pitch + mix('d_pitch'), K.radius);
+  latentCam.rotateZ(mix('roll') * D2R);
+  latentCam.updateMatrixWorld(true);
+  const sc = Math.exp(mix('scale')), tx = mix('tx'), ty = mix('ty');
+  // Framing in clip space: x' = s x + 2 tx w, y' = s y - 2 ty w (frame fractions, y down).
+  const frame = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  latentVP = frame.multiply(latentCam.projectionMatrix).multiply(latentCam.matrixWorldInverse);
+  return latentVP;
+}
+
+// The rig's skeleton, seen from the current camera (or, in Neuromation, from the latent vantage
+// the drawings are rotating through): the pose every drawing is tied to.
 function drawSkeleton() {
   const W = flat.width, H = flat.height, em = getComputedStyle(document.documentElement).getPropertyValue('--emerald').trim();
-  const at = v => { const p = v.clone().project(camera); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
+  const vp = state.mode === 'neuro' && latentVP && !onKeyNow ? latentVP
+    : new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const at = v => { const p = v.clone().applyMatrix4(vp); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
   ctx.lineWidth = Math.max(2, W / 300);
   ctx.strokeStyle = em; ctx.fillStyle = em;
   for (const b of skeleton) {
@@ -864,7 +908,7 @@ function updateSheet(around, onKey, towards) {
   const lead = around[0].key;
   const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
   if (!onKey && state.mode === 'neuro') {
-    for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends proportions', note: `${Math.round(t.t * 100)}% there` });
+    for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
     if (around[1]) rows.push({ key: around[1].key, role: 'Fills torn or hidden parts', note: `${around[1].angle.toFixed(1)}° away` });
   } else if (!onKey && state.mode === 'flipstretch') {
     for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Stretching toward', note: `${Math.round(t.t * 100)}% there` });
