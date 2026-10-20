@@ -11,15 +11,15 @@ Turn a 3D character into something that *looks* hand-drawn from every angle:
 ```sh
 npm install
 
-# 1. render 12 yaws x 3 pitches = 36 views of assets/nya-bytetuber.glb into out/renders
+# 1. render 12 yaws x 3 pitches = 36 views of assets/emerald-pixie.glb into out/renders
 npm run render
 #   options: --yaw-step 30 --pitches -15,0,20 --size 768x1152 --fov 22 --background "#ffffff"
-#            --anim Idle --frames 8      (animations: Walk, Run, Idle, Slash, Bow)
+#            --anim Idle --frames 8      (animations: Running, Walking)
 #   in the cloud sandbox: CHROMIUM_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome npm run render
 
 # 2. stylize every view (skips ones already done; --force to redo)
 OPENROUTER_API_KEY=sk-or-... npm run stylize
-#   options: --model google/gemini-3.1-flash-image --style assets/style-ref.jpg
+#   options: --model google/gemini-3.1-flash-image --style assets/emerald-pixie-ref.jpg --style-only
 #            --prompt "extra style notes" --concurrency 4 --only y000_p0.png,y030_p0.png
 #            --no-anchor --dry-run (print prompts, no API calls)
 
@@ -35,5 +35,5 @@ npm run viewer   # then open http://localhost:8000/viewer/  (?set=out/renders sh
 
 ## Notes
 
-- The model's outline shells don't come through the GLTF export as a working inverted hull. The renderer draws them first without depth writes, so only the silhouette rim shows.
-- `assets/style-ref.jpg` sets the art style only. The prompt tells the model not to copy that character's design or colors.
+- `assets/emerald-pixie-ref.jpg` is official art of the same character, so by default the model copies its design as well as its style. That fills in details the 3D model simplifies or lacks, such as the long twin-tail ribbons. Pass `--style-only` to use a reference image for its art style alone.
+- Materials named `Outline` (inverted-hull outline shells) are drawn first without depth writes, so only the silhouette rim shows.

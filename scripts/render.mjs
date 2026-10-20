@@ -2,7 +2,7 @@
 // Render the GLB from a ring of camera angles (and optionally animation frames).
 // Writes PNGs + manifest.json into the output directory.
 //
-//   node scripts/render.mjs [--model assets/nya-bytetuber.glb] [--out out/renders]
+//   node scripts/render.mjs [--model assets/emerald-pixie.glb] [--out out/renders]
 //        [--yaw-step 30] [--pitches -15,0,20] [--size 768x1152] [--fov 22]
 //        [--background "#ffffff"] [--anim Idle] [--frames 1]
 import { chromium } from 'playwright-core';
@@ -15,7 +15,7 @@ const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 
 const { values: opt } = parseArgs({
   options: {
-    model: { type: 'string', default: 'assets/nya-bytetuber.glb' },
+    model: { type: 'string', default: 'assets/emerald-pixie.glb' },
     out: { type: 'string', default: 'out/renders' },
     'yaw-step': { type: 'string', default: '30' },
     pitches: { type: 'string', default: '-15,0,20' },

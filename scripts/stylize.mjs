@@ -14,7 +14,9 @@ const { values: opt } = parseArgs({
   options: {
     renders: { type: 'string', default: 'out/renders' },
     out: { type: 'string', default: 'out/stylized' },
-    style: { type: 'string', default: 'assets/style-ref.jpg' },
+    style: { type: 'string', default: 'assets/emerald-pixie-ref.jpg' },
+    // By default the reference is a sheet of the same character; --style-only borrows just its art style.
+    'style-only': { type: 'boolean', default: false },
     model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-image' },
     prompt: { type: 'string', default: '' },
     concurrency: { type: 'string', default: '4' },
@@ -29,7 +31,7 @@ const API = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').
 const KEY = process.env.OPENROUTER_API_KEY;
 
 const STYLE_RULES = `
-Art style (enforce strictly, copy it from the STYLE REFERENCE image):
+Art style (enforce strictly, copy it from the reference image):
 - clean modern anime / VTuber character-sheet illustration, crisp thin dark lineart
 - soft cel shading with 2 tones per material, gentle gradient highlights in the hair
 - large glossy anime eyes with highlights, small nose, soft blush
@@ -55,13 +57,17 @@ function describeView({ yaw, pitch }) {
 
 function buildPrompt(view, hasAnchor) {
   return [
-    `You are redrawing a low-poly pixel-texture 3D model as a polished 2D anime illustration.`,
-    `Images provided: (1) STYLE REFERENCE — copy ONLY its art style, NOT its character, outfit or colors.`,
+    `You are redrawing a 3D model render as a polished 2D anime illustration.`,
+    opt['style-only']
+      ? `Images provided: (1) STYLE REFERENCE — copy ONLY its art style, NOT its character, outfit or colors.`
+      : `Images provided: (1) CHARACTER REFERENCE — the official front-view art of this exact character. Copy its art style AND its character design: face, hair, accessories, outfit details and colors.`,
     `(2) RENDER — the 3D model from a specific camera angle. Reproduce this exact pose, viewing angle,`,
-    `silhouette, proportions, outfit design and color palette, just drawn in the reference art style.`,
+    opt['style-only']
+      ? `silhouette, proportions, outfit design and color palette, just drawn in the reference art style.`
+      : `silhouette and proportions. Where the render lacks or simplifies a detail that the reference shows, follow the reference; work out how it looks from this angle.`,
     hasAnchor ? `(3) CHARACTER ANCHOR — an already-finished front view of this same character in the target style; keep hair, face, outfit details and colors consistent with it.` : '',
     `Camera: ${describeView(view)}. Do not rotate the character to face the viewer if the render does not.`,
-    `Remove all pixelation and low-poly artifacts; interpret blocky textures as clean fabric, hair and skin.`,
+    `Remove all 3D-render artifacts (plastic shading, specular glare, blurry or low-poly textures); interpret them as clean fabric, hair and skin.`,
     STYLE_RULES,
     opt.prompt,
   ].filter(Boolean).join('\n');
