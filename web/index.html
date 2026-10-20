@@ -147,7 +147,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="loading" id="loading"><strong>Loading</strong><span id="progress">key drawings</span></div>
       </div>
     </div>
-    <div class="hint" id="hint">Drag to orbit · Arrow keys step to the next key · Click the key map to jump</div>
+    <div class="hint" id="hint">WASD to walk · Drag to orbit · Arrow keys step to the next key</div>
 
     <div class="sheet">
       <section>
@@ -707,7 +707,9 @@ function makeFloor(minY) {
 
 // A plain white room around her, drawn on its own full-window canvas from the same camera as the
 // character, so it turns with her as you orbit. The floor sits at her feet.
-let roomRenderer, roomScene, roomCam;
+let roomRenderer, roomScene, roomCam, roomWorld;
+// Where she stands in the room and which way she faces (degrees, 0 = the room's +Z).
+const walker = { x: 0, z: 0, heading: 0, keys: new Set() };
 function floorTexture() {
   const c = document.createElement('canvas');
   c.width = c.height = 256;
@@ -727,14 +729,18 @@ function makeRoom(floorY) {
   roomRenderer.outputColorSpace = THREE.SRGBColorSpace;
   roomScene = new THREE.Scene();
   roomScene.background = new THREE.Color('#f3f1ed');
-  const W = 14, H = 7.5, t = K.target;
+  const W = 14, H = 7.5, t = [0, 0, 0];
+  // The room lives in a group that is moved around her: she stays at the centre of the camera's
+  // orbit, and walking moves the room the other way.
+  roomWorld = new THREE.Group();
+  roomScene.add(roomWorld);
   const wall = new THREE.MeshStandardMaterial({ color: '#f6f4f0', roughness: 0.95 });
   const base = new THREE.MeshStandardMaterial({ color: '#dedad3', roughness: 0.8 });
   const tex = floorTexture();
   tex.repeat.set(W / 1.2, W / 1.2);
   // Double-sided: low camera angles sit below floor level and look up through it, like a glass floor.
   const floorMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, side: THREE.DoubleSide });
-  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); roomScene.add(m); return m; };
+  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); roomWorld.add(m); return m; };
   add(new THREE.PlaneGeometry(W, W), floorMat, [t[0], floorY, t[2]], [-Math.PI / 2, 0, 0]);
   add(new THREE.PlaneGeometry(W, W), wall, [t[0], floorY + H, t[2]], [Math.PI / 2, 0, 0]);
   for (let i = 0; i < 4; i++) {
@@ -745,8 +751,10 @@ function makeRoom(floorY) {
   }
   roomScene.add(new THREE.HemisphereLight('#ffffff', '#cfc8bd', 2.2));
   const sun = new THREE.DirectionalLight('#fff6ea', 1.1);
-  sun.position.set(t[0] + 4, floorY + 6, t[2] + 3);
-  roomScene.add(sun);
+  sun.position.set(4, floorY + 6, 3);
+  sun.target.position.set(0, floorY, 0);
+  roomWorld.add(sun, sun.target);
+  walker.half = W / 2 - 0.6;
   roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 60);
 }
 function renderRoom() {
@@ -758,6 +766,12 @@ function renderRoom() {
   roomCam.updateProjectionMatrix();
   roomCam.position.copy(camera.position);
   roomCam.quaternion.copy(camera.quaternion);
+  // Room as seen from her: rotated by her heading, shifted by her position.
+  const h = -walker.heading * D2R;
+  roomWorld.rotation.y = h;
+  roomWorld.position.set(
+    K.target[0] - (Math.cos(h) * walker.x + Math.sin(h) * walker.z), 0,
+    K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
   roomRenderer.render(roomScene, roomCam);
 }
 
@@ -840,10 +854,42 @@ function drawKey(k) {
 }
 
 let dirty = true, last = 0, onKeyNow = false, handTex = null;
+
+// WASD: walk relative to the camera. She turns to face where she walks while the camera stays put
+// in the room, so the view angle of her (state.yaw) changes as she turns.
+const WALK_SPEED = 1.6, TURN_SPEED = 420;
+function walk(dt) {
+  const k = walker.keys;
+  const f = (k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0), r = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
+  if (!f && !r) return;
+  const cam = (walker.heading + state.yaw) * D2R;            // camera direction from her, in the room
+  const fx = -Math.sin(cam), fz = -Math.cos(cam);           // away from the camera
+  let mx = f * fx - r * fz, mz = f * fz + r * fx;
+  const len = Math.hypot(mx, mz); mx /= len; mz /= len;
+  const lim = walker.half ?? 6;
+  walker.x = THREE.MathUtils.clamp(walker.x + mx * WALK_SPEED * dt, -lim, lim);
+  walker.z = THREE.MathUtils.clamp(walker.z + mz * WALK_SPEED * dt, -lim, lim);
+  const camWorld = walker.heading + state.yaw;
+  const want = Math.atan2(mx, mz) / D2R;
+  let turn = ((want - walker.heading + 540) % 360) - 180;
+  turn = Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
+  walker.heading = (walker.heading + turn + 360) % 360;
+  state.yaw = ((camWorld - walker.heading) % 360 + 360) % 360;
+  dirty = true;
+}
+addEventListener('keydown', e => {
+  const key = e.key.toLowerCase();
+  if (!'wasd'.includes(key) || key.length !== 1 || e.target.matches?.('input[type=text], textarea')) return;
+  walker.keys.add(key);
+  e.preventDefault();
+});
+addEventListener('keyup', e => walker.keys.delete(e.key.toLowerCase()));
+addEventListener('blur', () => walker.keys.clear());
 function frame(t) {
   const dt = Math.min(0.05, (t - last) / 1000 || 0);
   last = t;
   if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
+  if (walker.keys.size && K) walk(dt);
   if (dirty) { render(); dirty = false; }
   requestAnimationFrame(frame);
 }
@@ -1019,7 +1065,7 @@ const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 function updateSheet(around, onKey, towards) {
   $('hint').textContent = K.loaded < K.keys.length
     ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
-    : 'Drag to orbit · Arrow keys step to the next key · Click the key map to jump';
+    : 'WASD to walk · Drag to orbit · Arrow keys step to the next key';
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
