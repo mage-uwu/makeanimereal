@@ -9,10 +9,16 @@
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
 //        [--stills out/g2]   (animations: draw each angle's frames in order, see below)
 //
+// --model @cf/black-forest-labs/flux-2-klein-4b draws with FLUX.2 [klein] on Cloudflare Workers AI
+// instead (CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID). It takes at most 4 reference images, each
+// under 512x512, so references are shrunk to fit; it draws at --size (default 832x1248, the
+// renders' 2:3).
+//
 // Animations (a renders manifest with frames > 1) need drawings that hold still from frame to frame,
 // or line art boils. With --stills, each frame is drawn with two extra references: the still key
 // drawing nearest its camera angle (identity and details at this angle) and the previous frame from
 // the same camera (continuity). Each camera angle's frames are drawn in order; angles run in parallel.
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -37,6 +43,8 @@ const { values: opt } = parseArgs({
     // Views where the 3D model shows her face hidden (see scripts/face_check.py): forbid drawing it.
     'hide-face': { type: 'boolean', default: false },
     stills: { type: 'string' },
+    size: { type: 'string', default: '832x1248' }, // Cloudflare models only
+    seed: { type: 'string' },
   },
 });
 
@@ -146,7 +154,51 @@ function imageFrom(json) {
   return d?.url || null;
 }
 
+// Shrink an image (data URL) to fit inside max x max, as PNG bytes. Cloudflare's FLUX.2 takes only
+// reference images under 512x512.
+function shrink(url, max) {
+  const b64 = url.slice(url.indexOf(',') + 1);
+  const r = spawnSync('python3', ['-c', `
+import sys, io
+from PIL import Image
+im = Image.open(io.BytesIO(sys.stdin.buffer.read())).convert('RGB')
+im.thumbnail((${max}, ${max}), Image.LANCZOS)
+out = io.BytesIO(); im.save(out, 'PNG'); sys.stdout.buffer.write(out.getvalue())`], { input: Buffer.from(b64, 'base64'), maxBuffer: 1 << 26 });
+  if (r.status) throw new Error(`could not shrink a reference image: ${r.stderr}`);
+  return r.stdout;
+}
+
+async function generateCloudflare(view, images) {
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID, token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!account || !token) throw new Error('OpenRouter 401: set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN');
+  const [width, height] = opt.size.split('x');
+  const refs = images.slice(0, 4);
+  const order = refs.map((img, i) => `Image ${i} is the ${img.label}.`).join(' ');
+  for (let attempt = 1; ; attempt++) {
+    const form = new FormData();
+    form.append('prompt', `${order}\n${buildPrompt(view, refs.some(i => i.label.startsWith('FRONT ANCHOR')))}\nRemember: ${describeView(view).facing}.`);
+    refs.forEach((img, i) => form.append(`input_image_${i}`, new Blob([shrink(img.url, 511)], { type: 'image/png' }), `ref${i}.png`));
+    form.append('width', width);
+    form.append('height', height);
+    if (opt.seed) form.append('seed', opt.seed);
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/ai/run/${opt.model}`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form,
+    });
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = null; }
+    const img = json?.result?.image;
+    if (res.ok && img) return `data:image/png;base64,${img}`;
+    const err = json?.errors?.map(e => e.message).join('; ') || text.slice(0, 300);
+    if ([400, 401, 403, 404].includes(res.status) || attempt >= 4) throw new Error(`OpenRouter ${res.status}: Cloudflare: ${err}`);
+    const wait = 2 ** attempt * 1000;
+    console.warn(`  retry ${view.file} in ${wait / 1000}s (${res.status}: ${err})`);
+    await new Promise(r => setTimeout(r, wait));
+  }
+}
+
 async function generate(view, images) {
+  if (opt.model.startsWith('@cf/')) return generateCloudflare(view, images);
   for (let attempt = 1; ; attempt++) {
     const [route, body] = requestFor(view, images);
     const headers = { 'content-type': 'application/json', 'x-title': 'makeanimereal' };
