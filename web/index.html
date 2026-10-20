@@ -123,15 +123,6 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 </style>
 
 <main class="wrap">
-  <header>
-    <div class="eyebrow" id="eyebrow">Key-drawing viewer · loading key drawings</div>
-    <h1>Emerald Pixie<span class="jp">原画</span></h1>
-    <p class="lede">Key drawings of her from all around and from above and below. On a key angle you see that drawing
-      exactly as it was drawn. Between keys, the nearest drawing is carried to your camera angle: on the latent
-      object all the drawings share, on an invisible 3D model of her, or by stretching it toward the next drawing.
-      Two drawings are never mixed. Drag in any direction.</p>
-  </header>
-
   <div class="layout">
     <div class="stage-col">
       <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
@@ -745,7 +736,6 @@ function init(data) {
 
   camera = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
   const rings = new Set(K.keys.map(k => k.pitch)).size;
-  $('eyebrow').textContent = `Key-drawing viewer · ${K.keys.length} genga · ${rings} camera heights, ${K.minPitch}° to ${K.maxPitch}°`;
   $('facts').textContent = `${K.keys.length} drawings · Tencent Hy Image 3.5 · $0.024 each · ${K.frame[0]} × ${K.frame[1]} WebP`;
   new ResizeObserver(resize).observe(stageEl);
   resize();
