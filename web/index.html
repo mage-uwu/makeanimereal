@@ -217,7 +217,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 </script>
 <script type="module">
 import * as THREE from 'three';
-import { makeGBuffer, loadNet, fetchBytes, GBUFFER } from './learned.js';
+import { makeGBuffer, loadNet, GBUFFER } from './learned.js';
 
 const $ = id => document.getElementById(id);
 if (matchMedia('(max-width: 700px)').matches) $('info').open = false;
@@ -931,15 +931,15 @@ function loadLearned() {
       document.head.appendChild(s);
     });
     if (!await tf.setBackend('webgl')) await tf.setBackend('cpu');
-    const grid = await fetch('learned/grid.json').then(r => r.json());
-    const [bytes, albedo, mesh, net] = await Promise.all([
-      fetchBytes('learned/grid.png', grid.bytes),
+    const [grid, bytes, albedo, mesh, net] = await Promise.all([
+      fetch('learned/grid.json').then(r => r.json()),
+      fetch('learned/grid.bin').then(r => r.arrayBuffer()),
       new THREE.TextureLoader().loadAsync('learned/albedo.webp'),
       fetch('mesh.json').then(r => r.json()),
       loadNet(tf, 'learned'),
     ]);
     learned.gbuffer = makeGBuffer(THREE, mesh, albedo, grid.box, K.radius);
-    learned.gbuffer.setGrid(bytes, grid.dims, grid.lo, grid.span);
+    learned.gbuffer.setGrid(new Uint8Array(bytes), grid.dims, grid.lo, grid.span);
     learned.net = net;
     learned.cam = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
     learned.ready = true;
