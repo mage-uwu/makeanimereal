@@ -4,7 +4,7 @@
 // front view is fed back as an identity anchor so every angle draws the same character.
 //
 //   OPENROUTER_API_KEY=... node scripts/stylize.mjs [--renders out/renders] [--out out/stylized]
-//        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model google/gemini-3.1-flash-image]
+//        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model google/gemini-3.1-flash-lite-image] [--notes assets/emerald-pixie-notes.txt]
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -17,7 +17,9 @@ const { values: opt } = parseArgs({
     style: { type: 'string', default: 'assets/emerald-pixie-ref.jpg' },
     // By default the reference is a sheet of the same character; --style-only borrows just its art style.
     'style-only': { type: 'boolean', default: false },
-    model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-image' },
+    // Plain-text list of design details the model must keep at every angle (skipped if missing).
+    notes: { type: 'string', default: 'assets/emerald-pixie-notes.txt' },
+    model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite-image' },
     prompt: { type: 'string', default: '' },
     concurrency: { type: 'string', default: '4' },
     only: { type: 'string' },
@@ -27,6 +29,7 @@ const { values: opt } = parseArgs({
   },
 });
 
+const notes = await fs.readFile(opt.notes, 'utf8').then(t => t.trim(), () => '');
 const API = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
 const KEY = process.env.OPENROUTER_API_KEY;
 
@@ -69,6 +72,7 @@ function buildPrompt(view, hasAnchor) {
       : `The CHARACTER REFERENCE is official front-view art of this exact character: copy its art style and design (face, hair, accessories, outfit details, exact colors). Where the render lacks or simplifies a detail the reference shows, add it as it would look from this angle.`,
     hasAnchor ? `The FRONT ANCHOR is an already-finished front view in the target style: keep identity, colors and details consistent with it, but do NOT copy its angle.` : '',
     `Remove all 3D-render artifacts (plastic shading, specular glare, blurry or low-poly textures); interpret them as clean fabric, hair and skin.`,
+    notes ? `Character details that must appear correctly at EVERY angle (when visible from this side):\n${notes}` : '',
     STYLE_RULES,
     opt.prompt,
   ].filter(Boolean).join('\n');
