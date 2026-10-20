@@ -134,6 +134,17 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 
 #radar { width: 100%; height: auto; display: block; cursor: pointer; }
 .radar-axis { display: flex; justify-content: space-between; font: 11px/1 var(--font-data); color: var(--muted); }
+.anim-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.seg { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.seg button { font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0; border-left: 1px solid var(--rule); padding: 7px 14px; cursor: pointer; }
+.seg button:first-child { border-left: 0; }
+.seg button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
+.seg button:focus-visible, .scrub button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
+.scrub { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.scrub button { font: 500 13px/1.2 var(--font-body); color: var(--emerald); background: transparent; border: 1px solid var(--emerald); border-radius: 5px; padding: 6px 12px; cursor: pointer; min-width: 64px; }
+.scrub input { width: 100%; accent-color: var(--emerald); }
+.scrub output { font: 500 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; white-space: nowrap; }
+.scrub[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 
 .method { margin: 0; display: grid; gap: 8px; font-size: 13.5px; }
 .method dt { font: 500 12px/1.3 var(--font-data); color: var(--emerald); letter-spacing: .04em; }
@@ -172,7 +183,6 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         </div>
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
-          <label><input type="checkbox" id="walkcycle"> Walk in place</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
           <label><input type="checkbox" id="room"> 3D room</label>
         </div>
@@ -194,6 +204,21 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="label">Key map · yaw across, camera height up</div>
         <canvas id="radar" width="720" height="220" aria-label="Map of the key drawings. Click one to jump to it."></canvas>
         <div class="radar-axis"><span>0° front</span><span>90° left</span><span>180° back</span><span>270° right</span><span>360°</span></div>
+      </section>
+
+      <section>
+        <div class="anim-head">
+          <div class="label">Animation</div>
+          <div class="seg" role="group" aria-label="Animation">
+            <button type="button" data-anim="" aria-pressed="true">Still</button>
+            <button type="button" data-anim="walk" aria-pressed="false">Walk</button>
+          </div>
+        </div>
+        <div class="scrub" id="scrub">
+          <button type="button" id="play">Pause</button>
+          <input type="range" id="frame" min="1" max="12" step="1" value="1" aria-label="Animation frame">
+          <output id="frame-out">Frame 1 / 12</output>
+        </div>
       </section>
 
       <section>
@@ -229,7 +254,7 @@ const NOTES = {
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true, walk: false };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true, anim: '', playing: true };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -910,7 +935,7 @@ function frame(t) {
   last = t;
   if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
   if (walker.keys.size && K) walk(dt);
-  if (walking()) { anim.t += dt; dirty = true; }
+  if (walking() && (state.playing || walker.keys.size)) { anim.t += dt; dirty = true; }
   if (dirty) { render(); dirty = false; }
   requestAnimationFrame(frame);
 }
@@ -919,11 +944,16 @@ function frame(t) {
 // plays while she walks (WASD) or with "Walk in place". Like a 2D game sprite, the drawn angle
 // nearest the camera is shown, and the room is seen from that same angle so they always agree.
 const anim = { t: 0, data: null, sheets: new Map() };
-const walking = () => !!anim.data && (state.walk || walker.keys.size > 0);
+// Plays when "Walk" is picked under the key map, or whenever she walks (WASD). Paused, the frame
+// slider scrubs through the cycle.
+const walking = () => !!anim.data && (state.anim === 'walk' || walker.keys.size > 0);
+const animFrame = () => Math.floor(anim.t / anim.data.duration * anim.data.frames + 1e-6) % anim.data.frames;
 fetch('walk.json').then(r => r.ok ? r.json() : null).then(d => {
   if (!d) return;
   for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
   anim.data = d;
+  $('frame').max = d.frames;
+  showAnim();
   dirty = true;
 }).catch(() => {});
 function walkSheet(a) {
@@ -1071,7 +1101,7 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
   if (walkOn) {
-    const d = anim.data, n = Math.floor(anim.t / d.duration * d.frames) % d.frames, f = walkAngle.frames[n];
+    const d = anim.data, n = animFrame(), f = walkAngle.frames[n];
     const [fw, fh] = d.frame, W = flat.width, H = flat.height;
     ctx.setTransform(...upright.canvas);
     ctx.drawImage(walkImg, (n % d.cols) * fw, Math.floor(n / d.cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
@@ -1206,6 +1236,7 @@ const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 function updateSheet(around, onKey, towards) {
   $('hint').textContent = K.loaded < K.keys.length
     ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
+    : anim.shown ? 'WASD to walk · Drag to orbit · ← → step walk angles · , . step frames'
     : 'WASD to walk · Drag to orbit · Arrow keys step to the next key';
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
@@ -1216,7 +1247,8 @@ function updateSheet(around, onKey, towards) {
   if (anim.shown) {
     const a = anim.shown.angle;
     $('weights').innerHTML = `<li class="lead"><span>walk y${a.yaw} p${a.pitch}</span><span class="role">Nearest of ${anim.data.angles.length} drawn walk angles</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
-    drawRadar([]);
+    drawRadar([{ key: a }]);
+    showAnim();
     saveView();
     return;
   }
@@ -1234,7 +1266,7 @@ function updateSheet(around, onKey, towards) {
   saveView();
 }
 function saveView() {
-  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room, walk: state.walk })); } catch {}
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room, anim: state.anim, playing: state.playing })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
@@ -1253,12 +1285,19 @@ function drawRadar(rows) {
     rctx.strokeStyle = rule; rctx.lineWidth = 2;
     rctx.beginPath(); rctx.moveTo(RADAR.padX, y); rctx.lineTo(radar.width - RADAR.padX, y); rctx.stroke();
   }
+  const walkMap = state.anim && anim.data;
   for (const k of K.keys) {
     const [x, y] = radarPos(k.yaw, k.pitch);
-    rctx.globalAlpha = k.ready ? 1 : 0.35;
+    rctx.globalAlpha = walkMap ? 0.2 : k.ready ? 1 : 0.35;
     rctx.fillStyle = muted; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, Math.PI * 2); rctx.fill();
   }
   rctx.globalAlpha = 1;
+  // With an animation picked, its drawn angles are the keys.
+  if (walkMap) for (const a of anim.data.angles) {
+    const [x, y] = radarPos(a.yaw, a.pitch);
+    rctx.strokeStyle = em; rctx.lineWidth = 2.5;
+    rctx.beginPath(); rctx.arc(x, y, 6, 0, Math.PI * 2); rctx.stroke();
+  }
   rows.forEach((r, i) => {
     const [x, y] = radarPos(r.key.yaw, r.key.pitch);
     rctx.beginPath(); rctx.arc(x, y, i === 0 ? 11 : 7, 0, Math.PI * 2);
@@ -1271,14 +1310,14 @@ function drawRadar(rows) {
 }
 
 function jumpTo(k) {
-  if (!k.ready) fetchKey(k);
+  if (k.file && !k.ready) fetchKey(k);
   state.yaw = k.yaw; state.pitch = k.pitch; state.spin = false; $('spin').checked = false;
   dirty = true;
 }
 radar.addEventListener('click', e => {
   const r = radar.getBoundingClientRect();
   const x = (e.clientX - r.left) * (radar.width / r.width), y = (e.clientY - r.top) * (radar.height / r.height);
-  jumpTo(K.keys.reduce((best, k) => {
+  jumpTo((state.anim && anim.data ? anim.data.angles : K.keys).reduce((best, k) => {
     const [kx, ky] = radarPos(k.yaw, k.pitch), [bx, by] = radarPos(best.yaw, best.pitch);
     return Math.hypot(kx - x, ky - y) < Math.hypot(bx - x, by - y) ? k : best;
   }));
@@ -1293,8 +1332,27 @@ function setMode(mode) {
 }
 for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
 $('spin').checked = state.spin;
-$('walkcycle').checked = state.walk;
-$('walkcycle').addEventListener('change', e => { state.walk = e.target.checked; dirty = true; });
+function showAnim() {
+  for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b.dataset.anim === state.anim));
+  const on = !!(state.anim && anim.data);
+  $('scrub').setAttribute('aria-disabled', String(!on));
+  $('play').textContent = state.playing ? 'Pause' : 'Play';
+  if (!anim.data) return;
+  const n = animFrame() + 1;
+  $('frame').value = n;
+  $('frame-out').textContent = `Frame ${n} / ${anim.data.frames}`;
+}
+function setFrame(n) {
+  const d = anim.data, f = ((n % d.frames) + d.frames) % d.frames;
+  anim.t = f / d.frames * d.duration;
+  state.playing = false;
+  showAnim();
+  dirty = true;
+}
+for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => { state.anim = b.dataset.anim; showAnim(); dirty = true; });
+$('play').addEventListener('click', () => { state.playing = !state.playing; showAnim(); dirty = true; });
+$('frame').addEventListener('input', e => setFrame(+e.target.value - 1));
+showAnim();
 $('skeleton').checked = state.skeleton;
 const showRelief = () => { $('relief').value = state.relief; $('relief-out').textContent = `${Math.round(state.relief * 100)}%`; };
 showRelief();
@@ -1325,11 +1383,22 @@ viewportEl.addEventListener('pointerup', endDrag);
 viewportEl.addEventListener('pointercancel', endDrag);
 stageEl.addEventListener('keydown', e => {
   if (!K) return;
+  // , and . step through animation frames.
+  if ((e.key === ',' || e.key === '.') && anim.shown) { e.preventDefault(); setFrame(animFrame() + (e.key === '.' ? 1 : -1)); return; }
   const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
   if (!move) return;
   e.preventDefault();
   // Arrow keys land on key angles so each press shows a finished drawing: the next key around the
   // current ring, or the nearest key on the next ring up or down.
+  // With an animation showing, left and right step through its drawn angles.
+  if (anim.shown) {
+    if (!move[0]) return;
+    const cur = anim.shown.angle;
+    const pool = anim.data.angles.filter(a => a.pitch === cur.pitch && a !== cur)
+      .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+    if (pool.length) jumpTo(pool[0].k);
+    return;
+  }
   const cur = lead || K.keys[0];
   let pool;
   if (move[0]) {
