@@ -8,10 +8,11 @@
 --alpha    the same views rendered with --background none, used for the model's silhouettes
 --keys     the stylized drawings (from stylize.mjs)
 
-Each drawing is fitted to its render in two steps: a scale and offset from the silhouettes, then a
-smooth optical-flow warp that moves its features (eyes, bow, buttons, hems) onto the same features
-of the render. The viewer bends the fitted drawing with the mesh, so a drawing that disagrees with
-the mesh would paint the wrong art onto the wrong part of the body.
+Key drawings ship untouched: the viewer shows them exactly as drawn on their key angle. Beside each
+one goes how it fits its render: a scale and offset from the silhouettes (keys.json), and a smooth
+optical-flow field (fields/*.png) that moves its features (eyes, bow, buttons, hems) onto the same
+features of the render. Between keys the viewer bends the drawing with the mesh and eases this fit
+in, so the drawing's features ride on the mesh's without the key drawing itself being altered.
 
 Needs Pillow (with WebP), numpy and opencv-python-headless.
 """
@@ -80,10 +81,15 @@ def extent(mask):
     return top, bot, xs.mean() / w
 
 
-def fit_to_render(drawing, render, s, ox, oy, smooth=9.0):
-    """Warp an RGBA drawing (float 0..1) onto an RGBA render of the same size.
+FIELD_RANGE = 128.0  # px at the output size; fields are stored as (d / FIELD_RANGE + 0.5) in 8 bits
+FIELD_DOWNSAMPLE = 4  # the field is smooth, so a quarter-resolution texture holds it
 
-    Returns the drawing in render coordinates with its features moved onto the render's.
+
+def fit_to_render(drawing, render, s, ox, oy, smooth=9.0):
+    """Fit an RGBA drawing (float 0..1) to an RGBA render of the same size.
+
+    Returns the flow field in render pixels: the drawing placed by (s, ox, oy) and sampled at
+    x + field(x) puts its features on the render's features at x.
     """
     h, w = render.shape[:2]
     m = np.float32([[s, 0, ox * w], [0, s, oy * h]])
@@ -103,9 +109,7 @@ def fit_to_render(drawing, render, s, ox, oy, smooth=9.0):
 
     near = cv2.GaussianBlur(body, (0, 0), 3)[..., None]
     field = near * spread(smooth) + (1 - near) * spread(30)
-    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    fitted = cv2.remap(placed, gx + field[..., 0], gy + field[..., 1], cv2.INTER_LINEAR, borderValue=(0, 0, 0, 0))
-    return fitted, float(np.median(np.hypot(field[..., 0], field[..., 1])[body > 0]))
+    return field, float(np.median(np.hypot(field[..., 0], field[..., 1])[body > 0]))
 
 
 def main():
@@ -120,6 +124,7 @@ def main():
     renders, alpha_dir, keys_dir, out = (Path(x) for x in (args.renders, args.alpha, args.keys, args.out))
     manifest = json.loads((renders / 'manifest.json').read_text())
     (out / 'keys').mkdir(parents=True, exist_ok=True)
+    (out / 'fields').mkdir(parents=True, exist_ok=True)
 
     keys = []
     for v in manifest['views']:
@@ -141,11 +146,17 @@ def main():
         rgba.putalpha(mask)
         drawing = np.asarray(rgba.resize(size, Image.LANCZOS)).astype(np.float32) / 255
         render = np.asarray(Image.open(alpha_dir / v['file']).convert('RGBA').resize(size, Image.LANCZOS)).astype(np.float32) / 255
-        fitted, moved = fit_to_render(drawing, render, s, ox, oy)
+        field, moved = fit_to_render(drawing, render, s, ox, oy)
         name = Path(v['file']).with_suffix('.webp').name
-        Image.fromarray((np.clip(fitted, 0, 1) * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=86, method=6)
-        # Fitted drawings already sit in the render's frame, so the viewer needs no per-key offset.
-        keys.append({'file': f'keys/{name}', 'yaw': v['yaw'], 'pitch': v['pitch'], 's': 1, 'ox': 0, 'oy': 0})
+        # The key drawing itself, untouched apart from the background cut-out and resize.
+        Image.fromarray((drawing * 255 + 0.5).astype(np.uint8)).save(out / 'keys' / name, 'WEBP', quality=90, method=6)
+        small = cv2.resize(field, (size[0] // FIELD_DOWNSAMPLE, size[1] // FIELD_DOWNSAMPLE), interpolation=cv2.INTER_AREA)
+        enc = np.clip(small / FIELD_RANGE + 0.5, 0, 1)
+        rgb = np.dstack([enc[..., 0], enc[..., 1], np.zeros_like(enc[..., 0])])
+        fname = Path(v['file']).with_suffix('.png').name
+        Image.fromarray((rgb * 255 + 0.5).astype(np.uint8)).save(out / 'fields' / fname)
+        keys.append({'file': f'keys/{name}', 'field': f'fields/{fname}', 'yaw': v['yaw'], 'pitch': v['pitch'],
+                     's': round(s, 5), 'ox': round(ox, 5), 'oy': round(oy, 5)})
         print(f'{name}  scale {s:.3f}  offset {ox:+.3f},{oy:+.3f}  warp {moved:.1f}px')
 
     cam = manifest['cameras'][0]
@@ -153,6 +164,7 @@ def main():
         'fov': manifest['fov'], 'aspect': manifest['width'] / manifest['height'],
         'yawStep': manifest['yawStep'], 'pitches': sorted(manifest['pitches']),
         'target': cam['target'], 'radius': cam['radius'], 'pose': manifest.get('pose', 'rest'),
+        'fieldRange': FIELD_RANGE, 'frame': list(size),
         'keys': keys,
     }, indent=1))
     # The viewer never shows the model, so it gets only the posed shape (render.mjs --export-mesh).

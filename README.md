@@ -39,20 +39,21 @@ npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --out out/rela
 npm run render -- --pose relaxed --yaw-step 15 --pitches=-15,0,20 --background none --out out/relaxed-alpha
 npm run stylize -- --renders out/relaxed-renders --out out/relaxed
 pip install opencv-python-headless   # plus Pillow and numpy
-python3 scripts/build-web.py          # -> out/web (page, fitted drawings, mesh.json), ~4.4 MB
+python3 scripts/build-web.py          # -> out/web (page, key drawings, fit fields, mesh.json), ~6 MB
 ```
 
-`web/index.html` is the viewer. The 3D model is never drawn. It is an invisible shape that bends
-the nearest key drawing to the current camera:
+`web/index.html` is the viewer. Key drawings are never interpolated: on a key angle the viewer
+shows that drawing exactly as drawn. Interpolation only lives between keys, and the 3D model is
+never drawn there either; it is an invisible shape that bends the nearest key drawing:
 
-- `build-web.py` cuts each drawing out of its background and fits it to its render: first a scale
-  and offset from the silhouettes, then a smooth optical-flow warp that moves the drawing's eyes,
-  bow and hems onto the render's.
-- The viewer projects the nearest fitted drawing onto the mesh from the camera it was drawn for and
-  views the mesh from the current camera, so the drawing turns with the body. It hands over to the
-  next drawing halfway between keys.
+- `build-web.py` cuts each drawing out of its background, untouched otherwise, and measures how it
+  fits its render: a scale and offset from the silhouettes (`keys.json`) and a smooth optical-flow
+  field (`fields/*.png`) that moves the drawing's eyes, bow and hems onto the render's.
+- Between keys the viewer projects the nearest key drawing onto the mesh from the camera it was
+  drawn for and views the mesh from the current camera, so the drawing turns with the body. The
+  fit field eases in from none at the key to all of it at the hand-off, halfway to the next key.
 - Surfaces the lead drawing's camera could not see are taken whole from the next drawing that did.
-  Two drawings are never mixed on a pixel, and the mesh's own texture never shows.
+  Where nothing was drawn the mesh stays invisible. Two drawings are never mixed on a pixel.
 - Art off the mesh (the ribbons) comes from the same drawing on a camera-facing card behind her.
 
 The viewer gets only the posed shape (`mesh.json`, exported by the renderer with the same three.js
