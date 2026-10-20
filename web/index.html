@@ -761,11 +761,12 @@ function renderRoom() {
   if (!state.room || !roomRenderer) return;
   const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
   // Same camera as the character's frame, widened to the whole window around that frame.
-  roomCam.fov = 2 * Math.atan(Math.tan(K.fov * D2R / 2) * vr.height / fr.height) / D2R;
-  roomCam.aspect = vr.width / vr.height;
-  roomCam.updateProjectionMatrix();
-  roomCam.position.copy(camera.position);
-  roomCam.quaternion.copy(camera.quaternion);
+  // The sprite's camera, with its frame (the centred 2:3 box) widened to the whole window.
+  roomCam.position.copy(viewCam.position);
+  roomCam.quaternion.copy(viewCam.quaternion);
+  roomCam.updateMatrixWorld(true);
+  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(viewCam.projectionMatrix);
+  roomCam.projectionMatrixInverse.copy(roomCam.projectionMatrix).invert();
   // Room as seen from her: rotated by her heading, shifted by her position.
   const h = -walker.heading * D2R;
   roomWorld.rotation.y = h;
@@ -929,12 +930,19 @@ function render() {
     card.position.set(...K.target);
     card.quaternion.copy(camera.quaternion);
   }
+  if (neuro) {
+    latentViewProjection(lead, stretchTowards(lead, camDir));
+    setView(latentCam, latentFrame);
+  } else {
+    lead.vantageCam ??= vantageCamera(lead);
+    setView(lead.vantageCam.cam, lead.vantageCam.frame);
+  }
   renderer.autoClear = false;
   renderer.clear();
   renderRoom();
-  renderer.render(backdrop, camera);
+  renderer.render(backdrop, viewCam);
   renderer.clearDepth();
-  renderer.render(scene, camera);
+  renderer.render(scene, viewCam);
   if (neuro) {
     towards = stretchTowards(lead, camDir);
     const vp = latentViewProjection(lead, towards);
@@ -1022,9 +1030,24 @@ function vantageCamera(k) {
   cam.rotateZ(k.vantage.roll * D2R);
   cam.updateMatrixWorld(true);
   const { scale: sc, tx, ty } = k.vantage;
-  const vp = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1)
-    .multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
-  return { cam, vp };
+  const frame = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  const vp = frame.clone().multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+  return { cam, vp, frame };
+}
+
+const latentFrame = new THREE.Matrix4();
+
+// The camera the sprite is actually seen through: a drawing's learned vantage on a key angle and in
+// flipbook, the blended latent camera between keys in Neuromation. The room, the floor shadow and
+// the skeleton are drawn through it too, so the world and the drawings always agree on angle,
+// height and scale.
+const viewCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+function setView(cam, frame) {
+  viewCam.position.copy(cam.position);
+  viewCam.quaternion.copy(cam.quaternion);
+  viewCam.updateMatrixWorld(true);
+  viewCam.projectionMatrix.multiplyMatrices(frame, cam.projectionMatrix);
+  viewCam.projectionMatrixInverse.copy(viewCam.projectionMatrix).invert();
 }
 
 function latentViewProjection(lead, towards) {
@@ -1039,8 +1062,8 @@ function latentViewProjection(lead, towards) {
   latentCam.updateMatrixWorld(true);
   const sc = Math.exp(mix('scale')), tx = mix('tx'), ty = mix('ty');
   // Framing in clip space: x' = s x + 2 tx w, y' = s y - 2 ty w (frame fractions, y down).
-  const frame = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
-  latentVP = frame.multiply(latentCam.projectionMatrix).multiply(latentCam.matrixWorldInverse);
+  latentFrame.set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  latentVP = latentFrame.clone().multiply(latentCam.projectionMatrix).multiply(latentCam.matrixWorldInverse);
   return latentVP;
 }
 
@@ -1048,8 +1071,7 @@ function latentViewProjection(lead, towards) {
 // the drawings are rotating through): the pose every drawing is tied to.
 function drawSkeleton() {
   const W = flat.width, H = flat.height, em = getComputedStyle(document.documentElement).getPropertyValue('--emerald').trim();
-  const vp = state.mode === 'neuro' && latentVP && !onKeyNow ? latentVP
-    : new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const vp = new THREE.Matrix4().multiplyMatrices(viewCam.projectionMatrix, viewCam.matrixWorldInverse);
   const at = v => { const p = v.clone().applyMatrix4(vp); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
   ctx.lineWidth = Math.max(2, W / 300);
   ctx.strokeStyle = em; ctx.fillStyle = em;
