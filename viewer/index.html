@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anime Turntable</title>
+<style>
+  :root { --bg: #f4f1f7; --fg: #241c2e; --muted: #7a6f86; --accent: #d63384; --panel: #ffffff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #17131c; --fg: #eee8f4; --muted: #9c90a8; --panel: #221c29; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif;
+         display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 16px; }
+  #stage { position: relative; width: min(100%, 560px); aspect-ratio: 2 / 3; background: #fff; border-radius: 12px;
+           overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+  #stage:active { cursor: grabbing; }
+  #stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  #stage img.back { opacity: 0; }
+  .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: center; margin-top: 12px; }
+  .bar label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  button { background: var(--panel); color: var(--fg); border: 1px solid var(--muted); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #hud { color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 8px; }
+  #err { color: var(--accent); max-width: 560px; }
+</style>
+</head>
+<body>
+<div id="stage"><img id="a" alt=""><img id="b" class="back" alt=""></div>
+<div class="bar">
+  <label><input type="checkbox" id="raw"> show 3D render</label>
+  <label><input type="checkbox" id="spin"> auto-spin</label>
+  <label>frame <input type="range" id="frame" min="0" max="0" value="0"></label>
+  <button id="play">▶ anim</button>
+</div>
+<div id="hud"></div>
+<div id="err"></div>
+<script>
+// Drag to orbit; the stage shows the pre-drawn illustration nearest to the current camera angle.
+// Serve the repo root (e.g. `npx serve .`) and open /viewer/?set=out/stylized
+const params = new URLSearchParams(location.search);
+const setDir = '../' + (params.get('set') || 'out/stylized');
+const $ = id => document.getElementById(id);
+let m, rawDir, yaw = 0, pitch = 0, frame = 0, current = null, playing = null;
+
+fetch(`${setDir}/manifest.json`).then(r => r.json()).then(init).catch(e => {
+  $('err').textContent = `Could not load ${setDir}/manifest.json — run render.mjs and stylize.mjs first (${e.message}).`;
+});
+
+function init(manifest) {
+  m = manifest;
+  rawDir = m.renders ? `${setDir}/${m.renders}` : setDir;
+  $('frame').max = (m.frames || 1) - 1;
+  for (const v of m.views) new Image().src = `${setDir}/${v.file}`; // preload
+  show();
+}
+
+const angDist = (a, b) => { const d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); };
+function nearest() {
+  let best = null, bestD = Infinity;
+  for (const v of m.views) {
+    if ((v.frame || 0) !== frame) continue;
+    const d = angDist(v.yaw, yaw) + Math.abs(v.pitch - pitch) * 1.5;
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  return best;
+}
+
+function show() {
+  const v = nearest();
+  if (!v) return;
+  const src = `${$('raw').checked ? rawDir : setDir}/${v.file}`;
+  $('hud').textContent = `camera yaw ${Math.round(yaw)}° pitch ${Math.round(pitch)}° → ${v.file}`;
+  if (src === current) return;
+  current = src;
+  // quick crossfade between neighbouring drawings
+  const [a, b] = [$('a'), $('b')];
+  b.src = src;
+  b.style.transition = 'none'; b.style.opacity = 0;
+  requestAnimationFrame(() => { b.style.transition = 'opacity 90ms'; b.style.opacity = 1; });
+  setTimeout(() => { a.src = src; b.style.transition = 'none'; b.style.opacity = 0; }, 100);
+}
+
+let drag = null;
+$('stage').addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw, pitch }; e.target.setPointerCapture(e.pointerId); });
+$('stage').addEventListener('pointermove', e => {
+  if (!drag || !m) return;
+  yaw = ((drag.yaw - (e.clientX - drag.x) * 0.6) % 360 + 360) % 360;
+  const ps = m.pitches || [0];
+  pitch = Math.max(Math.min(...ps), Math.min(Math.max(...ps), drag.pitch + (e.clientY - drag.y) * 0.3));
+  show();
+});
+addEventListener('pointerup', () => { drag = null; });
+$('raw').onchange = show;
+$('frame').oninput = e => { frame = +e.target.value; show(); };
+$('play').onclick = () => {
+  if (playing) { clearInterval(playing); playing = null; $('play').textContent = '▶ anim'; return; }
+  $('play').textContent = '⏸ anim';
+  playing = setInterval(() => { frame = (frame + 1) % (m.frames || 1); $('frame').value = frame; show(); }, 120);
+};
+(function tick() {
+  if ($('spin').checked && m && !drag) { yaw = (yaw + 0.5) % 360; show(); }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

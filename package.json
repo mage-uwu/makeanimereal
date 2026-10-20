@@ -1,0 +1,24 @@
+{
+  "name": "makeanimereal",
+  "version": "1.0.0",
+  "description": "Render a 3D character from many angles and redraw each view as an anime illustration via OpenRouter",
+  "scripts": {
+    "render": "node scripts/render.mjs",
+    "stylize": "NODE_USE_ENV_PROXY=1 node --no-warnings scripts/stylize.mjs",
+    "viewer": "python3 -m http.server 8000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mage-uwu/makeanimereal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mage-uwu/makeanimereal/issues"
+  },
+  "homepage": "https://github.com/mage-uwu/makeanimereal#readme",
+  "dependencies": {
+    "playwright-core": "^1.56.1",
+    "three": "^0.170.0"
+  },
+  "type": "module",
+  "private": true
+}
