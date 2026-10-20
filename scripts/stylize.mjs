@@ -177,9 +177,14 @@ try {
     const anchorFile = path.join(outDir, anchorView.file);
     if (await exists(anchorFile)) anchorUrl = await dataUrl(anchorFile);
   }
-  await Promise.all(Array.from({ length: Math.max(1, Number(opt.concurrency)) }, async () => {
-    while (queue.length) await run(queue.shift(), anchorUrl);
+  // On a fatal error, stop handing out work but let in-flight requests land before the manifest.
+  const results = await Promise.allSettled(Array.from({ length: Math.max(1, Number(opt.concurrency)) }, async () => {
+    while (queue.length) {
+      try { await run(queue.shift(), anchorUrl); } catch (e) { queue.length = 0; throw e; }
+    }
   }));
+  const fatal = results.find(r => r.status === 'rejected');
+  if (fatal) throw fatal.reason;
 } catch (e) {
   console.error(`stopping: ${e.message}`);
   process.exitCode = 1;
