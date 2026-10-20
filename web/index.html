@@ -172,6 +172,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         </div>
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
+          <label><input type="checkbox" id="walkcycle"> Walk in place</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
           <label><input type="checkbox" id="room"> 3D room</label>
         </div>
@@ -228,7 +229,7 @@ const NOTES = {
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true, walk: false };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -909,9 +910,33 @@ function frame(t) {
   last = t;
   if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
   if (walker.keys.size && K) walk(dt);
+  if (walking()) { anim.t += dt; dirty = true; }
   if (dirty) { render(); dirty = false; }
   requestAnimationFrame(frame);
 }
+
+// Walk cycle: drawn frames from a fixed set of camera angles (walk.json, one sheet per angle). It
+// plays while she walks (WASD) or with "Walk in place". Like a 2D game sprite, the drawn angle
+// nearest the camera is shown, and the room is seen from that same angle so they always agree.
+const anim = { t: 0, data: null, sheets: new Map() };
+const walking = () => !!anim.data && (state.walk || walker.keys.size > 0);
+fetch('walk.json').then(r => r.ok ? r.json() : null).then(d => {
+  if (!d) return;
+  for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
+  anim.data = d;
+  dirty = true;
+}).catch(() => {});
+function walkSheet(a) {
+  if (!anim.sheets.has(a)) {
+    anim.sheets.set(a, null);
+    image(a.sheet).then(img => { anim.sheets.set(a, img); dirty = true; }, () => {});
+    // The rest stream in behind it, so turning never waits long.
+    for (const b of anim.data.angles) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(b.sheet).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
+  }
+  return anim.sheets.get(a);
+}
+const walkCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+const IDENTITY = new THREE.Matrix4();
 
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
@@ -924,7 +949,13 @@ function render() {
   const mode = state.mode;
   const projected = mode === 'projected' && !onKey;
   const stretched = mode === 'flipstretch' && !onKey;
-  const neuro = mode === 'neuro' && !onKey;
+  let walkAngle = null, walkImg = null;
+  if (walking()) {
+    walkAngle = anim.data.angles.reduce((a, b) => angleBetween(camDir, b.dir) < angleBetween(camDir, a.dir) ? b : a);
+    walkImg = walkSheet(walkAngle);
+  }
+  const walkOn = !!walkImg;
+  const neuro = mode === 'neuro' && !onKey && !walkOn;
   let towards = [];
 
   mesh.visible = card.visible = projected;
@@ -948,7 +979,13 @@ function render() {
     card.position.set(...K.target);
     card.quaternion.copy(camera.quaternion);
   }
-  if (neuro) {
+  if (walkOn) {
+    // The room from the drawn angle, not the camera's: her floor and walls must match the drawing.
+    walkCam.fov = K.fov; walkCam.aspect = K.aspect; walkCam.updateProjectionMatrix();
+    placeCamera(walkCam, walkAngle.yaw, walkAngle.pitch, K.radius);
+    setView(walkCam, IDENTITY);
+    setWorld(walkAngle.yaw - state.yaw, walkAngle.pitch - state.pitch, IDENTITY);
+  } else if (neuro) {
     latentViewProjection(lead, stretchTowards(lead, camDir));
     setView(latentCam, latentFrame);
     setWorld(latentAngles.dYaw, latentAngles.dPitch, latentFrame);
@@ -1033,11 +1070,19 @@ function render() {
   // The flat canvas shows key drawings as drawn: on a key angle, and always in flipbook mode.
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
-  if (!projected && !stretched && !neuro) {
+  if (walkOn) {
+    const d = anim.data, n = Math.floor(anim.t / d.duration * d.frames) % d.frames, f = walkAngle.frames[n];
+    const [fw, fh] = d.frame, W = flat.width, H = flat.height;
+    ctx.setTransform(...upright.canvas);
+    ctx.drawImage(walkImg, (n % d.cols) * fw, Math.floor(n / d.cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    anim.shown = { angle: walkAngle, n };
+  } else if (!projected && !stretched && !neuro) {
+    anim.shown = null;
     ctx.setTransform(...upright.canvas);
     drawKey(lead);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }
+  } else anim.shown = null;
   if (state.skeleton) drawSkeleton();
 
   updateSheet(around, onKey, towards);
@@ -1165,9 +1210,16 @@ function updateSheet(around, onKey, towards) {
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
-  chip.textContent = onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
+  chip.textContent = anim.shown ? `Walk frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
   chip.classList.toggle('key', onKey);
   const lead = around[0].key;
+  if (anim.shown) {
+    const a = anim.shown.angle;
+    $('weights').innerHTML = `<li class="lead"><span>walk y${a.yaw} p${a.pitch}</span><span class="role">Nearest of ${anim.data.angles.length} drawn walk angles</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
+    drawRadar([]);
+    saveView();
+    return;
+  }
   const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
   if (!onKey && state.mode === 'neuro') {
     for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
@@ -1179,7 +1231,10 @@ function updateSheet(around, onKey, towards) {
   }
   $('weights').innerHTML = rows.map(r => `<li class="${r.lead ? 'lead' : ''}"><span>${keyName(r.key)}</span><span class="role">${r.role}</span><span class="pct">${r.note}</span></li>`).join('');
   drawRadar(rows);
-  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room })); } catch {}
+  saveView();
+}
+function saveView() {
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room, walk: state.walk })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
@@ -1238,6 +1293,8 @@ function setMode(mode) {
 }
 for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
 $('spin').checked = state.spin;
+$('walkcycle').checked = state.walk;
+$('walkcycle').addEventListener('change', e => { state.walk = e.target.checked; dirty = true; });
 $('skeleton').checked = state.skeleton;
 const showRelief = () => { $('relief').value = state.relief; $('relief-out').textContent = `${Math.round(state.relief * 100)}%`; };
 showRelief();
