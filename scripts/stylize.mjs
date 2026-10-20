@@ -4,7 +4,7 @@
 // front view is fed back as an identity anchor so every angle draws the same character.
 //
 //   OPENROUTER_API_KEY=... node scripts/stylize.mjs [--renders out/renders] [--out out/stylized]
-//        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model google/gemini-3.1-flash-lite-image] [--notes assets/emerald-pixie-notes.txt]
+//        [--style assets/emerald-pixie-ref.jpg] [--style-only] [--model tencent/hy-image-v3.5-preview] [--notes assets/emerald-pixie-notes.txt]
 //        [--endpoint auto|chat|images]
 //        [--concurrency 4] [--only y000_p0.png,...] [--force] [--no-anchor] [--dry-run]
 import fs from 'node:fs/promises';
@@ -21,7 +21,7 @@ const { values: opt } = parseArgs({
     // Plain-text list of design details the model must keep at every angle (skipped if missing).
     notes: { type: 'string', default: 'assets/emerald-pixie-notes.txt' },
     endpoint: { type: 'string', default: 'auto' }, // auto | chat | images
-    model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite-image' },
+    model: { type: 'string', default: process.env.OPENROUTER_MODEL || 'tencent/hy-image-v3.5-preview' },
     prompt: { type: 'string', default: '' },
     concurrency: { type: 'string', default: '4' },
     only: { type: 'string' },
@@ -97,7 +97,7 @@ function requestFor(view, images) {
     return ['images', {
       model: opt.model,
       prompt: `${order}\n${buildPrompt(view, hasAnchor)}\nRemember: ${describeView(view).facing}.`,
-      input_references: images.map(i => i.url),
+      input_references: images.map(({ url }) => ({ type: 'image_url', image_url: { url } })),
     }];
   }
   return ['chat/completions', {

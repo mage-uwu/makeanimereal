@@ -19,7 +19,7 @@ npm run render
 
 # 2. stylize every view (skips ones already done; --force to redo)
 OPENROUTER_API_KEY=sk-or-... npm run stylize
-#   options: --model google/gemini-3.1-flash-lite-image --notes assets/emerald-pixie-notes.txt --style assets/emerald-pixie-ref.jpg --style-only
+#   options: --model tencent/hy-image-v3.5-preview --notes assets/emerald-pixie-notes.txt --style assets/emerald-pixie-ref.jpg --style-only
 #            --prompt "extra style notes" --concurrency 4 --only y000_p0.png,y030_p0.png
 #            --no-anchor --dry-run (print prompts, no API calls)
 
@@ -37,12 +37,12 @@ Measured per sprite (one angle of one frame), at about 840x1260:
 
 | model | $/sprite | notes |
 |---|---|---|
-| `google/gemini-3.1-flash-lite-image` (default) | ~$0.032 | needs `assets/emerald-pixie-notes.txt` to keep reference-only details (ribbons, plain back) |
+| `google/gemini-3.1-flash-lite-image` | ~$0.032 | needs `assets/emerald-pixie-notes.txt` to keep reference-only details (ribbons, plain back) |
 | `google/gemini-2.5-flash-image` | ~$0.036 | follows the 3D render closely and drops reference-only details |
 | `google/gemini-3.1-flash-image` | ~$0.09 | best at adding reference-only details |
-| `tencent/hy-image-v3.5-preview` | ~$0.024 + input images? | image-only model, uses OpenRouter's `/images` endpoint (picked automatically); not tested yet |
+| `tencent/hy-image-v3.5-preview` (default) | $0.024 | best results so far, input images free, 1248x1872 output, ~28s per image; uses OpenRouter's `/images` endpoint (picked automatically) |
 
-36 angles is about $1.15 with flash-lite. OpenRouter refuses image requests once the account balance is under $1.
+36 angles is about $0.86 with Hy Image. OpenRouter refuses image requests once the account balance is under $1.
 
 Start with `--only y000_p0.png,y090_p0.png,y180_p0.png` to tune the prompt and style before running the full set.
 
