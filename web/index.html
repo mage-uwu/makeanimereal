@@ -1090,44 +1090,92 @@ function makeBliss(floorY) {
     }
     dirty = true;
   }).catch(() => {});
-  // 3D rocks, cel-shaded: irregular boulders with three hard toon bands from the scene's sun, moss
-  // on the faces that look up, and an inverted-hull outline, so they sit in the anime style.
-  const gradient = new THREE.DataTexture(new Uint8Array([70, 70, 70, 255, 150, 150, 150, 255, 255, 255, 255, 255]), 3, 1);
-  gradient.minFilter = gradient.magFilter = THREE.NearestFilter;
-  gradient.needsUpdate = true;
+  // 3D rocks, painted the way anime backgrounds paint them: big flat planes, a warm lit tone, a mid
+  // stone tone and cool blue-violet shadow with a hard edge between them, moss as solid painted
+  // shapes on the planes facing up, a touch of the hills' brushwork, and a dark violet outline.
   let rs = 5;
   const rr = () => { rs = (rs * 16807) % 2147483647; return rs / 2147483647; };
-  const stone = new THREE.Color('#a9a79c'), stoneDark = new THREE.Color('#8b8a82'), moss = new THREE.Color('#7fbf3a');
+  const SUN = new THREE.Vector3(4, 11, 3).normalize();  // the scene's sun, raised: anime rocks are lit mostly from above
+  const rockMat = () => new THREE.ShaderMaterial({
+    fog: true,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uRot: { value: new THREE.Matrix3() }, uSun: { value: SUN }, uPaint: { value: grassMat.uniforms.uHill.value },
+      uLit: { value: new THREE.Color('#e4dcc8') }, uMid: { value: new THREE.Color('#b3ada0') }, uShadow: { value: new THREE.Color('#96939f') },
+      uMossLit: { value: new THREE.Color('#a8d84e') }, uMossShadow: { value: new THREE.Color('#4f8f4a') },
+    }]),
+    vertexShader: /* glsl */`
+      #include <fog_pars_vertex>
+      uniform mat3 uRot;
+      attribute float aMoss;
+      varying vec3 vN, vP;
+      varying float vMoss;
+      void main() {
+        vN = normalize(uRot * normal); vMoss = aMoss; vP = position;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <fog_pars_fragment>
+      uniform vec3 uSun, uLit, uMid, uShadow, uMossLit, uMossShadow;
+      uniform sampler2D uPaint;
+      varying vec3 vN, vP;
+      varying float vMoss;
+      void main() {
+        float l = dot(normalize(vN), uSun);
+        // Hard terminator: shadow / mid / lit planes, as a painter would block them in.
+        vec3 stone = l > 0.55 ? uLit : l > 0.12 ? uMid : uShadow;
+        stone *= 0.9 + 0.14 * clamp(l, 0.0, 1.0);          // a soft gradient within each plane
+        vec3 moss = l > 0.25 ? uMossLit : uMossShadow;
+        vec3 c = mix(stone, moss, step(0.5, vMoss));
+        // A whisper of the hills' brushwork across the planes.
+        float paint = dot(texture2D(uPaint, vP.xz * 0.9 + vP.y * 0.4).rgb, vec3(0.3, 0.59, 0.11)) / 0.32;
+        c *= mix(0.84, 1.1, clamp(paint, 0.0, 1.0));
+        // Darker toward the base, where it sits in the grass.
+        c *= mix(0.72, 1.0, smoothstep(-0.7, 0.35, vP.y));
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
   for (let i = 0; i < 9; i++) {
-    const g = new THREE.IcosahedronGeometry(1, 3), p = g.attributes.position, v = new THREE.Vector3();
-    const bumps = Array.from({ length: 9 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.12 + 0.28 * rr()]);
-    const flat = 0.7 + 0.35 * rr(), stretch = 1 + 0.35 * rr();
-    for (let j = 0; j < p.count; j++) {
-      v.fromBufferAttribute(p, j);
-      let r = 1;
-      for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
-      p.setXYZ(j, v.x * r * stretch, v.y * r * flat, v.z * r);
+    // Low detail, so the rock reads as a few big planes; then split so every face is flat.
+    const g = new THREE.IcosahedronGeometry(1, 2);
+    const p0 = g.attributes.position, v = new THREE.Vector3();
+    const bumps = Array.from({ length: 6 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.12 + 0.3 * rr()]);
+    const flat = 0.85 + 0.35 * rr(), stretch = 1 + 0.3 * rr();
+    const moved = new Map();
+    for (let j = 0; j < p0.count; j++) {
+      v.fromBufferAttribute(p0, j);
+      const key = `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
+      if (!moved.has(key)) {
+        let r = 0.92 + 0.16 * rr();
+        for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
+        moved.set(key, [v.x * r * stretch, Math.max(v.y * r * flat, -0.25), v.z * r]);
+      }
+      p0.setXYZ(j, ...moved.get(key));
     }
+    // (Icosahedron geometry is already one vertex per face corner, so the faces come out flat.)
     g.computeVertexNormals();
-    const n = g.attributes.normal, col = new Float32Array(p.count * 3), c = new THREE.Color();
-    for (let j = 0; j < p.count; j++) {
-      const up = n.getY(j), speck = Math.sin(p.getX(j) * 9.1 + p.getZ(j) * 7.3) * Math.sin(p.getZ(j) * 11.7);
-      c.copy(stone).lerp(stoneDark, 0.5 + 0.5 * speck);
-      // Moss in patches on the upper faces, not a cap.
-      const patch = Math.sin(p.getX(j) * 4.3 + 1.1) * Math.sin(p.getZ(j) * 3.7 - 0.4) + 0.5 * Math.sin(p.getY(j) * 6.1 + p.getX(j) * 2.3);
-      if (up > 0.35 && patch > 0.35) c.copy(moss).lerp(stone, 0.15 * (1 - up));
-      col.set([c.r, c.g, c.b], j * 3);
+    const pos = g.attributes.position, nrm = g.attributes.normal, moss = new Float32Array(pos.count);
+    for (let f = 0; f < pos.count; f += 3) {
+      const up = nrm.getY(f), cx = (pos.getX(f) + pos.getX(f + 1) + pos.getX(f + 2)) / 3, cz = (pos.getZ(f) + pos.getZ(f + 1) + pos.getZ(f + 2)) / 3;
+      const m = up > 0.55 && Math.sin(cx * 3.1 + i) * Math.cos(cz * 2.7 - i) > -0.35 ? 1 : 0;
+      moss[f] = moss[f + 1] = moss[f + 2] = m;
     }
-    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.setAttribute('aMoss', new THREE.BufferAttribute(moss, 1));
     const rock = new THREE.Group();
-    rock.add(new THREE.Mesh(g, new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: gradient })));
-    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#283023', side: THREE.BackSide }));
-    hull.scale.setScalar(1.035);
+    const mat = rockMat();
+    rock.add(new THREE.Mesh(g, mat));
+    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#33303f', side: THREE.BackSide }));
+    hull.scale.setScalar(1.03);
     rock.add(hull);
     const size = 0.25 + 0.75 * rr() ** 1.5, a = rr() * Math.PI * 2, d = 2.6 + 9 * rr();
     rock.scale.setScalar(size);
     rock.rotation.y = rr() * Math.PI * 2;
-    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.55, K.target[2] + Math.sin(a) * d);
+    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.62, K.target[2] + Math.sin(a) * d);
+    rock.updateMatrix();
+    mat.uniforms.uRot.value.setFromMatrix4(new THREE.Matrix4().extractRotation(rock.matrix));
     ground.add(rock);
     rocks3d.push(rock);
   }
