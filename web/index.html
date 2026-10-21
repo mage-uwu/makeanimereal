@@ -1160,8 +1160,8 @@ function poseVtuber(k) {
     const L = Math.hypot((E[0] - S[0]) * a, E[1] - S[1]);
     const phase = t * 2 * Math.PI / 3.8 + (i ? Math.PI * 0.85 : 0);
     const sideSign = (S[0] - hip[0]) > 0 ? 1 : -1;  // swing outward-and-back is mirrored per side
-    return { S, E, Wr, T: T || Wr, L, upper: 3.2 * Math.sin(phase) * sideSign * Math.PI / 180,
-             fore: 2.4 * Math.sin(phase - 0.6) * sideSign * Math.PI / 180, sT: rot(S[0], S[1] - breath, hip[0], hip[1], sway) };
+    return { S, E, Wr, T: T || Wr, L, upper: 1.4 * Math.sin(phase) * sideSign * Math.PI / 180,
+             fore: 0.5 * Math.sin(phase - 0.6) * sideSign * Math.PI / 180, sT: rot(S[0], S[1] - breath, hip[0], hip[1], sway) };
   }).filter(Boolean);
   // Distance (in arm lengths) from a point to a segment, and how far along it the closest point is.
   const toSeg = (x, y, P, Q, L) => {
@@ -1169,17 +1169,29 @@ function poseVtuber(k) {
     const u = Math.min(1, Math.max(0, (px * qx + py * qy) / qq));
     return [Math.hypot(px - u * qx, py - u * qy) / L, u];
   };
+  // Legs and whole body: her weight shifts slowly from foot to foot. The hips drift toward the
+  // standing leg and dip a touch as the other knee softens (that knee eases inward); the whole
+  // figure leans a fraction of a degree about her feet. The shoes stay planted.
+  const LF = B.LeftFoot, RF = B.RightFoot, LK = B.LeftLeg, RK = B.RightLeg;
+  const footY = LF && RF ? (LF[1] + RF[1]) / 2 : hip[1] + 2 * (hip[1] - chest[1]);
+  const footX = LF && RF ? (LF[0] + RF[0]) / 2 : hip[0], legLen = Math.max(0.05, footY - hip[1]);
+  const wp = t * 2 * Math.PI / 6.2, shift = Math.sin(wp);         // -1..1: weight on one foot or the other
+  const hipDx = 0.010 * legLen * shift, hipDy = 0.006 * legLen * Math.abs(shift);
+  const lean = 0.35 * Math.sin(t * 2 * Math.PI / 7.3 + 0.7) * Math.PI / 180;
+  // Which knee softens: the one on the side the hips move away from.
+  const knees = [LK, RK].filter(Boolean).map(Kn => ({ Kn, soft: Math.max(0, -shift * Math.sign(Kn[0] - hip[0])) }));
   for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
     const v = j * (cols + 1) + i;
     let x = k.ox + (i / cols) * k.s, y = k.oy + (j / rows) * k.s;
+    const x0 = x, y0 = y;
     const wT = smooth((hip[1] - y) / (hip[1] - chest[1]));
     const wH = smooth((neck[1] + 0.5 * hn - y) / hn) * Math.exp(-(Math.max(0, Math.abs((x - head[0]) * a) / headLen - 1.4) ** 2) / 0.3);
     // Arm weights, measured on the drawing as drawn.
     const armW = arms.map(A => {
       const [d1, u1] = toSeg(x, y, A.S, A.E, A.L), [d2] = toSeg(x, y, A.E, A.Wr, A.L), [d3] = toSeg(x, y, A.Wr, A.T, A.L);
-      const d = Math.min(d1, d2, d3);
-      // Full weight within the arm's thickness, fading out just beyond it; none at the shoulder itself.
-      const near = 1 - smooth((d - 0.17) / 0.16);
+      // Full weight within the sleeve's (or the whole hand's) thickness, so the hand moves as one
+      // rigid piece; a short fade beyond it, so little of the skirt beside it is dragged along.
+      const near = Math.max(1 - smooth((Math.min(d1, d2) - 0.15) / 0.07), 1 - smooth((d3 - 0.2) / 0.07));
       const along = d1 <= Math.min(d2, d3) ? smooth(u1 / 0.35) : 1;
       const fore = Math.min(d2, d3) < d1 ? 1 : smooth((u1 - 0.75) / 0.25);
       return { w: near * along, fore: near * fore };
@@ -1200,6 +1212,16 @@ function poseVtuber(k) {
       const r = rot(x, y, neckT[0], neckT[1], tilt * wH);
       x = r[0] + turn * wH / a; y = r[1] + nod * wH;
     }
+    // Legs: from planted feet (0) to hips (1) the weight shift carries through.
+    const up = smooth((footY - y0) / legLen);
+    x += hipDx * up; y += hipDy * up;
+    for (const { Kn, soft } of knees) {
+      if (soft <= 0) continue;
+      const g = Math.exp(-(((x0 - Kn[0]) * a) ** 2 + (y0 - Kn[1]) ** 2) / (2 * (0.09 * legLen) ** 2));
+      x += -Math.sign(Kn[0] - hip[0]) * 0.006 * legLen * soft * g;
+    }
+    // Whole body: a slow lean about the feet, fading to nothing at the shoes.
+    [x, y] = rot(x, y, footX, footY, lean * smooth((footY - y0) / (0.25 * legLen)));
     pos[v * 3] = x; pos[v * 3 + 1] = y;
   }
   vt.mesh.geometry.attributes.position.needsUpdate = true;
