@@ -138,9 +138,9 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .keyid code { font: 500 12.5px/1.2 var(--font-data); color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .keyid button { font: 500 12px/1.2 var(--font-body); color: var(--emerald); background: transparent; border: 1px solid var(--rule); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
 .keyid button:focus-visible { outline: 2px solid var(--emerald); outline-offset: 1px; }
-.anim-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.anim-head { display: flex; justify-content: space-between; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
 .seg { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
-.seg button { font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0; border-left: 1px solid var(--rule); padding: 7px 14px; cursor: pointer; }
+.seg button { font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0; border-left: 1px solid var(--rule); padding: 7px 10px; cursor: pointer; }
 .seg button:first-child { border-left: 0; }
 .seg button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
 .seg button:focus-visible, .scrub button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
@@ -221,6 +221,9 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
           <div class="seg" role="group" aria-label="Animation">
             <button type="button" data-anim="" aria-pressed="true">Still</button>
             <button type="button" data-anim="walk" aria-pressed="false">Walk</button>
+            <button type="button" data-anim="blink" aria-pressed="false">Blink</button>
+            <button type="button" data-anim="wink" aria-pressed="false">Wink</button>
+            <button type="button" data-anim="talk" aria-pressed="false">Talk</button>
           </div>
         </div>
         <div class="scrub" id="scrub">
@@ -954,17 +957,26 @@ function frame(t) {
 // Walk cycle: drawn frames from a fixed set of camera angles (walk.json, one sheet per angle). It
 // plays while she walks (WASD) or with "Walk in place". Like a 2D game sprite, the drawn angle
 // nearest the camera is shown, and the room is seen from that same angle so they always agree.
-const anim = { t: 0, data: null, sheets: new Map() };
+// Every animation shares one player. Walk is drawn from the rig at many angles; blink, wink and
+// talk are face edits of the front keys ("front": shown only near those angles). A "sequence"
+// lists which sheet frame each step shows, so held frames are stored once.
+const ANIMS = ['walk', 'blink', 'wink', 'talk'];
+const anim = { t: 0, all: {}, sheets: new Map() };
+// WASD always walks; otherwise the animation picked under the key map.
+Object.defineProperty(anim, 'name', { get: () => walker.keys.size ? 'walk' : state.anim });
+Object.defineProperty(anim, 'data', { get: () => anim.all[anim.name] || null });
+const animTitle = n => n.charAt(0).toUpperCase() + n.slice(1);
 // Plays when "Walk" is picked under the key map, or whenever she walks (WASD). Paused, the frame
 // slider scrubs through the cycle.
-const walking = () => !!anim.data && (state.anim === 'walk' || walker.keys.size > 0);
+const walking = () => !!anim.data;
 const animFrame = () => Math.floor(anim.t / anim.data.duration * anim.data.frames + 1e-6) % anim.data.frames;
-fetch('walk.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
+const sheetFrame = n => anim.data.sequence ? anim.data.sequence[n] : n;
+for (const name of ANIMS) fetch(`${name}.json`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
   if (!d) return;
   for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
-  anim.data = d;
-  $('frame').max = d.frames;
-  anim.pending?.();
+  anim.all[name] = d;
+  if (anim.data === d) $('frame').max = d.frames;
+  if (anim.pending?.name === name) anim.pending.go();
   showAnim();
   dirty = true;
 }).catch(() => {});
@@ -994,7 +1006,9 @@ function render() {
   let walkAngle = null, walkImg = null;
   if (walking()) {
     walkAngle = anim.data.angles.reduce((a, b) => angleBetween(camDir, b.dir) < angleBetween(camDir, a.dir) ? b : a);
-    walkImg = walkSheet(walkAngle);
+    // Face animations exist only from the front; elsewhere she is shown still.
+    if (!anim.data.front || angleBetween(camDir, walkAngle.dir) < 20) walkImg = walkSheet(walkAngle);
+    else walkAngle = null;
   }
   const walkOn = !!walkImg;
   const neuro = mode === 'neuro' && !onKey && !walkOn;
@@ -1113,12 +1127,12 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
   if (walkOn) {
-    const d = anim.data, n = animFrame(), f = walkAngle.frames[n];
+    const d = anim.data, n = animFrame(), m = sheetFrame(n), f = walkAngle.frames[m];
     const [fw, fh] = d.frame, W = flat.width, H = flat.height;
     ctx.setTransform(...upright.canvas);
-    ctx.drawImage(walkImg, (n % d.cols) * fw, Math.floor(n / d.cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
+    ctx.drawImage(walkImg, (m % d.cols) * fw, Math.floor(m / d.cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    anim.shown = { angle: walkAngle, n };
+    anim.shown = { angle: walkAngle, n, name: anim.name };
   } else if (!projected && !stretched && !neuro) {
     anim.shown = null;
     ctx.setTransform(...upright.canvas);
@@ -1248,20 +1262,20 @@ const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
 function updateSheet(around, onKey, towards) {
   $('hint').textContent = K.loaded < K.keys.length
     ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
-    : anim.shown ? 'WASD to walk · Drag to orbit · Arrow keys step walk angles · , . step frames'
+    : anim.shown ? 'WASD to walk · Drag to orbit · Arrow keys step drawn angles · , . step frames'
     : 'WASD to walk · Drag to orbit · Arrow keys step to the next key';
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
-  chip.textContent = anim.shown ? `Walk frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
+  chip.textContent = anim.shown ? `${animTitle(anim.shown.name)} frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
   chip.classList.toggle('key', onKey);
   const lead = around[0].key;
   showKeyId(anim.shown
-    ? { id: `walk/f${String(anim.shown.n).padStart(2, '0')}/y${anim.shown.angle.yaw}/p${anim.shown.angle.pitch}`, exact: angleBetween(dirOf(state.yaw, state.pitch), anim.shown.angle.dir) < 0.25 }
+    ? { id: `${anim.shown.name}/f${String(anim.shown.n).padStart(2, '0')}/y${anim.shown.angle.yaw}/p${anim.shown.angle.pitch}`, exact: angleBetween(dirOf(state.yaw, state.pitch), anim.shown.angle.dir) < 0.25 }
     : { id: `still/y${around[0].key.yaw}/p${around[0].key.pitch}`, exact: onKey });
   if (anim.shown) {
     const a = anim.shown.angle;
-    $('weights').innerHTML = `<li class="lead"><span>walk y${a.yaw} p${a.pitch}</span><span class="role">Nearest of ${anim.data.angles.length} drawn walk angles</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
+    $('weights').innerHTML = `<li class="lead"><span>${anim.shown.name} y${a.yaw} p${a.pitch}</span><span class="role">${anim.data.front ? `Face edit of the key drawing (${anim.data.expressions[sheetFrame(anim.shown.n)].replace('_', ' ')})` : `Nearest of ${anim.data.angles.length} drawn ${anim.shown.name} angles`}</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
     drawRadar([{ key: a }]);
     showAnim();
     saveView();
@@ -1363,10 +1377,10 @@ function openKey(id) {
   const m = /^(\w+)\/(?:f(\d+)\/)?y(-?[\d.]+)\/p(-?[\d.]+)$/.exec(decodeURIComponent(id).trim());
   if (!m) return false;
   state.yaw = Number(m[3]); state.pitch = Number(m[4]); state.spin = false; $('spin').checked = false;
-  state.anim = m[1] === 'walk' ? 'walk' : '';
-  if (m[1] === 'walk') {
+  state.anim = ANIMS.includes(m[1]) ? m[1] : '';
+  if (state.anim) {
     const go = () => setFrame(Number(m[2] || 0));
-    anim.data ? go() : (anim.pending = go);
+    anim.data ? go() : (anim.pending = { name: state.anim, go });
   }
   showAnim();
   dirty = true;
@@ -1380,6 +1394,7 @@ function showAnim() {
   $('scrub').setAttribute('aria-disabled', String(!on));
   $('play').textContent = state.playing ? 'Pause' : 'Play';
   if (!anim.data) return;
+  $('frame').max = anim.data.frames;
   const n = animFrame() + 1;
   $('frame').value = n;
   $('frame-out').textContent = `f${String(n - 1).padStart(2, '0')} · ${n} of ${anim.data.frames}`;
@@ -1391,7 +1406,19 @@ function setFrame(n) {
   showAnim();
   dirty = true;
 }
-for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => { state.anim = b.dataset.anim; showAnim(); dirty = true; });
+for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => {
+  state.anim = b.dataset.anim;
+  // Face animations are drawn from the front only: bring the camera round if it is elsewhere.
+  const d = anim.data;
+  if (d?.front) {
+    const here = dirOf(state.yaw, state.pitch);
+    const near = d.angles.reduce((a, c) => angleBetween(here, c.dir) < angleBetween(here, a.dir) ? c : a);
+    if (angleBetween(here, near.dir) > 20) jumpTo(near);
+  }
+  if (d) $('frame').max = d.frames;
+  showAnim();
+  dirty = true;
+});
 $('play').addEventListener('click', () => { state.playing = !state.playing; showAnim(); dirty = true; });
 $('frame').addEventListener('input', e => setFrame(+e.target.value - 1));
 showAnim();
