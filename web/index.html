@@ -827,7 +827,7 @@ function makeRoom(floorY) {
   sun.position.set(4, floorY + 6, 3);
   sun.target.position.set(0, floorY, 0);
   roomWorld.add(sun, sun.target);
-  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 200);
+  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 700);
   scenes.room = { group: white, background: new THREE.Color('#f3f1ed'), fog: null, half: W / 2 - 0.6 };
   scenes.bliss = makeBliss(floorY);
   roomScene.add(scenes.bliss.far);
@@ -893,14 +893,35 @@ function makeBliss(floorY) {
   const farGroup = new THREE.Group();
   farGroup.add(far);
   const ground = new THREE.Group();
-  const grassMat = new THREE.MeshBasicMaterial({ color: '#4caa2c', side: THREE.DoubleSide });
+  // Terrain: flat where she walks, rolling gently beyond, rising into low hills toward the edge so
+  // the ground ends on a hilltop line that the haze melts into the painted horizon. Slopes are
+  // shaded once, from the painting's sun (upper left).
+  const SIZE = 320, SEG = 200, FLAT = 20;
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const height = (x, z) => {
+    const r = Math.hypot(x, z), out = THREE.MathUtils.smoothstep(r, FLAT, 150);
+    const roll = 1.2 * Math.sin(x * 0.045 + 1.3) * Math.cos(z * 0.038 - 0.7) + 0.7 * Math.sin((x + z) * 0.071 + 2.1) + 0.4 * Math.cos(x * 0.13 - z * 0.09);
+    const ang = Math.atan2(z, x);
+    return out * (1.2 * roll + 1.4) + Math.pow(out, 2.5) * (8 + 3 * Math.sin(ang * 3 + 0.4) + 1.5 * Math.sin(ang * 7 - 1.1));
+  };
+  for (let i = 0; i < pos.count; i++) pos.setY(i, height(pos.getX(i), pos.getZ(i)));
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal, sunDir = new THREE.Vector3(-0.5, 0.75, -0.45).normalize(), col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const sh = 0.78 + 0.3 * Math.max(0, nrm.getX(i) * sunDir.x + nrm.getY(i) * sunDir.y + nrm.getZ(i) * sunDir.z);
+    col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = Math.min(1.08, sh);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  // One-sided: from a camera below the field (steep low angles) you see open sky, not the turf's underside.
+  const grassMat = new THREE.MeshBasicMaterial({ color: '#4caa2c', side: THREE.FrontSide, vertexColors: true });
   loader.load('scene/bliss-grass.webp', t => {
-    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(22, 22); t.anisotropy = 8;
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(SIZE / 4.5, SIZE / 4.5); t.anisotropy = 8;
     grassMat.map = t; grassMat.color.set('#ffffff'); grassMat.needsUpdate = true; dirty = true;
   });
-  const g = new THREE.Mesh(new THREE.CircleGeometry(R * 0.9, 96), grassMat);
-  g.rotation.x = -Math.PI / 2;
-  g.position.y = floorY;
+  const g = new THREE.Mesh(geo, grassMat);
+  g.position.set(K.target[0], floorY, K.target[2]);
   ground.add(g);
   roomWorld.add(ground);
   // Ground props: drawn rocks, bushes and grass tufts scattered round her (see scripts/props.py).
@@ -928,7 +949,9 @@ function makeBliss(floorY) {
     dirty = true;
   }).catch(() => {});
   // The haze matches the painting's meadow near the horizon, so the ground melts into it.
-  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#7fb24a', 12, R * 0.85), half: 18 };
+  // Distance haze: the colour of the painting's far meadow and hills, so the terrain's last hills
+  // fade into the painted horizon instead of meeting it at an edge.
+  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#8fb6a2', 25, 185), half: 18 };
 }
 function setBackdrop(name) {
   state.backdrop = scenes[name] ? name : 'room';
@@ -1592,7 +1615,7 @@ const latentFrame = new THREE.Matrix4(), latentAngles = { dYaw: 0, dPitch: 0 };
 // The world camera follows the sprite: the same yaw, height and framing the drawing depicts, but
 // never its roll. A drawing's noon (straight up in the image) is her vertical, so the world's
 // vertical must project straight up too: walls run parallel to her and the floor is square to her.
-const worldCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+const worldCam = new THREE.PerspectiveCamera(22, 1, 0.05, 700);  // far enough for the outdoor scene's distant hills
 function setWorld(dYaw, dPitch, frame) {
   worldCam.fov = K.fov; worldCam.aspect = K.aspect; worldCam.updateProjectionMatrix();
   placeCamera(worldCam, state.yaw + dYaw, state.pitch + dPitch, K.radius);

@@ -121,16 +121,22 @@ def main():
             # Identity from the first view at the same height, so a steep view never copies a side view.
             first = out / next(w['file'] for w in prop['views'] if w['pitch'] == v['pitch'])
             ident = [png(Image.open(first))] if f != first and first.exists() else []
+            # Steep views also see the low-angle drawing: the same rock or bush, its material and palette.
+            low = out / prop['views'][0]['file']
+            material = [png(Image.open(low))] if v['pitch'] >= 40 and low.exists() else []
             steep = (f' The camera looks DOWN on it from high above at {v["pitch"]:g} degrees, exactly as in image 1: we see mostly its top, '
                      f'strongly foreshortened, NOT a side view.' if v['pitch'] >= 40 else '')
             prompt = (f'Image 1 is a 3D RENDER of {WHAT[name]}: copy its exact shape, size, camera angle and framing. '
                       f'Image 2 is a STYLE REFERENCE: paint it in exactly that hand-painted anime background-art style and palette '
                       f'(soft painterly shading, bright summer light, crisp clean edges).'
                       + (' Image 3 is the SAME object already painted from another angle: keep it the same object, colours and details.' if ident else '')
+                      + (f' Image {3 + len(ident)} is the SAME object painted from a LOW angle: match its material, colours, moss and '
+                         f'painted texture exactly, but NOT its angle.' if material else '')
                       + steep
+                      + ' Paint smooth natural organic forms: no polygon facets, no flat-shaded triangles, no 3D-render look.'
                       + f' Redraw image 1 as {WHAT[name]}, a single isolated prop centred in the frame, on a perfectly flat solid #c006a6 magenta '
                       f'background, no ground, no cast shadow, no other objects, no text.')
-            refs = [png(Image.open(renders / v['file'])), style, *ident]
+            refs = [png(Image.open(renders / v['file'])), style, *ident, *material]
             if args.backend == 'openrouter':
                 data, c = draw_openrouter(refs, prompt, key)
             else:
