@@ -98,7 +98,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .sheet > section + section { border-top: 1px solid var(--rule); }
 .label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 
-.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
 .modes button {
   font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
   padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
@@ -177,6 +177,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="menu">
         <div class="modes" role="group" aria-label="How to show angles between key drawings">
           <button type="button" id="mode-neuro" data-mode="neuro" aria-pressed="false">Neuromation</button>
+          <button type="button" id="mode-walsh" data-mode="walsh" aria-pressed="false">Walsh</button>
           <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
         </div>
         <p class="mode-note" id="mode-note"></p>
@@ -239,6 +240,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <dl class="method">
           <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
           <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and the drawing becomes a rigid shell: every point sits on the ray from its vantage at a smoothed depth, so the vantage sees it exactly as drawn and the shell can't shear or tear. Between keys the shell rotates; your angle maps to a latent angle that blends the nearby drawings' vantages. Depth relief sets how curved the shell is, from a flat card (no deformation at all) to the full smoothed shape.</dd></div>
+          <div><dt>Walsh</dt><dd>Walsh (sequency) interpolation, built on Neuromation. Both drawings either side of your angle are turned as rigid shells, with the rig's articulated hand-off, to the same in-between vantage. Each is split into Walsh/Haar sequency bands by box-averaging (the GPU's mip pyramid: additions only, no network). The low bands, her shape, colour and shading, interpolate smoothly with the blend proportion. The high bands, her line art, are never averaged (averaging them is what makes ghost double-lines): they switch from one drawing to the other over a short stretch around the midpoint, with their spectral energy kept constant so lines don't fade as they hand over. Anything only one drawing has, like a ribbon drawn in a different place, is shown only while that drawing leads, so nothing is duplicated. On a key angle the bands sum back to the drawing exactly.</dd></div>
           <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
         </dl>
         <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
@@ -259,9 +261,10 @@ const $ = id => document.getElementById(id);
 if (matchMedia('(max-width: 700px)').matches) $('info').open = false;
 const viewportEl = $('viewport'), stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
 
-const MODES = ['neuro', 'flipbook'];
+const MODES = ['neuro', 'walsh', 'flipbook'];
 const NOTES = {
   neuro: 'Between keys, each drawing turns as one rigid, gently curved shell, seen from the angle it really depicts. Less relief means less deformation.',
+  walsh: 'Neuromation for both neighbouring drawings at once, merged by sequency band: shape and shading blend smoothly, line art switches cleanly, so there are no ghost lines.',
   projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
   flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
@@ -1144,6 +1147,85 @@ viewportEl.addEventListener('pointermove', e => {
 });
 viewportEl.addEventListener('pointerleave', () => vt.want.set(0, 0));
 
+// Walsh interpolation: the two neighbouring drawings' shells, each rendered alone into its own
+// buffer from the same in-between vantage, then merged band by band in sequency (Walsh/Haar) space.
+// The mip pyramid of each buffer is its box-average (lowest-sequency) ladder: band l = level l -
+// level l+1. Low sequency blends linearly; high sequency (lines) switches between the drawings over
+// a short stretch, energy-preserving, so no line is ever drawn twice at half strength.
+const walshFx = { rts: null, scene: null };
+function makeWalsh() {
+  const m = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: { uA: { value: null }, uB: { value: null }, uT: { value: 0 } },
+    vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uA, uB;
+      uniform float uT;
+      varying vec2 vUv;
+      const vec3 LUM = vec3(0.3, 0.59, 0.11);
+      const float TOP = 5.0;  // coarsest band: 32 px boxes; finer bands telescope down to the drawing
+      void main() {
+        vec4 a0 = textureLod(uA, vUv, 0.0), b0 = textureLod(uB, vUv, 0.0);
+        bool hasA = a0.a > 0.5, hasB = b0.a > 0.5;
+        // Parts only one drawing has are shown only while that drawing leads: never twice.
+        if (!hasA && !hasB) discard;
+        vec4 c;
+        if (hasA != hasB) {
+          if (hasA ? uT > 0.5 : uT <= 0.5) discard;
+          c = hasA ? a0 : b0;
+        } else {
+          // Low sequency: linear blend. High sequency: switch over t in [0.4, 0.6].
+          vec4 coarse = mix(textureLod(uA, vUv, TOP), textureLod(uB, vUv, TOP), uT);
+          // The bands telescope: their sum is the drawing minus its coarsest band.
+          vec4 dA = a0 - textureLod(uA, vUv, TOP), dB = b0 - textureLod(uB, vUv, TOP);
+          float s = smoothstep(0.4, 0.6, uT);
+          vec4 d = mix(dA, dB, s);
+          // Where the two hand over, keep the detail's energy (its contrast) at what the drawings
+          // have, so lines don't fade to half strength. Off the hand-over this is exactly 1.
+          float want = mix(abs(dot(dA.rgb, LUM)), abs(dot(dB.rgb, LUM)), s), have = abs(dot(d.rgb, LUM));
+          d.rgb *= clamp(want / max(have, 1e-3), 1.0, 1.6);
+          c = vec4(clamp(coarse.rgb + d.rgb, 0.0, 1.0), 1.0);
+        }
+        gl_FragColor = vec4(c.rgb / max(c.a, 1e-3), 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), m);
+  quad.frustumCulled = false;
+  walshFx.scene = new THREE.Scene();
+  walshFx.scene.add(quad);
+  walshFx.mat = m;
+}
+function renderWalsh(around) {
+  const w = glCanvas.width, h = glCanvas.height;
+  if (!walshFx.scene) makeWalsh();
+  if (!walshFx.rts || walshFx.rts[0].width !== w || walshFx.rts[0].height !== h) {
+    walshFx.rts?.forEach(r => r.dispose());
+    walshFx.rts = [0, 1].map(() => new THREE.WebGLRenderTarget(w, h, {
+      generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter, colorSpace: THREE.SRGBColorSpace, samples: 4,
+    }));
+  }
+  const kids = neuroScene.children, keepVis = kids.map(k => k.visible), keepTarget = renderer.getRenderTarget();
+  const keepColor = renderer.getClearColor(new THREE.Color()), keepAlpha = renderer.getClearAlpha();
+  renderer.setClearColor(0x000000, 0);
+  // Each drawing's shell alone: the lead's, and the next nearest drawing's.
+  [neuroLead, neuroBack].forEach((m, i) => {
+    kids.forEach(k => { k.visible = k === m; });
+    renderer.setRenderTarget(walshFx.rts[i]);
+    renderer.clear();
+    renderer.render(neuroScene, camera);
+  });
+  kids.forEach((k, i) => { k.visible = keepVis[i]; });
+  renderer.setRenderTarget(keepTarget);
+  renderer.setClearColor(keepColor, keepAlpha);
+  // Blend proportion: 0 on the lead drawing's angle, 0.5 halfway to the next.
+  const offA = around[0].angle, offB = around[1] ? around[1].angle : offA;
+  const u = walshFx.mat.uniforms;
+  u.uA.value = walshFx.rts[0].texture; u.uB.value = walshFx.rts[1].texture;
+  u.uT.value = around[1] ? offA / (offA + offB) : 0;
+  renderer.render(walshFx.scene, orthoCam);
+}
+
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
   const camDir = dirOf(state.yaw, state.pitch);
@@ -1166,7 +1248,8 @@ function render() {
     walkImg = walkSheet(walkAngle);
   }
   const walkOn = !!walkImg, faceOn = !!faceImg, vtOn = vtuberOn() && !walkOn && lead.ready;
-  const neuro = mode === 'neuro' && !onKey && !walkOn && !faceOn && !vtOn;
+  const neuro = (mode === 'neuro' || mode === 'walsh') && !onKey && !walkOn && !faceOn && !vtOn;
+  const walsh = neuro && mode === 'walsh';
   let towards = [];
 
   mesh.visible = card.visible = projected;
@@ -1263,7 +1346,7 @@ function render() {
       if (own === lead) handTex.needsUpdate = true;
       u.uHand.value = handTex;
     }
-    renderer.render(neuroScene, camera);
+    if (walsh) renderWalsh(around); else renderer.render(neuroScene, camera);
   }
   if (vtOn) {
     if (!vt.scene) makeVtuber();
@@ -1456,8 +1539,12 @@ function updateSheet(around, onKey, towards) {
     saveView();
     return;
   }
-  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
-  if (!onKey && state.mode === 'neuro') {
+  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', walsh: 'Low sequency blended, lines lead', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
+  if (!onKey && state.mode === 'walsh' && around[1]) {
+    const tt = around[0].angle / (around[0].angle + around[1].angle);
+    rows[0].note = `${Math.round((1 - tt) * 100)}% weight`;
+    rows.push({ key: around[1].key, role: tt > 0.4 ? 'Taking over the lines' : 'Blended into shape and shading', note: `${Math.round(tt * 100)}% weight` });
+  } else if (!onKey && state.mode === 'neuro') {
     for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
     if (around[1]) rows.push({ key: around[1].key, role: 'Fills torn or hidden parts', note: `${around[1].angle.toFixed(1)}° away` });
   } else if (!onKey && state.mode === 'flipstretch') {
@@ -1531,7 +1618,7 @@ function setMode(mode) {
   state.mode = mode;
   for (const b of document.querySelectorAll('.modes button')) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
   $('mode-note').textContent = NOTES[mode];
-  $('relief-row').hidden = mode !== 'neuro';
+  $('relief-row').hidden = mode !== 'neuro' && mode !== 'walsh';
   dirty = true;
 }
 for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
