@@ -914,12 +914,57 @@ function makeBliss(floorY) {
     col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = Math.min(1.08, sh);
   }
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  // One-sided: from a camera below the field (steep low angles) you see open sky, not the turf's underside.
-  const grassMat = new THREE.MeshBasicMaterial({ color: '#4caa2c', side: THREE.FrontSide, vertexColors: true });
-  loader.load('scene/bliss-grass.webp', t => {
-    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(SIZE / 4.5, SIZE / 4.5); t.anisotropy = 8;
-    grassMat.map = t; grassMat.color.set('#ffffff'); grassMat.needsUpdate = true; dirty = true;
+  // Near her, the meadow tile; from FLAT metres out it hands over to the painting's own hill: its
+  // brushwork (a tile cut from the big Bliss hill) at a broad scale, coloured with the hill's palette
+  // by the terrain's slope light, sunlit crests brighter. One-sided: from a camera below the field
+  // (steep low angles) you see open sky, not the turf's underside.
+  const tex = (url, repeat) => {
+    const t = loader.load(url, () => { dirty = true; });
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8;
+    return t;
+  };
+  const grassMat = new THREE.ShaderMaterial({
+    side: THREE.FrontSide, fog: true, vertexColors: true,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uGrass: { value: null }, uHill: { value: null }, uFlat: { value: FLAT },
+      uShade: { value: new THREE.Color('#2f7a24') }, uLit: { value: new THREE.Color('#9fd84a') }, uCrest: { value: new THREE.Color('#c8ec7a') },
+    }]),
+    vertexShader: /* glsl */`
+      #include <fog_pars_vertex>
+      varying vec3 vPos, vColor;
+      void main() {
+        vPos = position; vColor = color;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <fog_pars_fragment>
+      uniform sampler2D uGrass, uHill;
+      uniform float uFlat;
+      uniform vec3 uShade, uLit, uCrest;
+      varying vec3 vPos, vColor;
+      void main() {
+        vec3 near = texture2D(uGrass, vPos.xz / 4.5).rgb * vColor;
+        // Painted hills: the hill tile's strokes, stretched along the slopes like the painting's.
+        vec3 strokes = texture2D(uHill, vec2(vPos.x / 38.0, vPos.z / 13.0)).rgb;
+        float luma = dot(strokes, vec3(0.3, 0.59, 0.11)) / 0.32;
+        float light = clamp((vColor.r - 0.8) / 0.26, 0.0, 1.0);
+        vec3 base = mix(uShade, uLit, light);
+        base = mix(base, uCrest, smoothstep(6.0, 18.0, vPos.y) * light * 0.6);
+        // Broad diagonal swaths of light and shade across the slopes, as in the painting.
+        float swath = 0.5 + 0.5 * sin(dot(vPos.xz, vec2(0.042, 0.027)) + 1.7 * sin(vPos.x * 0.011 - vPos.z * 0.017));
+        vec3 painted = base * mix(0.55, 1.4, clamp(luma, 0.0, 1.0)) * mix(0.84, 1.1, swath);
+        // A little of the strokes' own colour (flowers, yellow highlights) shows through.
+        painted = mix(painted, strokes * (dot(base, vec3(0.33)) / 0.3), 0.25);
+        float w = smoothstep(uFlat - 4.0, uFlat + 22.0, length(vPos.xz));
+        gl_FragColor = vec4(mix(near, painted, w), 1.0);
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
   });
+  grassMat.uniforms.uGrass.value = tex('scene/bliss-grass.webp');
+  grassMat.uniforms.uHill.value = tex('scene/bliss-hill.webp');
   const g = new THREE.Mesh(geo, grassMat);
   g.position.set(K.target[0], floorY, K.target[2]);
   ground.add(g);
@@ -951,7 +996,7 @@ function makeBliss(floorY) {
   // The haze matches the painting's meadow near the horizon, so the ground melts into it.
   // Distance haze: the colour of the painting's far meadow and hills, so the terrain's last hills
   // fade into the painted horizon instead of meeting it at an edge.
-  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#8fb6a2', 25, 185), half: 18 };
+  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#8fb6a2', 55, 260), half: 18 };
 }
 function setBackdrop(name) {
   state.backdrop = scenes[name] ? name : 'room';
