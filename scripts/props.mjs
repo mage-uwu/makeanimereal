@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Render the ground props' 3D proxies from a ring of angles (see scripts/props-page.html).
 //
-//   node scripts/props.mjs [--out out/props-renders] [--yaws 8] [--pitches 10,50]
+//   node scripts/props.mjs [--out out/props-renders] [--yaws 8] [--pitches 10,50,75]
 import { chromium } from 'playwright-core';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -12,7 +12,7 @@ const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
 const { values: opt } = parseArgs({ options: {
   out: { type: 'string', default: 'out/props-renders' },
   yaws: { type: 'string', default: '8' },
-  pitches: { type: 'string', default: '10,50' },
+  pitches: { type: 'string', default: '10,50,75' },
 } });
 const PROPS = { rock: Number(opt.yaws), bush: Number(opt.yaws), grass: Math.max(1, Number(opt.yaws) / 2) };
 const pitches = opt.pitches.split(',').map(Number);

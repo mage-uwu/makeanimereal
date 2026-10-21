@@ -70,6 +70,27 @@ def draw(refs, prompt, model, key, seed):
         time.sleep(2 ** (attempt + 1))
 
 
+def draw_openrouter(refs, prompt, key):
+    """The same drawing on Hy Image (OpenRouter), which follows a render's camera angle closely."""
+    body = {'model': 'tencent/hy-image-v3.5-preview', 'prompt': prompt,
+            'input_references': [{'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{r}'}} for r in refs]}
+    headers = {'Authorization': f'Bearer {key}', 'content-type': 'application/json'}
+    for attempt in range(4):
+        try:
+            j = json.load(urllib.request.urlopen(urllib.request.Request(
+                'https://openrouter.ai/api/v1/images', data=json.dumps(body).encode(), headers=headers), timeout=300))
+            d = j['data'][0]
+            data = base64.b64decode(d['b64_json']) if d.get('b64_json') else urllib.request.urlopen(d['url'], timeout=60).read()
+            return data, 100 * (j.get('usage') or {}).get('cost', 0.024)
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403) or attempt == 3:
+                raise
+        except Exception:
+            if attempt == 3:
+                raise
+        time.sleep(2 ** (attempt + 1))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--renders', default='out/props-renders')
@@ -80,29 +101,40 @@ def main():
     p.add_argument('--only')
     p.add_argument('--limit', type=int, help='draw at most this many views (to price a run)')
     p.add_argument('--seed', type=int, default=3)
+    p.add_argument('--backend', default='bfl', choices=['bfl', 'openrouter'], help='openrouter: Hy Image, best at following steep angles')
+    p.add_argument('--pitches', help='only draw these pitches, e.g. 50,75')
     args = p.parse_args()
     renders, out, web = Path(args.renders), Path(args.out), Path(args.web)
     manifest = json.loads((renders / 'manifest.json').read_text())
-    key = os.environ.get('BFL_API_KEY')
+    key = os.environ.get('OPENROUTER_API_KEY' if args.backend == 'openrouter' else 'BFL_API_KEY')
+    only_pitches = {float(x) for x in args.pitches.split(',')} if args.pitches else None
     style = png(Image.open(args.style), 768)
     spent, drawn = 0.0, 0
     for name, prop in manifest['props'].items():
         if args.only and name not in args.only.split(','):
             continue
         (out / name).mkdir(parents=True, exist_ok=True)
-        first = out / prop['views'][0]['file']
         for v in prop['views']:
             f = out / v['file']
-            if f.exists() or (args.limit is not None and drawn >= args.limit):
+            if f.exists() or (args.limit is not None and drawn >= args.limit) or (only_pitches and v['pitch'] not in only_pitches):
                 continue
+            # Identity from the first view at the same height, so a steep view never copies a side view.
+            first = out / next(w['file'] for w in prop['views'] if w['pitch'] == v['pitch'])
             ident = [png(Image.open(first))] if f != first and first.exists() else []
+            steep = (f' The camera looks DOWN on it from high above at {v["pitch"]:g} degrees, exactly as in image 1: we see mostly its top, '
+                     f'strongly foreshortened, NOT a side view.' if v['pitch'] >= 40 else '')
             prompt = (f'Image 1 is a 3D RENDER of {WHAT[name]}: copy its exact shape, size, camera angle and framing. '
                       f'Image 2 is a STYLE REFERENCE: paint it in exactly that hand-painted anime background-art style and palette '
                       f'(soft painterly shading, bright summer light, crisp clean edges).'
                       + (' Image 3 is the SAME object already painted from another angle: keep it the same object, colours and details.' if ident else '')
+                      + steep
                       + f' Redraw image 1 as {WHAT[name]}, a single isolated prop centred in the frame, on a perfectly flat solid #c006a6 magenta '
                       f'background, no ground, no cast shadow, no other objects, no text.')
-            data, c = draw([png(Image.open(renders / v['file'])), style, *ident], prompt, args.model, key, args.seed)
+            refs = [png(Image.open(renders / v['file'])), style, *ident]
+            if args.backend == 'openrouter':
+                data, c = draw_openrouter(refs, prompt, key)
+            else:
+                data, c = draw(refs, prompt, args.model, key, args.seed)
             f.write_bytes(data)
             spent += c
             drawn += 1
@@ -115,10 +147,13 @@ def main():
     for name, prop in manifest['props'].items():
         if not all((out / v['file']).exists() for v in prop['views']):
             continue
-        T = 256  # tile size in the web sheet
+        T = 256  # tile size in the web sheet; drawings of another shape are centre-cropped square
         sheet = Image.new('RGBA', (T * len(prop['yaws']), T * len(prop['pitches'])), (0, 0, 0, 0))
         for v in prop['views']:
-            cut = bw.cut_out_chroma(Image.open(out / v['file']).convert('RGB'), None).resize((T, T), Image.LANCZOS)
+            im = Image.open(out / v['file']).convert('RGB')
+            side = min(im.size)
+            im = im.crop(((im.width - side) // 2, (im.height - side) // 2, (im.width + side) // 2, (im.height + side) // 2))
+            cut = bw.cut_out_chroma(im, None).resize((T, T), Image.LANCZOS)
             sheet.paste(cut, (prop['yaws'].index(v['yaw']) * T, prop['pitches'].index(v['pitch']) * T))
         sheet.save(web / 'props' / f'{name}.webp', 'WEBP', quality=90, method=6)
         packed[name] = {'sheet': f'props/{name}.webp', 'v': bw.version(web / 'props' / f'{name}.webp'), 'yaws': prop['yaws'], 'pitches': prop['pitches'],
