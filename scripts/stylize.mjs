@@ -213,7 +213,8 @@ async function generateBfl(view, images) {
     width, height, output_format: 'png', safety_tolerance: Number(opt.safety),
     ...(opt.seed ? { seed: Number(opt.seed) } : {}),
   };
-  refs.forEach((img, i) => { body[i ? `input_image_${i + 1}` : 'input_image'] = img.url.slice(img.url.indexOf(',') + 1); });
+  // References are billed by the megapixel; 768 px on the long side is plenty to steer by.
+  refs.forEach((img, i) => { body[i ? `input_image_${i + 1}` : 'input_image'] = shrink(img.url, 768).toString('base64'); });
   const headers = { accept: 'application/json', 'content-type': 'application/json', 'x-key': key };
   for (let attempt = 1; ; attempt++) {
     const res = await fetch(`https://api.bfl.ai/v1/${opt.model.slice(4)}`, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -229,6 +230,7 @@ async function generateBfl(view, images) {
       const r = await (await fetch(job.polling_url, { headers })).json();
       if (r.status === 'Ready') {
         totalCost += (job.cost ?? 0) / 100; // credits are cents
+        if (process.env.BFL_COST_LOG) console.log(`  ${view.file}: ${job.cost} credits (in ${job.input_mp} MP, out ${job.output_mp} MP)`);
         return r.result.sample;
       }
       if (r.status === 'Pending' || r.status === 'Processing' || r.status === 'Queued') continue;
