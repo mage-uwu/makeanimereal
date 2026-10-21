@@ -50,6 +50,9 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .viewport.dragging { cursor: grabbing; }
 .viewport #roomgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport .stage { z-index: 1; }
+/* Landscape-only page: no character, no character controls. */
+.landscape #gl, .landscape #flat, .landscape #frontgl, .landscape .modes, .landscape #mode-note, .landscape #relief-row,
+.landscape #handover-row, .landscape #info, .landscape .keyid, .landscape #state { display: none !important; }
 .viewport #frontgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 2; pointer-events: none; }
 /* The drawings are 2:3, so the character frame is the largest 2:3 box that fits the window. */
 .stage {
@@ -267,6 +270,10 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 import * as THREE from 'three';
 
 const $ = id => document.getElementById(id);
+// Landscape-only: the Bliss field with no character (landscape.html sets this). No key drawings
+// are loaded; the camera orbits and walks through the scene as usual.
+const LANDSCAPE = !!window.LANDSCAPE;
+if (LANDSCAPE) document.documentElement.classList.add('landscape');
 if (matchMedia('(max-width: 700px)').matches) $('info').open = false;
 const viewportEl = $('viewport'), stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
 
@@ -282,6 +289,7 @@ const NOTES = {
 const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, handover: 0.5, room: true, backdrop: 'room', anim: '', playing: true };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
+if (window.LANDSCAPE) Object.assign(state, { backdrop: 'bliss', room: true, anim: '', spin: false, pitch: Math.max(4, state.pitch) });
 const hot = window.claude?.hot;
 if (hot?.data?.state) Object.assign(state, hot.data.state);
 hot?.snapshot?.(() => ({ state }));
@@ -348,6 +356,7 @@ async function load() {
   const camDir = dirOf(state.yaw, state.pitch);
   const first = [...K.keys].sort((a, b) => angleBetween(camDir, a.dir) - angleBetween(camDir, b.dir)).slice(0, 8);
   $('progress').textContent = 'the nearest key drawings';
+  if (LANDSCAPE) return fetch('mesh.json').then(r => r.json());
   const [mesh] = await Promise.all([fetch('mesh.json').then(r => r.json()), ...first.map(fetchKey)]);
   streamKeys();
   return mesh;
@@ -1658,6 +1667,17 @@ function renderWalsh(around) {
 
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
+  if (LANDSCAPE) {
+    setView(camera, IDENTITY);
+    setWorld(0, 0, IDENTITY);
+    upright = uprightFit();
+    renderer.clear();
+    renderRoom();
+    $('yaw').textContent = Math.round(state.yaw);
+    $('pitch').textContent = Math.round(state.pitch);
+    $('hint').textContent = 'WASD to walk · Drag to look around';
+    return;
+  }
   const camDir = dirOf(state.yaw, state.pitch);
   const around = ranked(camDir);
   const lead = around[0].key, off = around[0].angle;
@@ -2137,7 +2157,7 @@ $('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty
 
 // Below the lowest ring there are no drawings; above the highest the top ring's drawings carry on
 // a little, short of straight overhead.
-const clampPitch = p => THREE.MathUtils.clamp(p, K.minPitch, Math.min(K.maxPitch + 5, 85));
+const clampPitch = p => THREE.MathUtils.clamp(p, LANDSCAPE ? 3 : K.minPitch, Math.min(K.maxPitch + 5, 85));
 let drag = null;
 viewportEl.addEventListener('pointerdown', e => {
   drag = { x: e.clientX, y: e.clientY, yaw: state.yaw, pitch: state.pitch };

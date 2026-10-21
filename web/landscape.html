@@ -1,0 +1,2223 @@
+<meta charset="utf-8">
+<title>Bliss Field</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=Azeret+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a 2:3 stage (the same frame the key drawings were made in) beside a control sheet that
+   reads like an animation timing sheet: what the camera sees, which key drawings feed it, how much. */
+:root {
+  --paper: #f2f5f1;      /* page */
+  --sheet: #ffffff;      /* control sheet */
+  --stage: #e3ebe4;      /* backdrop behind the character */
+  --ink: #17201a;        /* text, lineart */
+  --muted: #5a6a60;      /* secondary text */
+  --rule: #d3ddd5;       /* hairlines */
+  --emerald: #13804a;    /* accent: her eyes, the gem */
+  --mint: #cfe8d3;       /* ribbon tint, weight bars */
+  --font-display: "Dela Gothic One", "Hiragino Kaku Gothic StdN", "Arial Black", sans-serif;
+  --font-body: "Zen Kaku Gothic New", "Hiragino Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "Azeret Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #111613; --sheet: #18201b; --stage: #1d2620; --ink: #e5ece6; --muted: #93a499;
+    --rule: #2c3830; --emerald: #4cc985; --mint: #24412f; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #111613; --sheet: #18201b; --stage: #1d2620; --ink: #e5ece6; --muted: #93a499;
+  --rule: #2c3830; --emerald: #4cc985; --mint: #24412f; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--stage); color: var(--ink); font: 15px/1.6 var(--font-body); overflow: hidden; }
+
+header { display: grid; gap: 6px; }
+.eyebrow { font: 500 12px/1.4 var(--font-data); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font: 400 clamp(30px, 5vw, 46px)/1.05 var(--font-display); margin: 0; text-wrap: balance; letter-spacing: .01em; }
+h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-align: .25em; }
+.lede { margin: 0; max-width: 62ch; color: var(--muted); }
+
+.viewport {
+  position: fixed; inset: 0; overflow: hidden; cursor: grab; touch-action: none;
+  display: grid; place-items: center;
+  background: radial-gradient(90% 60% at 50% 90%, color-mix(in srgb, var(--emerald) 10%, var(--stage)), var(--stage) 65%);
+}
+.viewport.dragging { cursor: grabbing; }
+.viewport #roomgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.viewport .stage { z-index: 1; }
+/* Landscape-only page: no character, no character controls. */
+.landscape #gl, .landscape #flat, .landscape #frontgl, .landscape .modes, .landscape #mode-note, .landscape #relief-row,
+.landscape #handover-row, .landscape #info, .landscape .keyid, .landscape #state { display: none !important; }
+.viewport #frontgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 2; pointer-events: none; }
+/* The drawings are 2:3, so the character frame is the largest 2:3 box that fits the window. */
+.stage {
+  position: relative; height: min(100%, 150vw); aspect-ratio: 2 / 3; max-width: 100%;
+  outline: none;
+}
+.stage:focus-visible { box-shadow: 0 0 0 3px var(--emerald); }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.loading {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; text-align: center;
+  font: 500 13px/1.5 var(--font-data); color: var(--muted);
+}
+.loading strong { font: 400 20px/1.2 var(--font-display); color: var(--ink); }
+.hint {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  font: 12px/1.4 var(--font-data); color: var(--muted); white-space: nowrap; pointer-events: none;
+}
+@media (max-width: 640px) { .hint { display: none; } }
+
+.sheet {
+  position: fixed; z-index: 2;
+  top: calc(16px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+  width: min(360px, calc(100vw - 32px)); max-height: calc(100% - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto; background: color-mix(in srgb, var(--sheet) 92%, transparent);
+  backdrop-filter: blur(8px); border: 1px solid var(--rule); border-radius: 8px; display: grid;
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+.sheet details > summary {
+  list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.sheet details > summary::-webkit-details-marker { display: none; }
+.sheet details > summary::after { content: "+"; font: 500 16px/1 var(--font-data); color: var(--muted); }
+.sheet details[open] > summary::after { content: "\2212"; }
+.sheet details > summary:focus-visible { outline: 2px solid var(--emerald); outline-offset: 2px; border-radius: 3px; }
+.sheet details[open] > .menu { display: grid; gap: 10px; margin-top: 10px; }
+#info { border-top: 1px solid var(--rule); }
+#info > summary { padding: 14px 16px; }
+#info > section { padding: 14px 16px; display: grid; gap: 10px; border-top: 1px solid var(--rule); }
+.viewport { user-select: none; -webkit-user-select: none; }
+/* With every section closed the panel shrinks to its + buttons (names stay as tooltips). */
+.sheet:not(:has(details[open])) { width: auto; }
+.sheet:not(:has(details[open])) summary > span {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.sheet:not(:has(details[open])) > section, .sheet:not(:has(details[open])) #info > summary { padding: 7px 10px; }
+.sheet > section { padding: 14px 16px; display: grid; gap: 10px; }
+.sheet > section + section { border-top: 1px solid var(--rule); }
+.label { font: 500 11px/1.3 var(--font-data); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+.modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.modes button {
+  font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0;
+  padding: 9px 4px; cursor: pointer; border-left: 1px solid var(--rule);
+}
+.modes button:first-child { border-left: 0; }
+.modes button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
+.modes button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
+.mode-note { margin: 0; color: var(--muted); font-size: 13px; min-height: 3.2em; }
+.relief { display: grid; gap: 4px; }
+.relief label { display: flex; justify-content: space-between; font-size: 13px; }
+.relief output { font: 500 13px/1.2 var(--font-data); font-variant-numeric: tabular-nums; color: var(--emerald); }
+.relief input { width: 100%; accent-color: var(--emerald); }
+.relief-ends { display: flex; justify-content: space-between; gap: 12px; font: 11px/1.3 var(--font-data); color: var(--muted); }
+.toggles { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.toggles label { display: inline-flex; gap: 7px; align-items: center; font-size: 13px; cursor: pointer; }
+.toggles input { accent-color: var(--emerald); }
+.toggles select { font: 13px/1.2 var(--font-body); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 3px 4px; }
+
+.readout { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.angles { font: 500 22px/1 var(--font-data); font-variant-numeric: tabular-nums; }
+.angles span { color: var(--muted); font-size: 12px; margin-left: 2px; }
+.chip {
+  font: 500 12px/1 var(--font-body); padding: 5px 9px; border-radius: 999px;
+  border: 1px solid var(--emerald); color: var(--emerald); white-space: nowrap;
+}
+.chip.key { background: var(--emerald); color: var(--sheet); }
+.weights { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.weights li { display: grid; grid-template-columns: 82px minmax(0, 1fr) 84px; gap: 10px; align-items: center; font: 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; }
+.bar { height: 8px; background: color-mix(in srgb, var(--rule) 60%, transparent); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--emerald); border-radius: 2px; }
+.weights .pct { text-align: right; color: var(--muted); }
+.weights .role { color: var(--muted); font-family: var(--font-body); font-size: 12.5px; }
+.weights li.lead span:first-child, .weights li.lead .role { color: var(--emerald); font-weight: 500; }
+
+#radar { width: 100%; height: auto; display: block; cursor: pointer; }
+.radar-axis { display: flex; justify-content: space-between; font: 11px/1 var(--font-data); color: var(--muted); }
+.keyid { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); }
+.keyid code { font: 500 12.5px/1.2 var(--font-data); color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.keyid button { font: 500 12px/1.2 var(--font-body); color: var(--emerald); background: transparent; border: 1px solid var(--rule); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+.keyid button:focus-visible { outline: 2px solid var(--emerald); outline-offset: 1px; }
+.anim-head { display: flex; justify-content: space-between; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.seg { display: inline-grid; grid-auto-flow: column; border: 1px solid var(--rule); border-radius: 5px; overflow: hidden; }
+.seg button { font: 500 13px/1.2 var(--font-body); color: var(--ink); background: transparent; border: 0; border-left: 1px solid var(--rule); padding: 7px 10px; cursor: pointer; }
+.seg button:first-child { border-left: 0; }
+.seg button[aria-pressed="true"] { background: var(--emerald); color: var(--sheet); }
+.seg button:focus-visible, .scrub button:focus-visible { outline: 2px solid var(--emerald); outline-offset: -2px; }
+.scrub { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.scrub button { font: 500 13px/1.2 var(--font-body); color: var(--emerald); background: transparent; border: 1px solid var(--emerald); border-radius: 5px; padding: 6px 12px; cursor: pointer; min-width: 64px; }
+.scrub input { width: 100%; accent-color: var(--emerald); }
+.scrub output { font: 500 12px/1.2 var(--font-data); font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; white-space: nowrap; }
+.scrub[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+
+.method { margin: 0; display: grid; gap: 8px; font-size: 13.5px; }
+.method dt { font: 500 12px/1.3 var(--font-data); color: var(--emerald); letter-spacing: .04em; }
+.method dd { margin: 2px 0 0; }
+.facts { font: 12px/1.6 var(--font-data); color: var(--muted); margin: 0; }
+.error { color: var(--ink); background: var(--mint); padding: 10px 12px; border-radius: 5px; font-size: 13px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+    <div class="viewport" id="viewport">
+      <canvas id="roomgl" hidden></canvas>
+      <canvas id="frontgl" hidden></canvas>
+      <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
+        <canvas id="gl"></canvas>
+        <canvas id="flat"></canvas>
+        <div class="loading" id="loading"><strong>Loading</strong><span id="progress">key drawings</span></div>
+      </div>
+    </div>
+    <div class="hint" id="hint">WASD to walk · Drag to orbit · Arrow keys step to the next key</div>
+
+    <div class="sheet">
+      <section>
+        <details id="between">
+        <summary class="label" title="Between keys"><span>Between keys</span></summary>
+        <div class="menu">
+        <div class="modes" role="group" aria-label="How to show angles between key drawings">
+          <button type="button" id="mode-neuro" data-mode="neuro" aria-pressed="false">Neuromation</button>
+          <button type="button" id="mode-walsh" data-mode="walsh" aria-pressed="false">Walsh</button>
+          <button type="button" id="mode-flipbook" data-mode="flipbook" aria-pressed="false">Flipbook</button>
+        </div>
+        <p class="mode-note" id="mode-note"></p>
+        <div class="relief" id="relief-row">
+          <label for="relief">Depth relief <output id="relief-out">100%</output></label>
+          <input type="range" id="relief" min="0" max="1" step="0.05" value="1">
+          <div class="relief-ends"><span>Flat card, no deformation</span><span>Full smoothed shell</span></div>
+        </div>
+        <div class="relief" id="handover-row">
+          <label for="handover">Line hand-over <output id="handover-out">50%</output></label>
+          <input type="range" id="handover" min="0.2" max="1" step="0.05" value="0.5">
+          <div class="relief-ends"><span>Crisp, lines switch near halfway</span><span>Continuous, faint doubling</span></div>
+        </div>
+        <div class="toggles">
+          <label><input type="checkbox" id="spin"> Turn slowly</label>
+          <label><input type="checkbox" id="skeleton"> Show skeleton</label>
+          <label><input type="checkbox" id="room"> 3D backdrop</label>
+          <label>Scene <select id="backdrop"><option value="room">White room</option><option value="bliss">Bliss field</option></select></label>
+        </div>
+        </div>
+        </details>
+      </section>
+
+      <details id="info" open>
+      <summary class="label info-summary" title="Angle and key map"><span>Angle and key map</span></summary>
+      <section>
+        <div class="readout">
+          <div class="angles"><span id="yaw">0</span><span>° yaw</span>&nbsp; <span id="pitch">0</span><span>° pitch</span></div>
+          <div class="chip" id="state">In-between</div>
+        </div>
+        <div class="keyid">
+          <span id="keyid-label">Drawing</span>
+          <code id="keyid" title="Key ID: redraw it with node scripts/redraw.mjs, or open it with #ID after the page address"></code>
+          <button type="button" id="copy-key">Copy ID</button>
+        </div>
+        <ul class="weights" id="weights"></ul>
+      </section>
+
+      <section>
+        <div class="label">Key map · yaw across, camera height up</div>
+        <canvas id="radar" width="720" height="220" aria-label="Map of the key drawings. Click one to jump to it."></canvas>
+        <div class="radar-axis"><span>0° front</span><span>90° left</span><span>180° back</span><span>270° right</span><span>360°</span></div>
+      </section>
+
+      <section>
+        <div class="anim-head">
+          <div class="label">Animation</div>
+          <div class="seg" role="group" aria-label="Animation">
+            <button type="button" data-anim="" aria-pressed="true">Still</button>
+            <button type="button" data-anim="walk" aria-pressed="false">Walk</button>
+            <button type="button" data-anim="blink" aria-pressed="false">Blink</button>
+            <button type="button" data-anim="wink" aria-pressed="false">Wink</button>
+            <button type="button" data-anim="talk" aria-pressed="false">Talk</button>
+            <button type="button" data-anim="vtuber" aria-pressed="false">VTuber</button>
+          </div>
+        </div>
+        <div class="scrub" id="scrub">
+          <button type="button" id="play">Pause</button>
+          <input type="range" id="frame" min="1" max="12" step="1" value="1" aria-label="Animation frame">
+          <output id="frame-out">f00 · 1 of 12</output>
+        </div>
+      </section>
+
+      <section>
+        <div class="label">How each mode fills the gaps</div>
+        <dl class="method">
+          <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
+          <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and the drawing becomes a rigid shell: every point sits on the ray from its vantage at a smoothed depth, so the vantage sees it exactly as drawn and the shell can't shear or tear. Between keys the shell rotates; your angle maps to a latent angle that blends the nearby drawings' vantages. Depth relief sets how curved the shell is, from a flat card (no deformation at all) to the full smoothed shape.</dd></div>
+          <div><dt>Walsh</dt><dd>Walsh (sequency) interpolation, built on Neuromation. Both drawings either side of your angle are turned as rigid shells, with the rig's articulated hand-off, to the same in-between vantage. Each is split into Walsh/Haar sequency bands by box-averaging (the GPU's mip pyramid: additions only, no network). The low bands, her shape, colour and shading, interpolate smoothly with the blend proportion. The high bands, her line art, are never averaged (averaging them is what makes ghost double-lines): they hand over from one drawing to the other around the midpoint (Line hand-over sets how wide: narrow keeps lines crisp, wide flows continuously with faint doubling), with their spectral energy kept constant so lines don't fade as they hand over. Anything only one drawing has, like a ribbon drawn in a different place, is shown only while that drawing leads, so nothing is duplicated. On a key angle the bands sum back to the drawing exactly.</dd></div>
+          <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
+        </dl>
+        <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
+      </section>
+      </details>
+    </div>
+</main>
+
+<script>window.LANDSCAPE = true;</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const $ = id => document.getElementById(id);
+// Landscape-only: the Bliss field with no character (landscape.html sets this). No key drawings
+// are loaded; the camera orbits and walks through the scene as usual.
+const LANDSCAPE = !!window.LANDSCAPE;
+if (LANDSCAPE) document.documentElement.classList.add('landscape');
+if (matchMedia('(max-width: 700px)').matches) $('info').open = false;
+const viewportEl = $('viewport'), stageEl = $('stage'), glCanvas = $('gl'), flat = $('flat'), ctx = flat.getContext('2d');
+
+const MODES = ['neuro', 'walsh', 'flipbook'];
+const NOTES = {
+  neuro: 'Between keys, each drawing turns as one rigid, gently curved shell, seen from the angle it really depicts. Less relief means less deformation.',
+  walsh: 'Neuromation for both neighbouring drawings at once, merged by sequency band: shape and shading blend smoothly while the line art hands over. Narrow hand-over keeps lines crisp; wide flows continuously.',
+  projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
+  flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
+  flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
+};
+
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, handover: 0.5, room: true, backdrop: 'room', anim: '', playing: true };
+try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
+if (!MODES.includes(state.mode)) state.mode = 'neuro';
+if (window.LANDSCAPE) Object.assign(state, { backdrop: 'bliss', room: true, anim: '', spin: false, pitch: Math.max(4, state.pitch) });
+const hot = window.claude?.hot;
+if (hot?.data?.state) Object.assign(state, hot.data.state);
+hot?.snapshot?.(() => ({ state }));
+
+let K, renderer, scene, backdrop, flatScene, neuroScene, camera, orthoCam, mesh, projMat, card, cardMat, floor, stretchQuad, stretchMat, neuroLead, neuroBack, skeleton;
+const NEAR_PAD = 2.2;
+const D2R = Math.PI / 180;
+const dirOf = (yaw, pitch) => new THREE.Vector3(Math.cos(pitch * D2R) * Math.sin(yaw * D2R), Math.sin(pitch * D2R), Math.cos(pitch * D2R) * Math.cos(yaw * D2R));
+const angleBetween = (a, b) => Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1)) / D2R;
+
+// Drawings stream in nearest-first from wherever the camera is, so the viewer starts as soon as
+// the ones around the opening angle have arrived. Only loaded drawings are ever used.
+const image = src => new Promise((res, rej) => {
+  const img = new Image();
+  img.onload = () => res(img);
+  img.onerror = () => rej(new Error(`Could not load ${src}`));
+  img.src = src;
+});
+// Drawing files carry a content version (from the build), so a redrawn one is never served stale.
+const versioned = (src, v) => v ? `${src}?v=${v}` : src;
+// Warp atlases come 16 to a sheet; each key's is cut back out onto its own canvas.
+const sheets = new Map();
+async function warpAtlas(w) {
+  if (typeof w === 'string') return image(w);
+  if (!sheets.has(w.sheet)) sheets.set(w.sheet, image(versioned(w.sheet, w.v)));
+  const sheet = await sheets.get(w.sheet);
+  const h = sheet.width / K.atlas[0] * K.atlas[1] * K.frame[1] / K.frame[0];
+  const c = document.createElement('canvas');
+  c.width = sheet.width; c.height = Math.round(h);
+  c.getContext('2d').drawImage(sheet, 0, w.row * c.height, c.width, c.height, 0, 0, c.width, c.height);
+  return c;
+}
+async function fetchKey(k) {
+  if (!k.loading) k.loading = Promise.all([image(versioned(k.file, k.v)), warpAtlas(k.warps)]).then(([img, warpImg]) => {
+    Object.assign(k, { img, warpImg, ready: true });
+    K.loaded++;
+    dirty = true;
+  });
+  return k.loading;
+}
+function streamKeys() {
+  const next = () => {
+    const camDir = dirOf(state.yaw, state.pitch);
+    const k = K.keys.filter(x => !x.loading).sort((a, b) => angleBetween(camDir, a.dir) - angleBetween(camDir, b.dir))[0];
+    if (k) fetchKey(k).then(next, next);
+  };
+  for (let i = 0; i < 6; i++) next();
+}
+
+async function load() {
+  K = await (await fetch('keys.json', { cache: 'no-cache' })).json();
+  K.loaded = 0;
+  for (const k of K.keys) k.dir = dirOf(k.yaw, k.pitch);
+  for (const k of K.keys) {
+    k.near = k.neighbours.map(i => K.keys[i]);
+    // The hand-off to a neighbour comes halfway to it; the fit eases in over that distance.
+    // keys.json's per-neighbour hand-off affines; k.handoff becomes the hand-off angle.
+    k.affines = Array.isArray(k.handoff) ? k.handoff : [];
+    k.handoff = 0.5 * Math.min(...k.near.map(n => angleBetween(k.dir, n.dir)));
+  }
+  const pitches = K.keys.map(k => k.pitch);
+  K.minPitch = Math.min(...pitches);
+  K.maxPitch = Math.max(...pitches);
+  const camDir = dirOf(state.yaw, state.pitch);
+  const first = [...K.keys].sort((a, b) => angleBetween(camDir, a.dir) - angleBetween(camDir, b.dir)).slice(0, 8);
+  $('progress').textContent = 'the nearest key drawings';
+  if (LANDSCAPE) return fetch('mesh.json').then(r => r.json());
+  const [mesh] = await Promise.all([fetch('mesh.json').then(r => r.json()), ...first.map(fetchKey)]);
+  streamKeys();
+  return mesh;
+}
+
+// Her shape in the exact pose the key drawings were made from (exported by render.mjs). It is
+// only ever used to bend drawings; its own surface is never shown.
+function shape(data) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
+  g.setIndex(data.index);
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  return g;
+}
+
+// Each key drawing's camera, rebuilt exactly as scripts/render-page.html placed it.
+function placeCamera(cam, yaw, pitch, radius) {
+  const t = K.target, d = dirOf(yaw, pitch);
+  cam.position.set(t[0] + radius * d.x, t[1] + radius * d.y, t[2] + radius * d.z);
+  cam.lookAt(t[0], t[1], t[2]);
+  cam.updateMatrixWorld(true);
+}
+
+const DEPTH_W = 400, DEPTH_H = 600;
+let depthScene;
+const keyCache = new Map(); // key -> GPU resources, least recently used first
+function keyData(k) {
+  let d = keyCache.get(k);
+  if (d) { keyCache.delete(k); keyCache.set(k, d); return d; }
+  const cam = new THREE.PerspectiveCamera(K.fov, K.aspect, K.radius - NEAR_PAD, K.radius + NEAR_PAD);
+  placeCamera(cam, k.yaw, k.pitch, K.radius);
+  const depth = new THREE.WebGLRenderTarget(DEPTH_W, DEPTH_H, { depthTexture: new THREE.DepthTexture(DEPTH_W, DEPTH_H) });
+  renderer.setRenderTarget(depth);
+  renderer.render(depthScene, cam);
+  renderer.setRenderTarget(null);
+  const tex = new THREE.Texture(k.img);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  // Warp fields are data, not colour: no colour conversion, no mipmaps.
+  const warps = new THREE.Texture(k.warpImg);
+  warps.generateMipmaps = false;
+  warps.minFilter = THREE.LinearFilter;
+  warps.needsUpdate = true;
+  d = {
+    tex, warps, depth, cam,
+    vp: new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
+    dir: cam.position.clone().sub(new THREE.Vector3(...K.target)).normalize(),
+  };
+  keyCache.set(k, d);
+  // A drag only ever touches a handful of drawings; older ones are released to spare GPU memory.
+  while (keyCache.size > 20) {
+    const [oldKey, old] = keyCache.entries().next().value;
+    old.tex.dispose(); old.warps.dispose(); old.depth.depthTexture.dispose(); old.depth.dispose();
+    keyCache.delete(oldKey);
+  }
+  return d;
+}
+
+// The key drawings nearest the camera on the view sphere, nearest first. The lead changes where
+// another key becomes nearer (halfway between them), with a little hysteresis so it does not
+// flicker while the camera rests near that line.
+let lead = null;
+function ranked(camDir) {
+  const list = K.keys.filter(k => k.ready).map(k => ({ key: k, angle: angleBetween(camDir, k.dir) })).sort((a, b) => a.angle - b.angle).slice(0, 4);
+  const held = list.findIndex(a => a.key === lead);
+  if (held > 0 && list[held].angle - list[0].angle < 0.6) list.unshift(...list.splice(held, 1));
+  lead = list[0].key;
+  return list;
+}
+
+// Flipstretch: express the camera's offset from the lead key as a mix of the directions to two of
+// its neighbours (on the plane touching the view sphere at the key), so the drawing can be
+// stretched that far along its correspondences to each.
+function stretchTowards(k, camDir) {
+  const east = new THREE.Vector3(Math.cos(k.yaw * D2R), 0, -Math.sin(k.yaw * D2R));
+  const north = new THREE.Vector3().crossVectors(k.dir, east).normalize();
+  const flat2 = v => { const o = v.clone().sub(k.dir); return [o.dot(east), o.dot(north)]; };
+  const o = flat2(camDir);
+  const len = Math.hypot(...o);
+  if (len < 1e-6) return [];
+  const vs = k.near.map((n, i) => ({ i, v: flat2(n.dir) }));
+  const ang = v => Math.atan2(v[1], v[0]);
+  const oa = ang(o);
+  // The two neighbours whose directions bracket the camera's, one on each side.
+  let left = null, right = null;
+  for (const n of vs) {
+    let d = ang(n.v) - oa;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    if (d >= 0 && (!left || d < left.d)) left = { ...n, d };
+    if (d < 0 && (!right || d > right.d)) right = { ...n, d };
+  }
+  if (left && right && left.d - right.d < Math.PI * 0.95) {
+    const [a1, a2] = [left.v, right.v], det = a1[0] * a2[1] - a1[1] * a2[0];
+    if (Math.abs(det) > 1e-9) {
+      const a = (o[0] * a2[1] - o[1] * a2[0]) / det, b = (a1[0] * o[1] - a1[1] * o[0]) / det;
+      if (a >= 0 && b >= 0) return [{ i: left.i, t: Math.min(a, 1) }, { i: right.i, t: Math.min(b, 1) }];
+    }
+  }
+  // Otherwise stretch toward the single neighbour most in the camera's direction.
+  const best = vs.reduce((m, n) => (n.v[0] * o[0] + n.v[1] * o[1]) / Math.hypot(...n.v) > (m.v[0] * o[0] + m.v[1] * o[1]) / Math.hypot(...m.v) ? n : m);
+  const t = (best.v[0] * o[0] + best.v[1] * o[1]) / (best.v[0] ** 2 + best.v[1] ** 2);
+  return [{ i: best.i, t: THREE.MathUtils.clamp(t, 0, 1) }];
+}
+
+const ATLAS_GLSL = /* glsl */`
+  uniform vec2 uAtlas;       // tile columns, rows
+  uniform vec2 uFieldScale;  // stored field value - 0.5 -> fraction of the frame
+  // A warp field from tile t of an atlas, at render-frame point img (y down), as a frame fraction.
+  vec2 warpAt(sampler2D atlas, float t, vec2 img) {
+    vec2 e = 0.5 / (vec2(textureSize(atlas, 0)) / uAtlas);
+    vec2 cell = vec2(mod(t, uAtlas.x), floor(t / uAtlas.x));
+    vec2 p = (cell + clamp(img, e, 1.0 - e)) / uAtlas;
+    return (texture2D(atlas, vec2(p.x, 1.0 - p.y)).rg - 0.5) * uFieldScale;
+  }
+`;
+
+const SAMPLE = /* glsl */`
+  ${ATLAS_GLSL}
+  uniform sampler2D uTex0, uTex1, uTex2, uTex3;
+  uniform sampler2D uWarp0, uWarp1, uWarp2, uWarp3;
+  uniform mat4 uVP[4];
+  uniform vec4 uAlign[4];   // drawing scale, offset x, offset y in the render frame
+  uniform float uFit[4];    // share of the fit-to-mesh warp: 0 on the key angle, 1 at the hand-off
+  uniform float uUse[4];
+  // Where a world point lands in key drawing i: through key camera i into the render frame, nudged
+  // by the share uFit of the drawing's fit-to-mesh warp (atlas tile 0), then into the drawing.
+  vec2 keyUV(sampler2D warps, int i, vec3 world) {
+    vec4 c = uVP[i] * vec4(world, 1.0);
+    vec2 uv = c.xy / c.w * 0.5 + 0.5;
+    vec2 img = vec2(uv.x, 1.0 - uv.y);
+    img += uFit[i] * warpAt(warps, 0.0, img);
+    vec2 d = (img - uAlign[i].yz) / uAlign[i].x;
+    return vec2(d.x, 1.0 - d.y);
+  }
+  vec4 keySample(sampler2D tex, sampler2D warps, int i, vec3 world) {
+    vec2 uv = keyUV(warps, i, world);
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
+    return texture2D(tex, uv);
+  }
+`;
+
+const atlasUniforms = () => ({
+  uAtlas: { value: new THREE.Vector2(...K.atlas) },
+  uFieldScale: { value: new THREE.Vector2(K.fieldRange / K.frame[0], K.fieldRange / K.frame[1]) },
+});
+const keyUniforms = () => ({
+  ...atlasUniforms(),
+  uTex0: { value: null }, uTex1: { value: null }, uTex2: { value: null }, uTex3: { value: null },
+  uWarp0: { value: null }, uWarp1: { value: null }, uWarp2: { value: null }, uWarp3: { value: null },
+  uVP: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) },
+  uAlign: { value: [0, 1, 2, 3].map(() => new THREE.Vector4(1, 0, 0, 0)) },
+  uFit: { value: [0, 0, 0, 0] },
+  uUse: { value: [0, 0, 0, 0] },
+});
+
+function makeProjectionMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      ...keyUniforms(),
+      uDep0: { value: null }, uDep1: { value: null }, uDep2: { value: null }, uDep3: { value: null },
+      uDir: { value: [0, 1, 2, 3].map(() => new THREE.Vector3()) },
+      uNear: { value: K.radius - NEAR_PAD }, uFar: { value: K.radius + NEAR_PAD },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vWorld; varying vec3 vNormal;
+      void main() {
+        vWorld = position; vNormal = normal;
+        gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      ${SAMPLE}
+      uniform sampler2D uDep0, uDep1, uDep2, uDep3;
+      uniform vec3 uDir[4];
+      uniform float uNear, uFar;
+      varying vec3 vWorld; varying vec3 vNormal;
+      float viewDepth(float d) { float z = d * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - z * (uFar - uNear)); }
+      // Drawing i at this surface point. a = 1: painted. a = 0: its camera did not see the point.
+      // a = -1: seen, but outside what was drawn there.
+      vec4 fromKey(sampler2D tex, sampler2D warps, sampler2D dep, int i, vec3 n) {
+        if (uUse[i] < 0.5) return vec4(0.0);
+        vec4 c = uVP[i] * vec4(vWorld, 1.0);
+        vec3 ndc = c.xyz / c.w;
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        // Hidden: something nearer sits in that camera's depth map. Edge-on: the drawing would smear.
+        float gap = viewDepth(ndc.z * 0.5 + 0.5) - viewDepth(texture2D(dep, uv).r);
+        if (gap > 0.02 || dot(n, uDir[i]) < 0.12) return vec4(0.0);
+        vec4 s = keySample(tex, warps, i, vWorld);
+        return s.a > 0.5 ? vec4(s.rgb, 1.0) : vec4(0.0, 0.0, 0.0, -1.0);
+      }
+      void main() {
+        vec3 n = normalize(vNormal);
+        // The lead drawing owns every point its camera saw. Only points it could not see go to
+        // the next drawing that did, taken whole. Nothing is averaged.
+        vec4 s = fromKey(uTex0, uWarp0, uDep0, 0, n);
+        if (s.a == 0.0) s = fromKey(uTex1, uWarp1, uDep1, 1, n);
+        if (s.a == 0.0) s = fromKey(uTex2, uWarp2, uDep2, 2, n);
+        if (s.a == 0.0) s = fromKey(uTex3, uWarp3, uDep3, 3, n);
+        // Where nothing was drawn the mesh stays invisible: the drawing sets the silhouette.
+        if (s.a < 0.5) discard;
+        gl_FragColor = vec4(s.rgb, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+function makeCardMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: keyUniforms(),
+    vertexShader: /* glsl */`
+      varying vec3 vWorld;
+      void main() {
+        vec4 w = modelMatrix * vec4(position, 1.0);
+        vWorld = w.xyz;
+        gl_Position = projectionMatrix * viewMatrix * w;
+      }`,
+    fragmentShader: /* glsl */`
+      ${SAMPLE}
+      varying vec3 vWorld;
+      void main() {
+        // Only the lead drawing: a second one would put a second set of ribbons beside the first.
+        vec4 s0 = keySample(uTex0, uWarp0, 0, vWorld);
+        if (s0.a < 0.01) discard;
+        gl_FragColor = s0;
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+// Flipstretch: one drawing, stretched in 2D along its correspondences to up to two neighbours.
+function makeStretchMaterial() {
+  return new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: {
+      ...atlasUniforms(),
+      uTex: { value: null }, uWarps: { value: null },
+      uAlign: { value: new THREE.Vector4(1, 0, 0, 0) },
+      uTileA: { value: 1 }, uTileB: { value: 1 }, uA: { value: 0 }, uB: { value: 0 },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      ${ATLAS_GLSL}
+      uniform sampler2D uTex, uWarps;
+      uniform vec4 uAlign;
+      uniform float uTileA, uTileB, uA, uB;
+      varying vec2 vUv;
+      void main() {
+        vec2 img = vec2(vUv.x, 1.0 - vUv.y);
+        // The drawing's feature at x lands at x + F(x) in the neighbour; stretching a share t of
+        // the way means showing, at y, what the drawing had at about y - t F(y).
+        vec2 src = img - uA * warpAt(uWarps, uTileA, img) - uB * warpAt(uWarps, uTileB, img);
+        vec2 d = (src - uAlign.yz) / uAlign.x;
+        if (any(lessThan(d, vec2(0.0))) || any(greaterThan(d, vec2(1.0)))) discard;
+        vec4 s = texture2D(uTex, vec2(d.x, 1.0 - d.y));
+        if (s.a < 0.01) discard;
+        gl_FragColor = s;
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+// Neuromation: one drawing on its lattice. Each vertex has a fixed position in the latent object
+// (atlas tile 7), placed so that the drawing's learned vantage sees it exactly where it was drawn.
+// Every lattice is drawn through the same latent camera, so between keys the whole object simply
+// rotates: rigid, with nothing morphing.
+function makeNeuroMaterial(shared, footprint) {
+  return new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    defines: footprint ? { FOOTPRINT: 1 } : {},
+    uniforms: shared || {
+      ...atlasUniforms(),
+      uOwn: { value: null }, uTex: { value: null },
+      uAlign: { value: new THREE.Vector4(1, 0, 0, 0) },
+      uLatentVP: { value: new THREE.Matrix4() },
+      uTarget: { value: new THREE.Vector3(...K.target) },
+      uRange: { value: K.lattice.range },
+      uResidual: { value: K.lattice.residual }, uRho: { value: 1 },
+      uRelief: { value: 0.5 }, uOwnPos: { value: new THREE.Vector3() }, uOwnFwd: { value: new THREE.Vector3() },
+      uOwnDepth: { value: K.radius },
+      uHand: { value: null }, uHandW: { value: [0, 0] },
+      uNVP: { value: [0, 1].map(() => new THREE.Matrix4()) },
+      uNPos: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNRight: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNUp: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNFwd: { value: [0, 1].map(() => new THREE.Vector3()) },
+      uNScale: { value: [1, 1] }, uNTile: { value: [1, 1] }, uNT: { value: [0, 0] },
+      uTan: { value: Math.tan(K.fov * D2R / 2) }, uAspect: { value: K.aspect },
+      uLattice: { value: new THREE.Vector2(...K.lattice.size) },
+      uLatTile: { value: K.lattice.tile },
+      uFrame: { value: new THREE.Vector2(...K.frame) },
+      uK0: { value: 1 }, uMaxStretch: { value: 5 },
+    },
+    vertexShader: /* glsl */`
+      uniform vec2 uAtlas;
+      uniform sampler2D uOwn;
+      uniform mat4 uLatentVP;
+      uniform vec3 uTarget;
+      uniform float uRange, uLatTile, uResidual, uRho, uTan, uAspect, uRelief, uOwnDepth;
+      uniform vec3 uOwnPos, uOwnFwd;
+      uniform vec2 uFrame;
+      uniform sampler2D uHand;  // hand-off fields of up to two neighbours, stacked; output px
+      uniform float uHandW[2];  // how far along each to move (up to half, at the hand-off)
+      vec2 handAt(int k, vec2 x) {
+        ivec2 g = textureSize(uHand, 0);
+        int rows = g.y / 2;
+        vec2 c = x * vec2(g.x - 1, rows - 1);
+        ivec2 i0 = ivec2(floor(c));
+        ivec2 i1 = min(i0 + 1, ivec2(g.x - 1, rows - 1));
+        vec2 f = c - vec2(i0);
+        int o = k * rows;
+        vec2 a = mix(texelFetch(uHand, ivec2(i0.x, o + i0.y), 0).rg, texelFetch(uHand, ivec2(i1.x, o + i0.y), 0).rg, f.x);
+        vec2 b = mix(texelFetch(uHand, ivec2(i0.x, o + i1.y), 0).rg, texelFetch(uHand, ivec2(i1.x, o + i1.y), 0).rg, f.x);
+        return mix(a, b, f.y);
+      }
+      uniform vec2 uFieldScale;
+      uniform mat4 uNVP[2];
+      uniform vec3 uNPos[2], uNRight[2], uNUp[2], uNFwd[2];
+      uniform float uNScale[2], uNTile[2], uNT[2];
+      // A correspondence field (atlas tile t) at drawing frame point x, as a frame fraction.
+      vec2 warpAt(float t, vec2 x) {
+        vec2 e = 0.5 / (vec2(textureSize(uOwn, 0)) / uAtlas);
+        vec2 cell = vec2(mod(t, uAtlas.x), floor(t / uAtlas.x));
+        vec2 q = (cell + clamp(x, e, 1.0 - e)) / uAtlas;
+        return (texture(uOwn, vec2(q.x, 1.0 - q.y)).rg - 0.5) * uFieldScale;
+      }
+      // Art off her surface swings toward where neighbour k drew it: the gap, in k's own drawing,
+      // between where the correspondence puts this point and where the latent object shows it,
+      // lifted back into 3D in k's image plane.
+      vec3 swing(int k, vec3 p, vec2 x) {
+        vec4 c = uNVP[k] * vec4(p, 1.0);
+        vec2 uv = c.xy / c.w * 0.5 + 0.5;
+        vec2 r = x + warpAt(uNTile[k], x) - vec2(uv.x, 1.0 - uv.y);
+        r *= min(1.0, 0.08 / max(length(r), 1e-6));
+        float dist = dot(p - uNPos[k], uNFwd[k]);
+        return (uNRight[k] * (r.x * uAspect) - uNUp[k] * r.y) * 2.0 * dist * uTan / uNScale[k];
+      }
+      uniform vec2 uLattice;
+      attribute vec2 aCell;
+      varying vec2 vTex;
+      varying float vValid;
+      // A pixel of the atlas image (row 0 at the top; the texture is stored flipped).
+      vec3 atlasPx(ivec2 p) {
+        ivec2 size = textureSize(uOwn, 0);
+        return texelFetch(uOwn, ivec2(p.x, size.y - 1 - p.y), 0).rgb;
+      }
+      void main() {
+        ivec2 cell = ivec2(aCell);
+        ivec2 tile = textureSize(uOwn, 0) / ivec2(uAtlas);
+        int t = int(uLatTile);
+        ivec2 o = ivec2((t % int(uAtlas.x)) * tile.x, (t / int(uAtlas.x)) * tile.y);
+        vec3 hi = floor(atlasPx(o + cell) * 255.0 + 0.5);
+        vec3 lo = floor(atlasPx(o + ivec2(0, int(uLattice.y)) + cell) * 255.0 + 0.5);
+        vValid = atlasPx(o + ivec2(int(uLattice.x), 0) + cell).r;
+        vec3 p = uTarget + (hi * 256.0 + lo) / 65535.0 * 2.0 * uRange - uRange;
+        // Depth relief: slide the point along its own drawing's ray toward a flat card through the
+        // target. Same ray, so the drawing still looks exactly as drawn from its own vantage.
+        vec3 ray = p - uOwnPos;
+        vec3 card = uOwnPos + ray * (uOwnDepth / dot(ray, uOwnFwd));
+        p = mix(card, p, uRelief);
+        vTex = aCell / (uLattice - 1.0);
+        gl_Position = uLatentVP * vec4(p, 1.0);
+        // Hand-off: an articulated move (head, torso, legs each as a block) toward where the
+        // neighbouring drawings put things, so drawings meet halfway instead of jumping.
+        vec2 d = (uHandW[0] * handAt(0, vTex) + uHandW[1] * handAt(1, vTex)) / uFrame;
+        gl_Position.xy += vec2(2.0 * d.x, -2.0 * d.y) * gl_Position.w;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTex;
+      uniform vec4 uAlign;
+      uniform vec2 uFrame;
+      uniform float uK0, uMaxStretch;
+      varying vec2 vTex;
+      varying float vValid;
+      void main() {
+        if (vValid < 0.999) discard;
+        #ifndef FOOTPRINT
+        // How the drawing maps onto the screen here, in drawing pixels per screen pixel.
+        vec2 jx = dFdx(vTex) * uFrame, jy = dFdy(vTex) * uFrame;
+        // The lattice holds real latent depth, so overlapping folds are settled by the depth test
+        // like any mesh. Only a part stretched far beyond its drawn size is a tear; the drawing
+        // behind fills it.
+        float e = 0.5 * (dot(jx, jx) + dot(jy, jy)), f = 0.5 * (dot(jx, jx) - dot(jy, jy)), g = dot(jx, jy);
+        float squeeze = sqrt(max(e - sqrt(f * f + g * g), 0.0));
+        if (squeeze * uMaxStretch < uK0) discard;
+        #endif
+        vec2 d = (vTex - uAlign.yz) / uAlign.x;
+        if (any(lessThan(d, vec2(0.0))) || any(greaterThan(d, vec2(1.0)))) discard;
+        vec4 c = texture2D(uTex, vec2(d.x, 1.0 - d.y));
+        if (c.a < 0.5) discard;
+        gl_FragColor = vec4(c.rgb, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+function makeLattice() {
+  const [gx, gy] = K.lattice.size, cells = [], index = [];
+  for (let j = 0; j < gy; j++) for (let i = 0; i < gx; i++) cells.push(i, j);
+  for (let j = 0; j < gy - 1; j++) for (let i = 0; i < gx - 1; i++) {
+    const a = j * gx + i, b = a + 1, c = a + gx, d = c + 1;
+    index.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('aCell', new THREE.Float32BufferAttribute(cells, 2));
+  g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(cells.length / 2 * 3), 3));
+  g.setIndex(index);
+  return g;
+}
+
+function makeFloor(minY) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d'), grad = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(0,0,0,0.32)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,0.12)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(K.target[0], minY + 0.002, K.target[2]);
+  return m;
+}
+
+// A plain white room around her, drawn on its own full-window canvas from the same camera as the
+// character, so it turns with her as you orbit. The floor sits at her feet.
+let roomRenderer, roomScene, roomCam, roomWorld;
+// Where she stands in the room and which way she faces (degrees, 0 = the room's +Z).
+const walker = { x: 0, z: 0, heading: 0, keys: new Set() };
+function floorTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ece9e3'; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = 'rgba(120, 112, 100, 0.22)'; g.lineWidth = 2;
+  g.strokeRect(1, 1, 254, 254);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  return t;
+}
+function makeRoom(floorY) {
+  roomRenderer = new THREE.WebGLRenderer({ canvas: $('roomgl'), antialias: true });
+  roomRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  roomRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  roomScene = new THREE.Scene();
+  roomScene.background = new THREE.Color('#f3f1ed');
+  const W = 14, H = 7.5, t = [0, 0, 0];
+  // The room lives in a group that is moved around her: she stays at the centre of the camera's
+  // orbit, and walking moves the room the other way.
+  roomWorld = new THREE.Group();
+  roomScene.add(roomWorld);
+  const white = new THREE.Group();
+  roomWorld.add(white);
+  const wall = new THREE.MeshStandardMaterial({ color: '#f6f4f0', roughness: 0.95 });
+  const base = new THREE.MeshStandardMaterial({ color: '#dedad3', roughness: 0.8 });
+  const tex = floorTexture();
+  tex.repeat.set(W / 1.2, W / 1.2);
+  // Double-sided: low camera angles sit below floor level and look up through it, like a glass floor.
+  const floorMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, side: THREE.DoubleSide });
+  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); white.add(m); return m; };
+  add(new THREE.PlaneGeometry(W, W), floorMat, [t[0], floorY, t[2]], [-Math.PI / 2, 0, 0]);
+  add(new THREE.PlaneGeometry(W, W), wall, [t[0], floorY + H, t[2]], [Math.PI / 2, 0, 0]);
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2, dx = Math.sin(a) * W / 2, dz = Math.cos(a) * W / 2;
+    // Walls reach a little below the floor so a camera looking up from below still sees them.
+    add(new THREE.PlaneGeometry(W, H + 3), wall, [t[0] - dx, floorY + (H - 3) / 2, t[2] - dz], [0, a, 0]);
+    add(new THREE.BoxGeometry(W, 0.14, 0.03), base, [t[0] - dx * 0.998, floorY + 0.07, t[2] - dz * 0.998], [0, a, 0]);
+  }
+  roomScene.add(new THREE.HemisphereLight('#ffffff', '#cfc8bd', 2.2));
+  const sun = new THREE.DirectionalLight('#fff6ea', 1.1);
+  sun.position.set(4, floorY + 6, 3);
+  sun.target.position.set(0, floorY, 0);
+  roomWorld.add(sun, sun.target);
+  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 700);
+  scenes.room = { group: white, background: new THREE.Color('#f3f1ed'), fog: null, half: W / 2 - 0.6 };
+  scenes.bliss = makeBliss(floorY);
+  roomScene.add(scenes.bliss.far);
+  setBackdrop(state.backdrop);
+}
+
+// Bliss field: an open meadow. The landscape painting wraps one stretch of the horizon on a far
+// cylinder (its edge columns, softened, carry the sky and hills on round the back), and the grass
+// texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
+// with her heading; the ground moves under her as she walks.
+const scenes = {};
+const props = [], rocks3d = [], fgGrass = [];
+let frontRenderer = null;
+// Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
+function aimProps() {
+  const cam = roomCam.position, w = new THREE.Vector3();
+  for (const m of props) {
+    const { kind: kd, spin } = m.userData;
+    m.getWorldPosition(w);
+    const dx = cam.x - w.x, dy = cam.y - w.y, dz = cam.z - w.z;
+    const yaw = Math.atan2(dx, dz) / D2R - roomWorld.rotation.y / D2R - spin;
+    const pitch = Math.atan2(dy, Math.hypot(dx, dz)) / D2R;
+    const ny = kd.yaws.length, step = 360 / ny;
+    const iy = ((Math.round(yaw / step) % ny) + ny) % ny;
+    const ip = kd.pitches.reduce((b, p, i) => Math.abs(p - pitch) < Math.abs(kd.pitches[b] - pitch) ? i : b, 0);
+    m.material.map.offset.set(iy / ny, 1 - (ip + 1) / kd.pitches.length);
+    m.lookAt(cam);
+  }
+}
+const SKY_TOP = new THREE.Color('#1557d6'), SKY_HAZE = new THREE.Color('#b9d7f2');
+function makeBliss(floorY) {
+  const R = 45;
+  const sky = { value: null }, has = { value: 0 }, loader = new THREE.TextureLoader();
+  loader.load('scene/bliss-sky.webp', t => { t.colorSpace = THREE.SRGBColorSpace; sky.value = t; has.value = 1; dirty = true; });
+  // The painting by direction: across half the horizon and mirrored back across the other half (no
+  // seam), its distant hill line (66% down the painting) on the true horizon, at the same angular
+  // scale both ways. Above it, open sky; below, the painted meadow carries on.
+  const far = new THREE.Mesh(new THREE.SphereGeometry(R, 96, 48), new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uSky: sky, uHas: has, uTop: { value: SKY_TOP }, uHaze: { value: SKY_HAZE }, uFloor: { value: floorY } },
+    vertexShader: /* glsl */`varying vec3 vDir; void main() { vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uSky; uniform float uHas; uniform vec3 uTop, uHaze;
+      varying vec3 vDir;
+      const float PI = 3.14159265, HORIZON = 0.66, SPAN = 101.0;  // painting rows: horizon, degrees top to bottom
+      void main() {
+        vec3 d = normalize(vDir);
+        float az = atan(d.x, d.z) / (2.0 * PI) + 0.5;           // 0..1 round the horizon
+        float t = mod(az * 2.0 + 0.8, 2.0), x = 1.0 - abs(1.0 - t); // painting, then mirrored
+        float elev = degrees(asin(clamp(d.y, -1.0, 1.0)));
+        float row = HORIZON - elev / SPAN;                        // 0 = painting's top row
+        vec3 c = mix(uHaze, uTop, smoothstep(0.0, 40.0, elev));
+        if (uHas > 0.5) {
+          vec3 p = texture2D(uSky, vec2(clamp(x, 0.002, 0.998), 1.0 - clamp(row, 0.002, 0.998))).rgb;
+          // Past the painting's top edge, fade into open sky.
+          c = row >= 0.0 ? p : mix(p, uTop, smoothstep(0.0, 0.12, -row));
+        }
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  }));
+  far.renderOrder = -2;
+  const farGroup = new THREE.Group();
+  farGroup.add(far);
+  const ground = new THREE.Group();
+  // Terrain: flat where she walks, rolling gently beyond, rising into low hills toward the edge so
+  // the ground ends on a hilltop line that the haze melts into the painted horizon. Slopes are
+  // shaded once, from the painting's sun (upper left).
+  const SIZE = 320, SEG = 200, FLAT = 20;
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const height = (x, z) => {
+    const r = Math.hypot(x, z), out = THREE.MathUtils.smoothstep(r, FLAT, 150);
+    const roll = 1.2 * Math.sin(x * 0.045 + 1.3) * Math.cos(z * 0.038 - 0.7) + 0.7 * Math.sin((x + z) * 0.071 + 2.1) + 0.4 * Math.cos(x * 0.13 - z * 0.09);
+    const ang = Math.atan2(z, x);
+    return out * (1.2 * roll + 1.4) + Math.pow(out, 2.5) * (8 + 3 * Math.sin(ang * 3 + 0.4) + 1.5 * Math.sin(ang * 7 - 1.1));
+  };
+  for (let i = 0; i < pos.count; i++) pos.setY(i, height(pos.getX(i), pos.getZ(i)));
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal, sunDir = new THREE.Vector3(-0.5, 0.75, -0.45).normalize(), col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const sh = 0.78 + 0.3 * Math.max(0, nrm.getX(i) * sunDir.x + nrm.getY(i) * sunDir.y + nrm.getZ(i) * sunDir.z);
+    col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = Math.min(1.08, sh);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  // Near her, the meadow tile; from FLAT metres out it hands over to the painting's own hill: its
+  // brushwork (a tile cut from the big Bliss hill) at a broad scale, coloured with the hill's palette
+  // by the terrain's slope light, sunlit crests brighter. One-sided: from a camera below the field
+  // (steep low angles) you see open sky, not the turf's underside.
+  const tex = (url, repeat) => {
+    const t = loader.load(url, () => { dirty = true; });
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8;
+    return t;
+  };
+  const grassMat = new THREE.ShaderMaterial({
+    side: THREE.FrontSide, fog: true, vertexColors: true,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uGrass: { value: null }, uHill: { value: null }, uSkin: { value: null }, uFlat: { value: FLAT },
+      uShade: { value: new THREE.Color('#2f7a24') }, uLit: { value: new THREE.Color('#9fd84a') }, uCrest: { value: new THREE.Color('#c8ec7a') },
+    }]),
+    vertexShader: /* glsl */`
+      #include <fog_pars_vertex>
+      varying vec3 vPos, vColor;
+      void main() {
+        vPos = position; vColor = color;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <fog_pars_fragment>
+      uniform sampler2D uGrass, uHill, uSkin;
+      uniform float uFlat;
+      uniform vec3 uShade, uLit, uCrest;
+      varying vec3 vPos, vColor;
+      void main() {
+        // Near her: the same painted brushwork as the hills, at a finer scale, in broad patches of
+        // sun and shade; a little of the meadow tile shows through for flower specks.
+        vec3 nStrokes = texture2D(uHill, vec2(vPos.x / 9.0 + 0.37 * vPos.z / 9.0, vPos.z / 3.2)).rgb;
+        float nl = dot(nStrokes, vec3(0.3, 0.59, 0.11)) / 0.32;
+        float patchy = 0.5 + 0.5 * sin(vPos.x * 0.21 + 1.3 * sin(vPos.z * 0.17)) * sin(vPos.z * 0.15 + 0.6);
+        vec3 nBase = mix(uShade, uLit * 0.92, 0.2 + 0.65 * patchy);
+        vec3 near = nBase * mix(0.5, 1.5, clamp(nl, 0.0, 1.0));
+        near = mix(near, nStrokes * (dot(nBase, vec3(0.33)) / 0.3), 0.3);
+        vec3 tile = texture2D(uGrass, vPos.xz / 4.5).rgb;
+        near = mix(near, tile, 0.18 * smoothstep(0.75, 0.95, dot(tile, vec3(0.33))) + 0.08);
+        // Painted hills: the hill tile's strokes, stretched along the slopes like the painting's.
+        vec3 strokes = texture2D(uHill, vec2(vPos.x / 38.0, vPos.z / 13.0)).rgb;
+        float luma = dot(strokes, vec3(0.3, 0.59, 0.11)) / 0.32;
+        float light = clamp((vColor.r - 0.8) / 0.26, 0.0, 1.0);
+        vec3 base = mix(uShade, uLit, light);
+        base = mix(base, uCrest, smoothstep(6.0, 18.0, vPos.y) * light * 0.6);
+        // Broad diagonal swaths of light and shade across the slopes, as in the painting.
+        float swath = 0.5 + 0.5 * sin(dot(vPos.xz, vec2(0.042, 0.027)) + 1.7 * sin(vPos.x * 0.011 - vPos.z * 0.017));
+        vec3 painted = base * mix(0.55, 1.4, clamp(luma, 0.0, 1.0)) * mix(0.84, 1.1, swath);
+        // A little of the strokes' own colour (flowers, yellow highlights) shows through.
+        painted = mix(painted, strokes * (dot(base, vec3(0.33)) / 0.3), 0.25);
+        // The skin: painted hillside (the mound pictures, stitched round 360 degrees) projected onto the
+        // terrain from where she stands, by direction and elevation. The terrain's own ridges cut it,
+        // so the painting lies on the mounds, not in the sky. The slope light keeps their 3D form.
+        float r = length(vPos.xz);
+        float az = atan(vPos.z, vPos.x) / 6.2831853 + 0.5;
+        float elev = degrees(atan(vPos.y - 1.0, r));
+        vec2 suv = vec2(fract(az * 3.0), clamp((5.8 - elev) / 17.5, 0.0, 1.0));
+        vec3 skin = texture2D(uSkin, vec2(suv.x, 1.0 - suv.y)).rgb * mix(0.88, 1.08, clamp((vColor.r - 0.8) / 0.26, 0.0, 1.0));
+        painted = mix(painted, skin, 0.92);
+        float w = smoothstep(uFlat - 4.0, uFlat + 22.0, r);
+        gl_FragColor = vec4(mix(near, painted, w), 1.0);
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
+  grassMat.uniforms.uGrass.value = tex('scene/bliss-grass.webp');
+  grassMat.uniforms.uHill.value = tex('scene/bliss-hill.webp');
+  grassMat.uniforms.uSkin.value = tex('scene/bliss-skin.webp');
+  const g = new THREE.Mesh(geo, grassMat);
+  g.position.set(K.target[0], floorY, K.target[2]);
+  ground.add(g);
+  // Ridge fringe: a raw terrain silhouette is a hard, clean line. Find every crest seen from her
+  // spot (march out along each direction; a crest is where the terrain stops rising in view) and
+  // line it with grass tufts, the drawn grass sprite, sized to the distance, so ridges end in a
+  // ragged grassy edge.
+  const crests = [], faces = [];
+  for (let d = 0; d < 360; d += 0.75) {
+    const ca = Math.cos(d * D2R), sa = Math.sin(d * D2R);
+    let best = -Infinity, prev = null;
+    for (let r = FLAT + 6; r < SIZE / 2 - 2; r += 1.5) {
+      const h = height(ca * r, sa * r), e = (h - 1) / r;
+      if (prev && prev.visible && e < prev.e) crests.push(prev);
+      const visible = e > best;
+      if (visible) best = e;
+      if (visible) faces.push({ x: ca * r, z: sa * r, y: h, r });
+      prev = { x: ca * r, z: sa * r, y: h, r, e, visible };
+    }
+  }
+  fetch('props.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(P => {
+    const gr = P?.grass;
+    if (!gr) return;
+    const map = tex(versioned(gr.sheet, gr.v));
+    map.repeat.set(1 / gr.yaws.length, 1 / gr.pitches.length);
+    map.offset.set(0, 1 - 1 / gr.pitches.length);
+    const mat = new THREE.ShaderMaterial({
+      transparent: false, fog: true, side: THREE.DoubleSide,
+      uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { uMap: { value: map }, uRep: { value: map.repeat }, uOff: { value: map.offset } }]),
+      vertexShader: /* glsl */`
+        #include <fog_pars_vertex>
+        uniform vec2 uRep, uOff;
+        varying vec2 vUv;
+        void main() {
+          vUv = uOff + uv * uRep;
+          // Upright billboard: the instance's base, the quad spread along the camera's right.
+          vec4 base = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          float s = length(instanceMatrix[0].xyz);
+          vec3 right = normalize(vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]));
+          vec3 world = base.xyz + right * position.x * s + vec3(0.0, 1.0, 0.0) * position.y * s;
+          vec4 mvPosition = viewMatrix * vec4(world, 1.0);
+          gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
+        }`,
+      fragmentShader: /* glsl */`
+        #include <fog_pars_fragment>
+        uniform sampler2D uMap;
+        varying vec2 vUv;
+        void main() {
+          vec4 c = texture2D(uMap, vUv);
+          if (c.a < 0.4) discard;
+          // Toward the painted hills' greens, so the fringe reads as the same grass.
+          gl_FragColor = vec4(c.rgb * vec3(0.72, 1.05, 0.42), 1.0);
+          #include <colorspace_fragment>
+          #include <fog_fragment>
+        }`,
+    });
+    const quad = new THREE.PlaneGeometry(1, 1);
+    quad.translate(0, 0.42, 0);   // the sprite's base sits a little below its frame centre
+    // Layers: several staggered rows down the face just below each crest (densest at the ridge),
+    // then a light scatter over every visible slope, so the grass reads as the mound's own texture.
+    const spots = [];
+    let seed = 1;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (const c of crests) for (let layer = 0; layer < 4; layer++) {
+      const back = layer * 1.6 + rnd() * 1.2, rr = c.r - back, k = rr / c.r;
+      spots.push({ x: c.x * k, z: c.z * k, y: height(c.x * k, c.z * k), r: rr, keep: [0.75, 0.6, 0.45, 0.3][layer] });
+    }
+    for (const f of faces) spots.push({ ...f, keep: 0.1 });
+    const n = spots.length, inst = new THREE.InstancedMesh(quad, mat, n), m4 = new THREE.Matrix4();
+    for (let i = 0; i < n; i++) inst.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+    spots.forEach((c, i) => {
+      if (rnd() > c.keep) return;  // irregular, not rows
+      const sc = c.r * (0.006 + 0.007 * rnd() ** 2), jx = (rnd() - 0.5) * c.r * 0.012, jz = (rnd() - 0.5) * c.r * 0.012;
+      m4.makeScale(sc, sc, sc).setPosition(K.target[0] + c.x + jx, floorY + height(c.x + jx, c.z + jz) - 0.18 * sc, K.target[2] + c.z + jz);
+      inst.setMatrixAt(i, m4);
+    });
+    inst.frustumCulled = false;
+    ground.add(inst);
+    dirty = true;
+  }).catch(() => {});
+  roomWorld.add(ground);
+  // Ground props: drawn rocks, bushes and grass tufts scattered round her (see scripts/props.py).
+  fetch('props.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(P => {
+    if (!P) return;
+    const kinds = Object.entries(P).map(([name, p]) => {
+      const tex = loader.load(versioned(p.sheet, p.v), () => { dirty = true; });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return { name, ...p, tex, count: { grass: 0, bush: 8, rock: 0 }[name] ?? 10 };
+    });
+    let n = 0;
+    const rnd = () => { n = (n * 9301 + 49297) % 233280; return n / 233280; };
+    for (const kd of kinds) for (let i = 0; i < kd.count; i++) {
+      // Rings from 1.4 m to 16 m round her start, thinning with distance.
+      const r = 1.4 + 14.6 * Math.pow(rnd(), 1.6), a = rnd() * Math.PI * 2, s = 0.75 + 0.6 * rnd();
+      const map = kd.tex.clone();
+      map.repeat.set(1 / kd.yaws.length, 1 / kd.pitches.length);
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(kd.frame * s, kd.frame * s),
+        new THREE.MeshBasicMaterial({ map, transparent: true, alphaTest: 0.35, depthWrite: true, side: THREE.DoubleSide }));
+      m.position.set(K.target[0] + Math.cos(a) * r, floorY + kd.center * s, K.target[2] + Math.sin(a) * r);
+      m.userData = { kind: kd, spin: rnd() * 360 };
+      ground.add(m);
+      props.push(m);
+    }
+    dirty = true;
+  }).catch(() => {});
+  // 3D rocks with painted stone: smooth boulders wrapped (triplanar) in a hand-painted stone
+  // texture in the Bliss style, lit softly the way a background painter would: warm on the lit
+  // side, cool lilac in shadow, a soft edge between, darker where they sit in the grass, soft moss
+  // on top, and a thin dark outline.
+  let rs = 5;
+  const rr = () => { rs = (rs * 16807) % 2147483647; return rs / 2147483647; };
+  const SUN = new THREE.Vector3(4, 11, 3).normalize();
+  const stoneTex = tex('scene/rock-tex.webp');
+  const rockMat = () => new THREE.ShaderMaterial({
+    fog: true,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      uRot: { value: new THREE.Matrix3() }, uSun: { value: SUN }, uStone: { value: stoneTex }, uMossTex: { value: grassMat.uniforms.uHill.value },
+      uLit: { value: new THREE.Color('#fff4e2') }, uShadow: { value: new THREE.Color('#b4b6d2') },
+    }]),
+    vertexShader: /* glsl */`
+      #include <fog_pars_vertex>
+      uniform mat3 uRot;
+      varying vec3 vN, vP;
+      void main() {
+        vN = normalize(uRot * normalize(position)); vP = position;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */`
+      #include <fog_pars_fragment>
+      uniform vec3 uSun, uLit, uShadow;
+      uniform sampler2D uStone, uMossTex;
+      varying vec3 vN, vP;
+      void main() {
+        vec3 n = normalize(vN), w = pow(abs(n), vec3(4.0));
+        w /= w.x + w.y + w.z;
+        vec3 stone = texture2D(uStone, vP.zy * 0.7).rgb * w.x + texture2D(uStone, vP.xz * 0.7).rgb * w.y + texture2D(uStone, vP.xy * 0.7).rgb * w.z;
+        float l = dot(n, uSun);
+        vec3 c = stone * 1.18 * mix(uShadow, uLit, smoothstep(-0.05, 0.4, l));
+        // Moss on top, with a soft painted edge.
+        float mossy = smoothstep(0.45, 0.75, n.y + 0.25 * sin(vP.x * 5.0) * sin(vP.z * 4.3));
+        vec3 moss = texture2D(uMossTex, vP.xz * 0.5).rgb * mix(vec3(0.75, 0.9, 0.8), vec3(1.15, 1.1, 0.85), smoothstep(-0.05, 0.4, l));
+        c = mix(c, moss, mossy * 0.9);
+        c *= mix(0.68, 1.0, smoothstep(-0.7, 0.3, vP.y));
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
+  for (let i = 0; i < 9; i++) {
+    const g = new THREE.IcosahedronGeometry(1, 4), p0 = g.attributes.position, v = new THREE.Vector3();
+    const bumps = Array.from({ length: 7 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.1 + 0.25 * rr()]);
+    const flat = 0.7 + 0.3 * rr(), stretch = 1 + 0.35 * rr();
+    for (let j = 0; j < p0.count; j++) {
+      v.fromBufferAttribute(p0, j);
+      let r = 1;
+      for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
+      p0.setXYZ(j, v.x * r * stretch, v.y * r * flat, v.z * r);
+    }
+    const rock = new THREE.Group();
+    const mat = rockMat();
+    rock.add(new THREE.Mesh(g, mat));
+    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#3b3a4c', side: THREE.BackSide }));
+    hull.scale.setScalar(1.02);
+    rock.add(hull);
+    const size = 0.25 + 0.75 * rr() ** 1.5, a = rr() * Math.PI * 2, d = 2.6 + 9 * rr();
+    rock.scale.setScalar(size);
+    rock.rotation.y = rr() * Math.PI * 2;
+    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.55, K.target[2] + Math.sin(a) * d);
+    rock.updateMatrix();
+    mat.uniforms.uRot.value.setFromMatrix4(new THREE.Matrix4().extractRotation(rock.matrix));
+    ground.add(rock);
+    rocks3d.push(rock);
+  }
+  // Foreground grass: painted clumps in the painting's own foreground style, upright billboards.
+  const clumpTex = ['a', 'b', 'c'].map(n => tex(`scene/fg-grass-${n}.webp`));
+  const clumpAspect = [512 / 226, 512 / 188, 338 / 512];
+  for (let i = 0; i < 70; i++) {
+    const k = i % 7 === 0 ? 2 : i % 2, sz = (k === 2 ? 0.55 : 0.5) * (0.6 + 0.8 * rr());
+    const r = 1.4 + 15 * Math.pow(rr(), 1.5), a = rr() * Math.PI * 2;
+    const w = k === 2 ? sz * clumpAspect[2] : sz * clumpAspect[k] * 0.55, h = k === 2 ? sz : sz * 0.55;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h).translate(0, h / 2 - 0.02, 0),
+      new THREE.MeshBasicMaterial({ map: clumpTex[k], transparent: true, alphaTest: 0.3, side: THREE.DoubleSide }));
+    m.position.set(K.target[0] + Math.cos(a) * r, floorY, K.target[2] + Math.sin(a) * r);
+    ground.add(m);
+    fgGrass.push(m);
+  }
+  // The haze matches the painting's meadow near the horizon, so the ground melts into it.
+  // Distance haze: the colour of the painting's far meadow and hills, so the terrain's last hills
+  // fade into the painted horizon instead of meeting it at an edge.
+  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#8fb6a2', 55, 260), half: 18 };
+}
+function setBackdrop(name) {
+  state.backdrop = scenes[name] ? name : 'room';
+  for (const [n, sc] of Object.entries(scenes)) { sc.group.visible = n === state.backdrop; if (sc.far) sc.far.visible = n === state.backdrop; }
+  const sc = scenes[state.backdrop];
+  roomScene.background = sc.background;
+  roomScene.fog = sc.fog;
+  walker.half = sc.half;
+  walker.x = THREE.MathUtils.clamp(walker.x, -sc.half, sc.half);
+  walker.z = THREE.MathUtils.clamp(walker.z, -sc.half, sc.half);
+  dirty = true;
+}
+function renderRoom() {
+  if (!state.room || !roomRenderer) { $('frontgl').hidden = true; return; }
+  const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
+  // Same camera as the character's frame, widened to the whole window around that frame.
+  // The world camera, with its frame (the centred 2:3 box) widened to the whole window.
+  roomCam.position.copy(worldCam.position);
+  roomCam.quaternion.copy(worldCam.quaternion);
+  roomCam.updateMatrixWorld(true);
+  roomCam.projectionMatrix.makeScale(fr.width / vr.width, fr.height / vr.height, 1).multiply(worldCam.projectionMatrix);
+  roomCam.projectionMatrixInverse.copy(roomCam.projectionMatrix).invert();
+  // Room as seen from her: rotated by her heading, shifted by her position.
+  const h = -walker.heading * D2R;
+  roomWorld.rotation.y = h;
+  roomWorld.position.set(
+    K.target[0] - (Math.cos(h) * walker.x + Math.sin(h) * walker.z), 0,
+    K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
+  // The far horizon turns with her but never comes nearer.
+  if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.copy(roomCam.position); }
+  const bliss = state.backdrop === 'bliss' && props.length, w = new THREE.Vector3();
+  if (bliss) aimProps();
+  // Props nearer the camera than her are drawn again on a canvas in front of her.
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion);
+  const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
+  const near = m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15;
+  // Grass clumps turn upright to face the camera.
+  if (state.backdrop === 'bliss') for (const m of fgGrass) { m.getWorldPosition(w); m.lookAt(roomCam.position.x, w.y, roomCam.position.z); }
+  const front = state.backdrop === 'bliss' ? [...props.filter(near), ...fgGrass.filter(near), ...rocks3d.filter(near).flatMap(r => r.children)] : [];
+  roomRenderer.render(roomScene, roomCam);
+  const fc = $('frontgl');
+  fc.hidden = !front.length;
+  if (front.length) {
+    if (!frontRenderer) {
+      frontRenderer = new THREE.WebGLRenderer({ canvas: fc, antialias: true, alpha: true });
+      frontRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      frontRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    }
+    frontRenderer.setSize(vr.width, vr.height, false);
+    const keep = roomScene.children.map(c => c.visible), keepBg = roomScene.background, inFront = new Set(front);
+    roomScene.children.forEach(c => { c.visible = c === roomWorld || !!c.isLight; });
+    const shown = [];
+    roomWorld.traverse(o => { if (o.isMesh) { shown.push([o, o.visible]); o.visible = inFront.has(o); } });
+    roomScene.background = null;
+    frontRenderer.setClearColor(0x000000, 0);
+    frontRenderer.render(roomScene, roomCam);
+    shown.forEach(([o, v]) => { o.visible = v; });
+    roomScene.children.forEach((c, i) => { c.visible = keep[i]; });
+    roomScene.background = keepBg;
+  }
+}
+
+function init(data) {
+  renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: true, stencil: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  const geometry = shape(data);
+  depthScene = new THREE.Scene();
+  depthScene.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ colorWrite: false })));
+
+  scene = new THREE.Scene();
+  projMat = makeProjectionMaterial();
+  mesh = new THREE.Mesh(geometry, projMat);
+  scene.add(mesh);
+
+  // Drawn first in its own pass: three.js draws transparent objects after opaque ones whatever
+  // their renderOrder, and the card must sit behind the mesh, showing only around it.
+  backdrop = new THREE.Scene();
+  floor = makeFloor(geometry.boundingBox.min.y);
+  makeRoom(geometry.boundingBox.min.y);
+  backdrop.add(floor);
+  cardMat = makeCardMaterial();
+  card = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), cardMat);
+  card.renderOrder = 1;
+  backdrop.add(card);
+
+  flatScene = new THREE.Scene();
+  stretchMat = makeStretchMaterial();
+  stretchQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), stretchMat);
+  stretchQuad.frustumCulled = false;
+  flatScene.add(stretchQuad);
+  orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+  neuroScene = new THREE.Scene();
+  const lattice = makeLattice();
+  neuroBack = new THREE.Mesh(lattice, makeNeuroMaterial());
+  neuroLead = new THREE.Mesh(lattice, makeNeuroMaterial());
+  // Stencil: 1 inside the lead drawing's outline, 2 where the lead drawing actually painted. The
+  // drawing behind may only fill what is left at 1, the torn or folded holes: it can never paint over
+  // the lead drawing, nor add its own ribbons beside the lead's.
+  const outline = new THREE.Mesh(lattice, makeNeuroMaterial(neuroLead.material.uniforms, true));
+  Object.assign(outline.material, {
+    colorWrite: false, depthWrite: false, depthTest: false,
+    stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp,
+  });
+  Object.assign(neuroLead.material, { stencilWrite: true, stencilRef: 2, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp });
+  Object.assign(neuroBack.material, { stencilWrite: true, stencilWriteMask: 0, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc });
+  outline.renderOrder = 0; neuroLead.renderOrder = 1; neuroBack.renderOrder = 2;
+  for (const m of [outline, neuroBack, neuroLead]) { m.frustumCulled = false; neuroScene.add(m); }
+  skeleton = (data.skeleton || []).map(b => ({ ...b, pos: new THREE.Vector3(...b.pos) }));
+
+  camera = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+  const rings = new Set(K.keys.map(k => k.pitch)).size;
+  $('facts').textContent = `${K.keys.length} drawings · Tencent Hy Image 3.5 · $0.024 each · ${K.frame[0]} × ${K.frame[1]} WebP`;
+  new ResizeObserver(resize).observe(stageEl);
+  new ResizeObserver(resize).observe(viewportEl);
+  resize();
+  $('loading').hidden = true;
+  setMode(state.mode);
+  requestAnimationFrame(frame);
+}
+
+function resize() {
+  const vr = viewportEl.getBoundingClientRect();
+  roomRenderer?.setSize(vr.width, vr.height, false);
+  const r = stageEl.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  const dpr = Math.min(devicePixelRatio, 2);
+  flat.width = Math.round(r.width * dpr);
+  flat.height = Math.round(r.height * dpr);
+  dirty = true;
+}
+
+// Draw a key drawing on the flat canvas exactly where its render sat in the frame.
+function drawKey(k) {
+  const W = flat.width, H = flat.height;
+  ctx.drawImage(k.img, k.ox * W, k.oy * H, k.s * W, k.s * H);
+}
+
+let dirty = true, last = 0, onKeyNow = false, handTex = null;
+
+// WASD: walk relative to the camera. She turns to face where she walks while the camera stays put
+// in the room, so the view angle of her (state.yaw) changes as she turns.
+const WALK_SPEED = 1.6, TURN_SPEED = 420;
+function walk(dt) {
+  const k = walker.keys;
+  const f = (k.has('w') ? 1 : 0) - (k.has('s') ? 1 : 0), r = (k.has('d') ? 1 : 0) - (k.has('a') ? 1 : 0);
+  if (!f && !r) return;
+  const cam = (walker.heading + state.yaw) * D2R;            // camera direction from her, in the room
+  const fx = -Math.sin(cam), fz = -Math.cos(cam);           // away from the camera
+  let mx = f * fx - r * fz, mz = f * fz + r * fx;
+  const len = Math.hypot(mx, mz); mx /= len; mz /= len;
+  const lim = walker.half ?? 6;
+  walker.x = THREE.MathUtils.clamp(walker.x + mx * WALK_SPEED * dt, -lim, lim);
+  walker.z = THREE.MathUtils.clamp(walker.z + mz * WALK_SPEED * dt, -lim, lim);
+  const camWorld = walker.heading + state.yaw;
+  const want = Math.atan2(mx, mz) / D2R;
+  let turn = ((want - walker.heading + 540) % 360) - 180;
+  turn = Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
+  walker.heading = (walker.heading + turn + 360) % 360;
+  state.yaw = ((camWorld - walker.heading) % 360 + 360) % 360;
+  dirty = true;
+}
+addEventListener('keydown', e => {
+  const key = e.key.toLowerCase();
+  if (!'wasd'.includes(key) || key.length !== 1 || e.target.matches?.('input[type=text], textarea')) return;
+  walker.keys.add(key);
+  e.preventDefault();
+});
+addEventListener('keyup', e => walker.keys.delete(e.key.toLowerCase()));
+addEventListener('blur', () => walker.keys.clear());
+function frame(t) {
+  const dt = Math.min(0.05, (t - last) / 1000 || 0);
+  last = t;
+  if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
+  if (walker.keys.size && K) walk(dt);
+  if (walking() && (state.playing || walker.keys.size)) { anim.t += dt; dirty = true; }
+  if (vtuberOn() && state.playing) { vt.t += dt; dirty = true; }
+  if (dirty) { render(); dirty = false; }
+  requestAnimationFrame(frame);
+}
+
+// Walk cycle: drawn frames from a fixed set of camera angles (walk.json, one sheet per angle). It
+// plays while she walks (WASD) or with "Walk in place". Like a 2D game sprite, the drawn angle
+// nearest the camera is shown, and the room is seen from that same angle so they always agree.
+// Every animation shares one player. Walk is drawn from the rig at many angles; blink, wink and
+// talk are face edits of the front keys ("front": shown only near those angles). A "sequence"
+// lists which sheet frame each step shows, so held frames are stored once.
+const ANIMS = ['walk', 'blink', 'wink', 'talk'];
+const anim = { t: 0, all: {}, sheets: new Map() };
+// WASD always walks; otherwise the animation picked under the key map.
+Object.defineProperty(anim, 'name', { get: () => walker.keys.size ? 'walk' : state.anim });
+Object.defineProperty(anim, 'data', { get: () => anim.all[anim.name] || null });
+const animTitle = n => n.charAt(0).toUpperCase() + n.slice(1);
+// Plays when "Walk" is picked under the key map, or whenever she walks (WASD). Paused, the frame
+// slider scrubs through the cycle.
+const walking = () => !!anim.data;
+const animFrame = () => Math.floor(anim.t / anim.data.duration * anim.data.frames + 1e-6) % anim.data.frames;
+const sheetFrame = n => anim.data.sequence ? anim.data.sequence[n] : n;
+for (const name of ANIMS) fetch(`${name}.json`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(d => {
+  if (!d) return;
+  for (const a of d.angles) a.dir = dirOf(a.yaw, a.pitch);
+  anim.all[name] = d;
+  if (anim.data === d) $('frame').max = d.frames;
+  if (anim.pending?.name === name) anim.pending.go();
+  showAnim();
+  dirty = true;
+}).catch(() => {});
+function walkSheet(a, all = anim.data?.angles || []) {
+  if (!anim.sheets.has(a)) {
+    anim.sheets.set(a, null);
+    image(versioned(a.sheet, a.v)).then(img => { anim.sheets.set(a, img); dirty = true; }, () => {});
+    // The rest stream in behind it, so turning never waits long.
+    for (const b of all) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(versioned(b.sheet, b.v)).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
+  }
+  return anim.sheets.get(a);
+}
+const walkCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+const IDENTITY = new THREE.Matrix4();
+
+// VTuber: the held key drawing as a soft 2D mesh, posed Live2D-style from the rig's skeleton. Her
+// hips, chest, neck and head bones, projected into the drawing, are the pivots: the upper body
+// sways about the hips and breathes, the head tilts, nods and turns (toward the pointer, like face
+// tracking) about the neck, and the legs stay planted. Forward-facing keys also blink, using the
+// face patches. Every pixel still comes from the drawing; it is only bent.
+const vt = { t: 0, cols: 40, rows: 60, scene: null, look: new THREE.Vector2(), want: new THREE.Vector2(), blinkAt: 1.5, blinkStart: -9 };
+const vtuberOn = () => state.anim === 'vtuber' && !walker.keys.size;
+const vtCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+function makeVtuber() {
+  const { cols, rows } = vt, n = (cols + 1) * (rows + 1);
+  const g = new THREE.BufferGeometry(), uv = new Float32Array(n * 2), idx = [];
+  for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) { const v = j * (cols + 1) + i; uv[v * 2] = i / cols; uv[v * 2 + 1] = j / rows; }
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const a = j * (cols + 1) + i, b = a + 1, c = a + cols + 1, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  vt.canvas = document.createElement('canvas');
+  vt.ctx = vt.canvas.getContext('2d');
+  vt.tex = new THREE.CanvasTexture(vt.canvas);
+  vt.tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    uniforms: { uTex: { value: vt.tex }, uClip: { value: new THREE.Matrix4() } },
+    vertexShader: /* glsl */`
+      uniform mat4 uClip;
+      varying vec2 vUv;
+      // position.xy: frame coordinates (0..1, y down).
+      void main() { vUv = uv; gl_Position = uClip * vec4(position.x * 2.0 - 1.0, 1.0 - position.y * 2.0, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTex;
+      varying vec2 vUv;
+      void main() {
+        vec4 s = texture2D(uTex, vec2(vUv.x, 1.0 - vUv.y));
+        if (s.a < 0.01) discard;
+        gl_FragColor = s;
+        #include <colorspace_fragment>
+      }`,
+  });
+  vt.mesh = new THREE.Mesh(g, m);
+  vt.mesh.frustumCulled = false;
+  vt.scene = new THREE.Scene();
+  vt.scene.add(vt.mesh);
+}
+// The rig's bones seen from a key's camera, in frame coordinates (0..1, y down).
+function bonesOf(k) {
+  if (k.bones) return k.bones;
+  vtCam.fov = K.fov; vtCam.aspect = K.aspect; vtCam.updateProjectionMatrix();
+  placeCamera(vtCam, k.yaw, k.pitch, K.radius);
+  const vp = new THREE.Matrix4().multiplyMatrices(vtCam.projectionMatrix, vtCam.matrixWorldInverse), B = {};
+  for (const b of skeleton) { const q = b.pos.clone().applyMatrix4(vp); B[b.name.replace('mixamorig', '')] = [(q.x + 1) / 2, (1 - q.y) / 2]; }
+  return (k.bones = B);
+}
+const smooth = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+function poseVtuber(k) {
+  const B = bonesOf(k), a = K.aspect, t = vt.t;
+  const hip = B.Hips, chest = B.Spine2, neck = B.Neck, head = B.Head, top = B.HeadTop_End;
+  const headLen = Math.hypot((top[0] - head[0]) * a, top[1] - head[1]), hn = Math.max(0.01, neck[1] - head[1]);
+  // Idle motion, plus the head turning toward the pointer.
+  vt.look.lerp(vt.want, 0.08);
+  const sway = 1.6 * Math.sin(t * 2 * Math.PI / 4.3) * Math.PI / 180;
+  const tilt = (4 * Math.sin(t * 2 * Math.PI / 3.4 + 1) - 5 * vt.look.x) * Math.PI / 180;
+  const turn = (0.35 * Math.sin(t * 2 * Math.PI / 5.1) + vt.look.x) * headLen * 0.10;
+  const nod = (0.4 * Math.sin(t * 2 * Math.PI / 2.9) + vt.look.y) * headLen * 0.05;
+  const breath = (0.5 + 0.5 * Math.sin(t * 2 * Math.PI / 3.6)) * (hip[1] - chest[1]) * 0.012;
+  const rot = (x, y, px, py, ang) => {
+    const X = (x - px) * a, Y = y - py, c = Math.cos(ang), s_ = Math.sin(ang);
+    return [px + (X * c - Y * s_) / a, py + X * s_ + Y * c];
+  };
+  const pos = vt.mesh.geometry.attributes.position.array, { cols, rows } = vt;
+  // The neck pivot moves with the upper body.
+  const neckT = rot(neck[0], neck[1] - breath, hip[0], hip[1], sway);
+  // Arms: each swings gently about its shoulder, the forearm a little more about the elbow, out of
+  // step with each other. Only pixels close to the arm's bones follow (the drawing has nothing
+  // behind the arm, so the swing stays small).
+  const arms = ['Left', 'Right'].map((side, i) => {
+    const S = B[`${side}Arm`], E = B[`${side}ForeArm`], Wr = B[`${side}Hand`], T = B[`${side}HandMiddle4`];
+    if (!S || !E || !Wr) return null;
+    const L = Math.hypot((E[0] - S[0]) * a, E[1] - S[1]);
+    const phase = t * 2 * Math.PI / 3.8 + (i ? Math.PI * 0.85 : 0);
+    const sideSign = (S[0] - hip[0]) > 0 ? 1 : -1;  // swing outward-and-back is mirrored per side
+    return { S, E, Wr, T: T || Wr, L, upper: 1.4 * Math.sin(phase) * sideSign * Math.PI / 180,
+             fore: 0.5 * Math.sin(phase - 0.6) * sideSign * Math.PI / 180, sT: rot(S[0], S[1] - breath, hip[0], hip[1], sway) };
+  }).filter(Boolean);
+  // Distance (in arm lengths) from a point to a segment, and how far along it the closest point is.
+  const toSeg = (x, y, P, Q, L) => {
+    const px = (x - P[0]) * a, py = y - P[1], qx = (Q[0] - P[0]) * a, qy = Q[1] - P[1], qq = qx * qx + qy * qy || 1;
+    const u = Math.min(1, Math.max(0, (px * qx + py * qy) / qq));
+    return [Math.hypot(px - u * qx, py - u * qy) / L, u];
+  };
+  // Legs and whole body: her weight shifts slowly from foot to foot. The hips drift toward the
+  // standing leg and dip a touch as the other knee softens (that knee eases inward); the whole
+  // figure leans a fraction of a degree about her feet. The shoes stay planted.
+  const LF = B.LeftFoot, RF = B.RightFoot, LK = B.LeftLeg, RK = B.RightLeg;
+  const footY = LF && RF ? (LF[1] + RF[1]) / 2 : hip[1] + 2 * (hip[1] - chest[1]);
+  const footX = LF && RF ? (LF[0] + RF[0]) / 2 : hip[0], legLen = Math.max(0.05, footY - hip[1]);
+  const wp = t * 2 * Math.PI / 6.2, shift = Math.sin(wp);         // -1..1: weight on one foot or the other
+  const hipDx = 0.010 * legLen * shift, hipDy = 0.006 * legLen * Math.abs(shift);
+  const lean = 0.35 * Math.sin(t * 2 * Math.PI / 7.3 + 0.7) * Math.PI / 180;
+  // Which knee softens: the one on the side the hips move away from.
+  const knees = [LK, RK].filter(Boolean).map(Kn => ({ Kn, soft: Math.max(0, -shift * Math.sign(Kn[0] - hip[0])) }));
+  // A gentle settle at the knees: every few seconds she sinks a touch and rises again. Full above
+  // the knees, fading to nothing at the shoes, so the shins compress and the feet stay put.
+  const kneeY = LK && RK ? (LK[1] + RK[1]) / 2 : hip[1] + 0.5 * legLen;
+  const settle = 0.011 * legLen * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 4.8)) ** 1.5;
+  for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
+    const v = j * (cols + 1) + i;
+    let x = k.ox + (i / cols) * k.s, y = k.oy + (j / rows) * k.s;
+    const x0 = x, y0 = y;
+    const wT = smooth((hip[1] - y) / (hip[1] - chest[1]));
+    const wH = smooth((neck[1] + 0.5 * hn - y) / hn) * Math.exp(-(Math.max(0, Math.abs((x - head[0]) * a) / headLen - 1.4) ** 2) / 0.3);
+    // Arm weights, measured on the drawing as drawn.
+    const armW = arms.map(A => {
+      const [d1, u1] = toSeg(x, y, A.S, A.E, A.L), [d2] = toSeg(x, y, A.E, A.Wr, A.L), [d3] = toSeg(x, y, A.Wr, A.T, A.L);
+      // Full weight within the sleeve's (or the whole hand's) thickness, so the hand moves as one
+      // rigid piece; a short fade beyond it, so little of the skirt beside it is dragged along.
+      const near = Math.max(1 - smooth((Math.min(d1, d2) - 0.15) / 0.07), 1 - smooth((d3 - 0.2) / 0.07));
+      const along = d1 <= Math.min(d2, d3) ? smooth(u1 / 0.35) : 1;
+      const fore = Math.min(d2, d3) < d1 ? 1 : smooth((u1 - 0.75) / 0.25);
+      return { w: near * along, fore: near * fore };
+    });
+    // Upper body: breathe (lift), then sway about the hips.
+    y -= breath * wT;
+    [x, y] = rot(x, y, hip[0], hip[1], sway * wT);
+    // Arms swing about the (swayed) shoulders; forearms add a little about the elbow.
+    arms.forEach((A, i) => {
+      const { w, fore } = armW[i];
+      if (w <= 0.001) return;
+      const eT = rot(...rot(A.E[0], A.E[1] - breath, hip[0], hip[1], sway), A.sT[0], A.sT[1], A.upper);
+      [x, y] = rot(x, y, A.sT[0], A.sT[1], A.upper * w);
+      if (fore > 0.001) [x, y] = rot(x, y, eT[0], eT[1], A.fore * fore * w);
+    });
+    // Head: tilt about the (swayed) neck, turn and nod.
+    if (wH > 0) {
+      const r = rot(x, y, neckT[0], neckT[1], tilt * wH);
+      x = r[0] + turn * wH / a; y = r[1] + nod * wH;
+    }
+    // Legs: from planted feet (0) to hips (1) the weight shift carries through.
+    const up = smooth((footY - y0) / legLen);
+    x += hipDx * up; y += hipDy * up;
+    y += settle * smooth((footY - y0) / Math.max(0.01, footY - kneeY));
+    for (const { Kn, soft } of knees) {
+      if (soft <= 0) continue;
+      const g = Math.exp(-(((x0 - Kn[0]) * a) ** 2 + (y0 - Kn[1]) ** 2) / (2 * (0.09 * legLen) ** 2));
+      x += -Math.sign(Kn[0] - hip[0]) * 0.006 * legLen * soft * g;
+    }
+    // Whole body: a slow lean about the feet, fading to nothing at the shoes.
+    [x, y] = rot(x, y, footX, footY, lean * smooth((footY - y0) / (0.25 * legLen)));
+    pos[v * 3] = x; pos[v * 3 + 1] = y;
+  }
+  vt.mesh.geometry.attributes.position.needsUpdate = true;
+  // Blinks at natural, uneven intervals (forward-facing keys have the face patches).
+  if (vt.t > vt.blinkAt) { vt.blinkStart = vt.t; vt.blinkAt = vt.t + 2 + Math.random() * 3.5; }
+  const b = anim.all.blink, face = b?.angles.find(f => f.key === k.file), since = vt.t - vt.blinkStart;
+  const frame = since < 0.08 ? 1 : since < 0.2 ? 2 : since < 0.28 ? 1 : 0;
+  const sheet = face ? walkSheet(face, b.angles) : null;
+  const want = `${k.file} ${frame} ${sheet ? 1 : 0}`;
+  if (vt.drawn !== want) {
+    vt.drawn = want;
+    vt.canvas.width = k.img.naturalWidth || k.img.width; vt.canvas.height = k.img.naturalHeight || k.img.height;
+    vt.ctx.drawImage(k.img, 0, 0);
+    if (frame && sheet) {
+      const P = b.patch, [cx, cy, cw, ch] = face.crop, W = vt.canvas.width, H = vt.canvas.height;
+      vt.ctx.drawImage(sheet, frame * P, face.row * P, P, P, cx * W, cy * H, cw * W, ch * H);
+    }
+    vt.tex.needsUpdate = true;
+  }
+}
+viewportEl.addEventListener('pointermove', e => {
+  if (drag) return;
+  const r = stageEl.getBoundingClientRect();
+  vt.want.set(THREE.MathUtils.clamp((e.clientX - r.left) / r.width * 2 - 1, -1, 1), THREE.MathUtils.clamp((e.clientY - r.top) / (r.height * 0.5) - 0.6, -1, 1));
+});
+viewportEl.addEventListener('pointerleave', () => vt.want.set(0, 0));
+
+// Walsh interpolation: the two neighbouring drawings' shells, each rendered alone into its own
+// buffer from the same in-between vantage, then merged band by band in sequency (Walsh/Haar) space.
+// The mip pyramid of each buffer is its box-average (lowest-sequency) ladder: band l = level l -
+// level l+1. Low sequency blends linearly; high sequency (lines) switches between the drawings over
+// a short stretch, energy-preserving, so no line is ever drawn twice at half strength.
+const walshFx = { rts: null, scene: null };
+function makeWalsh() {
+  const m = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    uniforms: { uA: { value: null }, uB: { value: null }, uT: { value: 0 }, uWidth: { value: 0.5 } },
+    vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uA, uB;
+      uniform float uT, uWidth;
+      varying vec2 vUv;
+      const vec3 LUM = vec3(0.3, 0.59, 0.11);
+      const float TOP = 5.0;  // coarsest band: 32 px boxes; finer bands telescope down to the drawing
+      void main() {
+        vec4 a0 = textureLod(uA, vUv, 0.0), b0 = textureLod(uB, vUv, 0.0);
+        bool hasA = a0.a > 0.5, hasB = b0.a > 0.5;
+        // Parts only one drawing has are shown only while that drawing leads: never twice.
+        if (!hasA && !hasB) discard;
+        vec4 c;
+        if (hasA != hasB) {
+          if (hasA ? uT > 0.5 : uT <= 0.5) discard;
+          c = hasA ? a0 : b0;
+        } else {
+          // Low sequency: linear blend. High sequency: switch around halfway (see uWidth).
+          vec4 coarse = mix(textureLod(uA, vUv, TOP), textureLod(uB, vUv, TOP), uT);
+          // The bands telescope: their sum is the drawing minus its coarsest band.
+          vec4 dA = a0 - textureLod(uA, vUv, TOP), dB = b0 - textureLod(uB, vUv, TOP);
+          // The line hand-over spans uWidth of the way between the two drawings, centred on halfway.
+          float s = smoothstep(0.5 - 0.5 * uWidth, 0.5 + 0.5 * uWidth, uT);
+          vec4 d = mix(dA, dB, s);
+          // Where the two hand over, keep the detail's energy (its contrast) at what the drawings
+          // have, so lines don't fade to half strength. Off the hand-over this is exactly 1.
+          float want = mix(abs(dot(dA.rgb, LUM)), abs(dot(dB.rgb, LUM)), s), have = abs(dot(d.rgb, LUM));
+          d.rgb *= clamp(want / max(have, 1e-3), 1.0, 1.6);
+          c = vec4(clamp(coarse.rgb + d.rgb, 0.0, 1.0), 1.0);
+        }
+        gl_FragColor = vec4(c.rgb / max(c.a, 1e-3), 1.0);
+        #include <colorspace_fragment>
+      }`,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), m);
+  quad.frustumCulled = false;
+  walshFx.scene = new THREE.Scene();
+  walshFx.scene.add(quad);
+  walshFx.mat = m;
+}
+function renderWalsh(around) {
+  const w = glCanvas.width, h = glCanvas.height;
+  if (!walshFx.scene) makeWalsh();
+  if (!walshFx.rts || walshFx.rts[0].width !== w || walshFx.rts[0].height !== h) {
+    walshFx.rts?.forEach(r => r.dispose());
+    walshFx.rts = [0, 1].map(() => new THREE.WebGLRenderTarget(w, h, {
+      generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter, colorSpace: THREE.SRGBColorSpace, samples: 4,
+    }));
+  }
+  const kids = neuroScene.children, keepVis = kids.map(k => k.visible), keepTarget = renderer.getRenderTarget();
+  const keepColor = renderer.getClearColor(new THREE.Color()), keepAlpha = renderer.getClearAlpha();
+  renderer.setClearColor(0x000000, 0);
+  // Each drawing's shell alone: the lead's, and the next nearest drawing's.
+  [neuroLead, neuroBack].forEach((m, i) => {
+    kids.forEach(k => { k.visible = k === m; });
+    renderer.setRenderTarget(walshFx.rts[i]);
+    renderer.clear();
+    renderer.render(neuroScene, camera);
+  });
+  kids.forEach((k, i) => { k.visible = keepVis[i]; });
+  renderer.setRenderTarget(keepTarget);
+  renderer.setClearColor(keepColor, keepAlpha);
+  // Blend proportion: 0 on the lead drawing's angle, 0.5 halfway to the next.
+  const offA = around[0].angle, offB = around[1] ? around[1].angle : offA;
+  const u = walshFx.mat.uniforms;
+  u.uA.value = walshFx.rts[0].texture; u.uB.value = walshFx.rts[1].texture;
+  u.uT.value = around[1] ? offA / (offA + offB) : 0;
+  u.uWidth.value = state.handover;
+  renderer.render(walshFx.scene, orthoCam);
+}
+
+function render() {
+  placeCamera(camera, state.yaw, state.pitch, K.radius);
+  if (LANDSCAPE) {
+    setView(camera, IDENTITY);
+    setWorld(0, 0, IDENTITY);
+    upright = uprightFit();
+    renderer.clear();
+    renderRoom();
+    $('yaw').textContent = Math.round(state.yaw);
+    $('pitch').textContent = Math.round(state.pitch);
+    $('hint').textContent = 'WASD to walk · Drag to look around';
+    return;
+  }
+  const camDir = dirOf(state.yaw, state.pitch);
+  const around = ranked(camDir);
+  const lead = around[0].key, off = around[0].angle;
+  // On a key angle the key drawing is shown exactly as drawn. Keys are never interpolated.
+  const onKey = off < 0.25;
+  onKeyNow = onKey;
+  const mode = state.mode;
+  const projected = mode === 'projected' && !onKey;
+  const stretched = mode === 'flipstretch' && !onKey;
+  let walkAngle = null, walkImg = null, faceAngle = null, faceImg = null;
+  if (walking() && anim.data.face) {
+    // Face animations are patches over the key drawings that face forward: the nearest key is held
+    // (like a sprite) with its face animated. Elsewhere she is shown as usual.
+    faceAngle = anim.data.angles.find(a => a.key === lead.file) || null;
+    if (faceAngle) faceImg = walkSheet(faceAngle);
+  } else if (walking()) {
+    walkAngle = anim.data.angles.reduce((a, b) => angleBetween(camDir, b.dir) < angleBetween(camDir, a.dir) ? b : a);
+    walkImg = walkSheet(walkAngle);
+  }
+  const walkOn = !!walkImg, faceOn = !!faceImg, vtOn = vtuberOn() && !walkOn && lead.ready;
+  const neuro = (mode === 'neuro' || mode === 'walsh') && !onKey && !walkOn && !faceOn && !vtOn;
+  const walsh = neuro && mode === 'walsh';
+  let towards = [];
+
+  mesh.visible = card.visible = projected;
+  if (projected) {
+    for (let i = 0; i < 4; i++) {
+      const entry = around[i];
+      projMat.uniforms.uUse.value[i] = entry ? 1 : 0;
+      if (!entry) continue;
+      const { key } = entry, d = keyData(key);
+      const fit = i === 0 ? THREE.MathUtils.smoothstep(off, 0, key.handoff) : 1;
+      for (const m of [projMat, cardMat]) {
+        m.uniforms[`uTex${i}`].value = d.tex;
+        m.uniforms[`uWarp${i}`].value = d.warps;
+        m.uniforms.uVP.value[i].copy(d.vp);
+        m.uniforms.uAlign.value[i].set(key.s, key.ox, key.oy, 0);
+        m.uniforms.uFit.value[i] = fit;
+      }
+      projMat.uniforms[`uDep${i}`].value = d.depth.depthTexture;
+      projMat.uniforms.uDir.value[i].copy(d.dir);
+    }
+    card.position.set(...K.target);
+    card.quaternion.copy(camera.quaternion);
+  }
+  if (walkOn) {
+    // The room from the drawn angle, not the camera's: her floor and walls must match the drawing.
+    walkCam.fov = K.fov; walkCam.aspect = K.aspect; walkCam.updateProjectionMatrix();
+    placeCamera(walkCam, walkAngle.yaw, walkAngle.pitch, K.radius);
+    setView(walkCam, IDENTITY);
+    setWorld(walkAngle.yaw - state.yaw, walkAngle.pitch - state.pitch, IDENTITY);
+  } else if (neuro) {
+    latentViewProjection(lead, stretchTowards(lead, camDir));
+    setView(latentCam, latentFrame);
+    setWorld(latentAngles.dYaw, latentAngles.dPitch, latentFrame);
+  } else {
+    lead.vantageCam ??= vantageCamera(lead);
+    setView(lead.vantageCam.cam, lead.vantageCam.frame);
+    // On a key angle the camera sits exactly on the key, so its offsets apply in full.
+    const dy = lead.yaw + lead.vantage.d_yaw - state.yaw, dp = lead.pitch + lead.vantage.d_pitch - state.pitch;
+    setWorld(onKey ? dy : lead.vantage.d_yaw, onKey ? dp : lead.vantage.d_pitch, lead.vantageCam.frame);
+  }
+  upright = uprightFit();
+  renderer.autoClear = false;
+  renderer.clear();
+  renderRoom();
+  renderer.render(backdrop, worldCam);
+  renderer.clearDepth();
+  renderer.render(scene, camera);
+  if (neuro) {
+    towards = stretchTowards(lead, camDir);
+    const vp = latentViewProjection(lead, towards);
+    const back = around[1] ? around[1].key : lead;
+    for (const [m, own] of [[neuroLead, lead], [neuroBack, back]]) {
+      const u = m.material.uniforms, d = keyData(own);
+      m.visible = own === lead || back !== lead;
+      u.uOwn.value = d.warps; u.uTex.value = d.tex;
+      u.uAlign.value.set(own.s, own.ox, own.oy, 0);
+      u.uK0.value = K.frame[0] / glCanvas.width;
+      u.uLatentVP.value.copy(upright.clip).multiply(vp);
+      own.vantageCam ??= vantageCamera(own);
+      u.uOwnPos.value.copy(own.vantageCam.cam.position);
+      u.uOwnFwd.value.setFromMatrixColumn(own.vantageCam.cam.matrixWorld, 2).negate();
+      u.uOwnDepth.value = own.vantageCam.cam.position.distanceTo(new THREE.Vector3(...K.target));
+      u.uRelief.value = state.relief;
+      const offOwn = angleBetween(camDir, own.dir);
+      u.uRho.value = 1 - THREE.MathUtils.smoothstep(offOwn, 0, own.handoff);
+      // Only the lead drawing has correspondences to these neighbours.
+      for (let k = 0; k < 2; k++) {
+        const t = own === lead ? towards[k] : null;
+        u.uNT.value[k] = t ? t.t : 0;
+        if (!t) continue;
+        const n = lead.near[t.i];
+        n.vantageCam ??= vantageCamera(n);
+        const { cam: nc, vp: nvp } = n.vantageCam;
+        u.uNVP.value[k].copy(nvp);
+        u.uNPos.value[k].copy(nc.position);
+        u.uNRight.value[k].setFromMatrixColumn(nc.matrixWorld, 0);
+        u.uNUp.value[k].setFromMatrixColumn(nc.matrixWorld, 1);
+        u.uNFwd.value[k].setFromMatrixColumn(nc.matrixWorld, 2).negate();
+        u.uNScale.value[k] = n.vantage.scale;
+        u.uNTile.value[k] = t.i + 1;
+      }
+      // Halfway along each neighbour's hand-off field by the hand-off point (t = 0.5 there), so
+      // the drawing on either side of the switch lands on the same spot.
+      const [gc, gr] = K.handoffGrid;
+      handTex ??= new THREE.DataTexture(new Float32Array(gc * gr * 2 * 4), gc, gr * 2, THREE.RGBAFormat, THREE.FloatType);
+      const data = handTex.image.data;
+      if (own === lead) data.fill(0);
+      for (let k = 0; k < 2; k++) {
+        const t = own === lead ? towards[k] : null, h = t ? own.affines[t.i] : null;
+        u.uHandW.value[k] = t && h ? Math.min(t.t, 0.5) : 0;
+        if (!h || own !== lead) continue;
+        for (let c = 0; c < gc * gr; c++) { data[(k * gc * gr + c) * 4] = h[2 * c]; data[(k * gc * gr + c) * 4 + 1] = h[2 * c + 1]; }
+      }
+      if (own === lead) handTex.needsUpdate = true;
+      u.uHand.value = handTex;
+    }
+    if (walsh) renderWalsh(around); else renderer.render(neuroScene, camera);
+  }
+  if (vtOn) {
+    if (!vt.scene) makeVtuber();
+    poseVtuber(lead);
+    vt.mesh.material.uniforms.uClip.value.copy(upright.clip);
+    renderer.render(vt.scene, orthoCam);
+  }
+  if (stretched) {
+    towards = stretchTowards(lead, camDir);
+    const d = keyData(lead), u = stretchMat.uniforms;
+    u.uTex.value = d.tex;
+    u.uWarps.value = d.warps;
+    u.uAlign.value.set(lead.s, lead.ox, lead.oy, 0);
+    u.uTileA.value = towards[0] ? towards[0].i + 1 : 1;
+    u.uA.value = towards[0] ? towards[0].t : 0;
+    u.uTileB.value = towards[1] ? towards[1].i + 1 : 1;
+    u.uB.value = towards[1] ? towards[1].t : 0;
+    renderer.render(flatScene, orthoCam);
+  }
+
+  // The flat canvas shows key drawings as drawn: on a key angle, and always in flipbook mode.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, flat.width, flat.height);
+  if (walkOn) {
+    // A direction may have fewer frames than the cycle (a drawn loop not yet replaced): hold each.
+    const d = anim.data, n = animFrame(), cnt = walkAngle.frames.length;
+    const m = cnt < d.frames ? Math.floor(n * cnt / d.frames) : sheetFrame(n), f = walkAngle.frames[m];
+    const [fw, fh] = walkAngle.frame || d.frame, cols = walkAngle.cols || d.cols, W = flat.width, H = flat.height;
+    ctx.setTransform(...upright.canvas);
+    ctx.drawImage(walkImg, (m % cols) * fw, Math.floor(m / cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    anim.shown = { angle: walkAngle, n, name: anim.name };
+  } else if (!projected && !stretched && !neuro) {
+    anim.shown = null;
+    ctx.setTransform(...upright.canvas);
+    if (!vtOn) drawKey(lead);
+    if (faceOn) {
+      const d = anim.data, n = animFrame(), m = sheetFrame(n), P = d.patch, [cx, cy, cw, ch] = faceAngle.crop;
+      const W = flat.width, H = flat.height;
+      if (m) ctx.drawImage(faceImg, m * P, faceAngle.row * P, P, P, (lead.ox + cx * lead.s) * W, (lead.oy + cy * lead.s) * H, cw * lead.s * W, ch * lead.s * H);
+      anim.shown = { angle: faceAngle, n, name: anim.name };
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  } else anim.shown = null;
+  if (state.skeleton) drawSkeleton();
+
+  updateSheet(around, onKey, towards);
+}
+
+// Latent rotation. Each key drawing depicts the character from a learned vantage: a small yaw and
+// pitch offset from the camera it was asked for, a roll, and a framing (scale, shift). Your camera
+// angle becomes a latent angle by blending the lead key's and its neighbours' corrections with the
+// same weights that pick the drawings, so at a key it is exactly that drawing's vantage and the
+// corrections change smoothly in between. Returns the view-projection matrix for that vantage.
+const latentCam = new THREE.PerspectiveCamera();
+let latentVP = null;
+// The camera a key drawing really depicts (its learned vantage), with its framing.
+function vantageCamera(k) {
+  const cam = new THREE.PerspectiveCamera(K.fov, K.aspect, 0.05, 50);
+  placeCamera(cam, k.yaw + k.vantage.d_yaw, k.pitch + k.vantage.d_pitch, K.radius);
+  cam.rotateZ(k.vantage.roll * D2R);
+  cam.updateMatrixWorld(true);
+  const { scale: sc, tx, ty } = k.vantage;
+  const frame = new THREE.Matrix4().set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  const vp = frame.clone().multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+  return { cam, vp, frame };
+}
+
+const latentFrame = new THREE.Matrix4(), latentAngles = { dYaw: 0, dPitch: 0 };
+
+// The world camera follows the sprite: the same yaw, height and framing the drawing depicts, but
+// never its roll. A drawing's noon (straight up in the image) is her vertical, so the world's
+// vertical must project straight up too: walls run parallel to her and the floor is square to her.
+const worldCam = new THREE.PerspectiveCamera(22, 1, 0.05, 700);  // far enough for the outdoor scene's distant hills
+function setWorld(dYaw, dPitch, frame) {
+  worldCam.fov = K.fov; worldCam.aspect = K.aspect; worldCam.updateProjectionMatrix();
+  placeCamera(worldCam, state.yaw + dYaw, state.pitch + dPitch, K.radius);
+  worldCam.projectionMatrix.premultiply(frame);
+  worldCam.projectionMatrixInverse.copy(worldCam.projectionMatrix).invert();
+}
+
+// The camera the sprite is actually seen through: a drawing's learned vantage on a key angle and in
+// flipbook, the blended latent camera between keys in Neuromation. The room, the floor shadow and
+// the skeleton are drawn through it too, so the world and the drawings always agree on angle,
+// height and scale.
+const viewCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+function setView(cam, frame) {
+  viewCam.position.copy(cam.position);
+  viewCam.quaternion.copy(cam.quaternion);
+  viewCam.updateMatrixWorld(true);
+  viewCam.projectionMatrix.multiplyMatrices(frame, cam.projectionMatrix);
+  viewCam.projectionMatrixInverse.copy(viewCam.projectionMatrix).invert();
+}
+
+// The sprite's camera and the world camera differ only by the drawing's roll. The rig's skeleton,
+// projected through both, gives the uniform scale and shift that plants her feet on the world's
+// floor (feet weighted 3x); there is no rotation, so her noon stays the world's vertical.
+let upright = { clip: new THREE.Matrix4(), canvas: [1, 0, 0, 1, 0, 0] };
+function uprightFit() {
+  const asp = K.aspect;
+  const sv = new THREE.Matrix4().multiplyMatrices(viewCam.projectionMatrix, viewCam.matrixWorldInverse);
+  const tv = new THREE.Matrix4().multiplyMatrices(worldCam.projectionMatrix, worldCam.matrixWorldInverse);
+  const P = [], Q = [], Wt = [];
+  for (const b of skeleton) {
+    const p = b.pos.clone().applyMatrix4(sv), q = b.pos.clone().applyMatrix4(tv);
+    P.push([p.x * asp, p.y]); Q.push([q.x * asp, q.y]); Wt.push(/Foot|Toe/.test(b.name) ? 3 : 1);
+  }
+  const sw = Wt.reduce((a, w) => a + w, 0);
+  const pc = [0, 1].map(i => P.reduce((a, p, j) => a + p[i] * Wt[j], 0) / sw);
+  const qc = [0, 1].map(i => Q.reduce((a, q, j) => a + q[i] * Wt[j], 0) / sw);
+  let re = 0, im = 0, den = 0;  // z = sum w (q - qc) conj(p - pc) / sum w |p - pc|^2
+  P.forEach((p, j) => {
+    const px = p[0] - pc[0], py = p[1] - pc[1], qx = Q[j][0] - qc[0], qy = Q[j][1] - qc[1];
+    re += Wt[j] * (qx * px + qy * py); im += Wt[j] * (qy * px - qx * py); den += Wt[j] * (px * px + py * py);
+  });
+  // No rotation: the drawing's noon stays straight up. Only scale and shift, to plant her feet.
+  const a = re / den, b = 0, tx = qc[0] - (a * pc[0] - b * pc[1]), ty = qc[1] - (b * pc[0] + a * pc[1]);
+  // In NDC: x' = a x - (b/asp) y + tx/asp, y' = b asp x + a y + ty; as a clip-space matrix:
+  const clip = new THREE.Matrix4().set(a, -b / asp, 0, tx / asp, b * asp, a, 0, ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  // The same map in canvas pixels (y down) for drawings shown flat.
+  const W = flat.width, H = flat.height;
+  const L = [[a, -b / asp], [b * asp, a]], t = [tx / asp, ty];
+  const D = [2 / W, -2 / H], e = [-1, 1];
+  const m11 = L[0][0], m12 = L[0][1] * D[1] / D[0], m21 = L[1][0] * D[0] / D[1], m22 = L[1][1];
+  const ox = (L[0][0] * e[0] + L[0][1] * e[1] + t[0] - e[0]) / D[0];
+  const oy = (L[1][0] * e[0] + L[1][1] * e[1] + t[1] - e[1]) / D[1];
+  return { clip, canvas: [m11, m21, m12, m22, ox, oy] };
+}
+
+function latentViewProjection(lead, towards) {
+  const along = towards.reduce((a, t) => a + t.t, 0), norm = Math.max(1, along);
+  const parts = [{ v: lead.vantage, w: Math.max(0, 1 - along) / norm }, ...towards.map(t => ({ v: lead.near[t.i].vantage, w: t.t / norm }))];
+  const sum = parts.reduce((a, p) => a + p.w, 0) || 1;
+  const mix = key => parts.reduce((a, p) => a + p.w * (key === 'scale' ? Math.log(p.v.scale) : p.v[key]), 0) / sum;
+  latentCam.fov = K.fov; latentCam.aspect = K.aspect; latentCam.near = 0.05; latentCam.far = 50;
+  latentCam.updateProjectionMatrix();
+  placeCamera(latentCam, state.yaw + mix('d_yaw'), state.pitch + mix('d_pitch'), K.radius);
+  latentCam.rotateZ(mix('roll') * D2R);
+  latentCam.updateMatrixWorld(true);
+  const sc = Math.exp(mix('scale')), tx = mix('tx'), ty = mix('ty');
+  // Framing in clip space: x' = s x + 2 tx w, y' = s y - 2 ty w (frame fractions, y down).
+  latentFrame.set(sc, 0, 0, 2 * tx, 0, sc, 0, -2 * ty, 0, 0, 1, 0, 0, 0, 0, 1);
+  latentAngles.dYaw = mix('d_yaw'); latentAngles.dPitch = mix('d_pitch');
+  latentVP = latentFrame.clone().multiply(latentCam.projectionMatrix).multiply(latentCam.matrixWorldInverse);
+  return latentVP;
+}
+
+// The rig's skeleton, seen from the current camera (or, in Neuromation, from the latent vantage
+// the drawings are rotating through): the pose every drawing is tied to.
+function drawSkeleton() {
+  const W = flat.width, H = flat.height, em = getComputedStyle(document.documentElement).getPropertyValue('--emerald').trim();
+  const vp = new THREE.Matrix4().multiplyMatrices(worldCam.projectionMatrix, worldCam.matrixWorldInverse);
+  const at = v => { const p = v.clone().applyMatrix4(vp); return [(p.x + 1) / 2 * W, (1 - p.y) / 2 * H]; };
+  ctx.lineWidth = Math.max(2, W / 300);
+  ctx.strokeStyle = em; ctx.fillStyle = em;
+  for (const b of skeleton) {
+    const [x, y] = at(b.pos);
+    if (b.parent >= 0) { const [px, py] = at(skeleton[b.parent].pos); ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke(); }
+    ctx.beginPath(); ctx.arc(x, y, ctx.lineWidth * 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+const keyName = k => `y${String(k.yaw).padStart(3, '0')} p${k.pitch}`;
+
+function updateSheet(around, onKey, towards) {
+  $('hint').textContent = K.loaded < K.keys.length
+    ? `Loading key drawings, nearest first: ${K.loaded} of ${K.keys.length}`
+    : anim.shown ? 'WASD to walk · Drag to orbit · Arrow keys step drawn angles · , . step frames'
+    : 'WASD to walk · Drag to orbit · Arrow keys step to the next key';
+  $('yaw').textContent = Math.round(state.yaw);
+  $('pitch').textContent = Math.round(state.pitch);
+  const chip = $('state');
+  const vtShown = vtuberOn() && !anim.shown;
+  chip.textContent = vtShown ? 'VTuber idle' : anim.shown ? `${animTitle(anim.shown.name)} frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
+  chip.classList.toggle('key', onKey);
+  const lead = around[0].key;
+  showKeyId(anim.shown
+    ? { id: `${anim.shown.name}/f${String(anim.shown.n).padStart(2, '0')}/y${anim.shown.angle.yaw}/p${anim.shown.angle.pitch}`, exact: angleBetween(dirOf(state.yaw, state.pitch), anim.shown.angle.dir) < 0.25 }
+    : { id: `still/y${around[0].key.yaw}/p${around[0].key.pitch}`, exact: onKey });
+  if (vtShown) {
+    $('weights').innerHTML = `<li class="lead"><span>${keyName(around[0].key)}</span><span class="role">Held and posed from the rig's hips, chest, neck and head bones</span><span class="pct">${around[0].angle.toFixed(1)}° away</span></li>`;
+    drawRadar([{ key: around[0].key }]);
+    showAnim();
+    saveView();
+    return;
+  }
+  if (anim.shown) {
+    const a = anim.shown.angle;
+    $('weights').innerHTML = `<li class="lead"><span>${anim.shown.name} y${a.yaw} p${a.pitch}</span><span class="role">${anim.data.face ? `Face edit of the key drawing (${anim.data.expressions[sheetFrame(anim.shown.n)].replace('_', ' ')})` : `Nearest of ${anim.data.angles.length} drawn ${anim.shown.name} angles`}</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
+    drawRadar([{ key: a }]);
+    showAnim();
+    saveView();
+    return;
+  }
+  const rows = [{ key: lead, role: onKey ? 'Shown as drawn' : { neuro: 'Painted on the latent shape', walsh: 'Low sequency blended, lines lead', projected: 'Bent to this angle', flipstretch: 'Stretched to this angle', flipbook: 'Held' }[state.mode], note: `${around[0].angle.toFixed(1)}° away`, lead: true }];
+  if (!onKey && state.mode === 'walsh' && around[1]) {
+    const tt = around[0].angle / (around[0].angle + around[1].angle);
+    rows[0].note = `${Math.round((1 - tt) * 100)}% weight`;
+    rows.push({ key: around[1].key, role: tt > 0.5 - 0.5 * state.handover ? 'Taking over the lines' : 'Blended into shape and shading', note: `${Math.round(tt * 100)}% weight` });
+  } else if (!onKey && state.mode === 'neuro') {
+    for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
+    if (around[1]) rows.push({ key: around[1].key, role: 'Fills torn or hidden parts', note: `${around[1].angle.toFixed(1)}° away` });
+  } else if (!onKey && state.mode === 'flipstretch') {
+    for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Stretching toward', note: `${Math.round(t.t * 100)}% there` });
+  } else if (!onKey && state.mode === 'projected') {
+    for (const a of around.slice(1)) rows.push({ key: a.key, role: 'Fills hidden surfaces', note: `${a.angle.toFixed(1)}° away` });
+  }
+  $('weights').innerHTML = rows.map(r => `<li class="${r.lead ? 'lead' : ''}"><span>${keyName(r.key)}</span><span class="role">${r.role}</span><span class="pct">${r.note}</span></li>`).join('');
+  drawRadar(rows);
+  saveView();
+}
+function saveView() {
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, handover: state.handover, room: state.room, backdrop: state.backdrop, anim: state.anim, playing: state.playing })); } catch {}
+}
+
+const radar = $('radar'), rctx = radar.getContext('2d');
+const RADAR = { padX: 14, padY: 16 };
+function radarPos(yaw, pitch) {
+  const w = radar.width - RADAR.padX * 2, h = radar.height - RADAR.padY * 2;
+  return [RADAR.padX + (yaw / 360) * w, RADAR.padY + ((K.maxPitch - pitch) / (K.maxPitch - K.minPitch || 1)) * h];
+}
+function drawRadar(rows) {
+  const css = getComputedStyle(document.documentElement);
+  const ink = css.getPropertyValue('--ink').trim(), muted = css.getPropertyValue('--muted').trim();
+  const rule = css.getPropertyValue('--rule').trim(), em = css.getPropertyValue('--emerald').trim();
+  rctx.clearRect(0, 0, radar.width, radar.height);
+  for (const p of new Set(K.keys.map(k => k.pitch))) {
+    const [, y] = radarPos(0, p);
+    rctx.strokeStyle = rule; rctx.lineWidth = 2;
+    rctx.beginPath(); rctx.moveTo(RADAR.padX, y); rctx.lineTo(radar.width - RADAR.padX, y); rctx.stroke();
+  }
+  const walkMap = state.anim && anim.data;
+  for (const k of K.keys) {
+    const [x, y] = radarPos(k.yaw, k.pitch);
+    rctx.globalAlpha = walkMap ? 0.2 : k.ready ? 1 : 0.35;
+    rctx.fillStyle = muted; rctx.beginPath(); rctx.arc(x, y, 3.5, 0, Math.PI * 2); rctx.fill();
+  }
+  rctx.globalAlpha = 1;
+  // With an animation picked, its drawn angles are the keys.
+  if (walkMap) for (const a of anim.data.angles) {
+    const [x, y] = radarPos(a.yaw, a.pitch);
+    rctx.strokeStyle = em; rctx.lineWidth = 2.5;
+    rctx.beginPath(); rctx.arc(x, y, 6, 0, Math.PI * 2); rctx.stroke();
+  }
+  rows.forEach((r, i) => {
+    const [x, y] = radarPos(r.key.yaw, r.key.pitch);
+    rctx.beginPath(); rctx.arc(x, y, i === 0 ? 11 : 7, 0, Math.PI * 2);
+    if (i === 0) { rctx.fillStyle = em; rctx.fill(); } else { rctx.strokeStyle = em; rctx.lineWidth = 2.5; rctx.stroke(); }
+  });
+  const [cx, cy] = radarPos(state.yaw, state.pitch);
+  rctx.strokeStyle = ink; rctx.lineWidth = 2.5;
+  rctx.beginPath(); rctx.arc(cx, cy, 9, 0, Math.PI * 2); rctx.stroke();
+  rctx.beginPath(); rctx.moveTo(cx - 15, cy); rctx.lineTo(cx + 15, cy); rctx.moveTo(cx, cy - 15); rctx.lineTo(cx, cy + 15); rctx.stroke();
+}
+
+function jumpTo(k) {
+  if (k.file && !k.ready) fetchKey(k);
+  state.yaw = k.yaw; state.pitch = k.pitch; state.spin = false; $('spin').checked = false;
+  dirty = true;
+}
+radar.addEventListener('click', e => {
+  const r = radar.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (radar.width / r.width), y = (e.clientY - r.top) * (radar.height / r.height);
+  jumpTo((state.anim && anim.data ? anim.data.angles : K.keys).reduce((best, k) => {
+    const [kx, ky] = radarPos(k.yaw, k.pitch), [bx, by] = radarPos(best.yaw, best.pitch);
+    return Math.hypot(kx - x, ky - y) < Math.hypot(bx - x, by - y) ? k : best;
+  }));
+});
+
+function setMode(mode) {
+  state.mode = mode;
+  for (const b of document.querySelectorAll('.modes button')) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+  $('mode-note').textContent = NOTES[mode];
+  $('relief-row').hidden = mode !== 'neuro' && mode !== 'walsh';
+  $('handover-row').hidden = mode !== 'walsh';
+  dirty = true;
+}
+for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+$('spin').checked = state.spin;
+// One key ID for every drawing, still or animated: still/y045/p15, walk/f06/y135/p15. The same IDs
+// name drawings in scripts/redraw.mjs, and #<ID> after the page address opens one.
+function showKeyId({ id, exact }) {
+  $('keyid').textContent = id;
+  $('keyid-label').textContent = exact ? 'Drawing' : 'Nearest drawing';
+}
+$('copy-key').addEventListener('click', async () => {
+  const b = $('copy-key');
+  try { await navigator.clipboard.writeText($('keyid').textContent); b.textContent = 'Copied'; }
+  catch { getSelection().selectAllChildren($('keyid')); b.textContent = 'Selected'; }
+  setTimeout(() => { b.textContent = 'Copy ID'; }, 1400);
+});
+function openKey(id) {
+  const m = /^(\w+)\/(?:f(\d+)\/)?y(-?[\d.]+)\/p(-?[\d.]+)$/.exec(decodeURIComponent(id).trim());
+  if (!m) return false;
+  state.yaw = Number(m[3]); state.pitch = Number(m[4]); state.spin = false; $('spin').checked = false;
+  state.anim = ANIMS.includes(m[1]) ? m[1] : '';
+  if (state.anim) {
+    const go = () => setFrame(Number(m[2] || 0));
+    anim.data ? go() : (anim.pending = { name: state.anim, go });
+  }
+  showAnim();
+  dirty = true;
+  return true;
+}
+addEventListener('hashchange', () => openKey(location.hash.slice(1)));
+
+function showAnim() {
+  for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b.dataset.anim === state.anim));
+  const on = !!(state.anim && anim.data) || state.anim === 'vtuber';
+  $('scrub').setAttribute('aria-disabled', String(!on));
+  $('play').textContent = state.playing ? 'Pause' : 'Play';
+  $('frame').hidden = state.anim === 'vtuber';
+  if (state.anim === 'vtuber') { $('frame-out').textContent = 'live, follows the pointer'; return; }
+  if (!anim.data) return;
+  $('frame').max = anim.data.frames;
+  const n = animFrame() + 1;
+  $('frame').value = n;
+  $('frame-out').textContent = `f${String(n - 1).padStart(2, '0')} · ${n} of ${anim.data.frames}`;
+}
+function setFrame(n) {
+  const d = anim.data, f = ((n % d.frames) + d.frames) % d.frames;
+  anim.t = f / d.frames * d.duration;
+  state.playing = false;
+  showAnim();
+  dirty = true;
+}
+for (const b of document.querySelectorAll('.seg button')) b.addEventListener('click', () => {
+  state.anim = b.dataset.anim;
+  // Face animations are drawn for the forward-facing keys only: bring the camera to the nearest
+  // one if it is elsewhere.
+  const d = anim.data;
+  if (d?.face) {
+    const here = dirOf(state.yaw, state.pitch);
+    const near = d.angles.reduce((a, c) => angleBetween(here, c.dir) < angleBetween(here, a.dir) ? c : a);
+    if (angleBetween(here, near.dir) > 0.25) jumpTo(near);
+  }
+  if (d) $('frame').max = d.frames;
+  showAnim();
+  dirty = true;
+});
+$('play').addEventListener('click', () => { state.playing = !state.playing; showAnim(); dirty = true; });
+$('frame').addEventListener('input', e => setFrame(+e.target.value - 1));
+showAnim();
+$('skeleton').checked = state.skeleton;
+const showRelief = () => { $('relief').value = state.relief; $('relief-out').textContent = `${Math.round(state.relief * 100)}%`; };
+showRelief();
+$('relief').addEventListener('input', e => { state.relief = +e.target.value; showRelief(); dirty = true; });
+const showHandover = () => { $('handover').value = state.handover; $('handover-out').textContent = `${Math.round(state.handover * 100)}%`; };
+showHandover();
+$('handover').addEventListener('input', e => { state.handover = +e.target.value; showHandover(); dirty = true; });
+$('skeleton').addEventListener('change', e => { state.skeleton = e.target.checked; dirty = true; });
+const showRoom = () => { $('room').checked = state.room; $('roomgl').hidden = !state.room; };
+showRoom();
+$('room').addEventListener('change', e => { state.room = e.target.checked; showRoom(); dirty = true; });
+$('backdrop').value = state.backdrop;
+$('backdrop').addEventListener('change', e => { if (roomScene) setBackdrop(e.target.value); else state.backdrop = e.target.value; saveView(); });
+$('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
+
+// Below the lowest ring there are no drawings; above the highest the top ring's drawings carry on
+// a little, short of straight overhead.
+const clampPitch = p => THREE.MathUtils.clamp(p, LANDSCAPE ? 3 : K.minPitch, Math.min(K.maxPitch + 5, 85));
+let drag = null;
+viewportEl.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY, yaw: state.yaw, pitch: state.pitch };
+  viewportEl.setPointerCapture(e.pointerId);
+  viewportEl.classList.add('dragging');
+});
+viewportEl.addEventListener('pointermove', e => {
+  if (!drag || !K) return;
+  state.yaw = (((drag.yaw - (e.clientX - drag.x) * 0.45) % 360) + 360) % 360;
+  state.pitch = clampPitch(drag.pitch + (e.clientY - drag.y) * 0.3);
+  dirty = true;
+});
+const endDrag = () => { drag = null; viewportEl.classList.remove('dragging'); };
+viewportEl.addEventListener('pointerup', endDrag);
+viewportEl.addEventListener('pointercancel', endDrag);
+stageEl.addEventListener('keydown', e => {
+  if (!K) return;
+  // , and . step through animation frames.
+  if ((e.key === ',' || e.key === '.') && anim.shown) { e.preventDefault(); setFrame(animFrame() + (e.key === '.' ? 1 : -1)); return; }
+  const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+  if (!move) return;
+  e.preventDefault();
+  // Arrow keys land on key angles so each press shows a finished drawing: the next key around the
+  // current ring, or the nearest key on the next ring up or down.
+  // With an animation showing, the arrows step through its drawn angles: around the ring, or to
+  // the nearest angle on the next ring up or down.
+  if (anim.shown) {
+    const cur = anim.shown.angle, all = anim.data.angles;
+    let pool;
+    if (move[0]) {
+      pool = all.filter(a => a.pitch === cur.pitch && a !== cur)
+        .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+    } else {
+      const rings = [...new Set(all.map(a => a.pitch))].sort((a, b) => a - b);
+      const next = rings[rings.indexOf(cur.pitch) + move[1]];
+      if (next === undefined) return;
+      pool = all.filter(a => a.pitch === next).map(k => ({ k, d: angleBetween(k.dir, cur.dir) })).sort((a, b) => a.d - b.d);
+    }
+    if (pool.length) jumpTo(pool[0].k);
+    return;
+  }
+  const cur = lead || K.keys[0];
+  let pool;
+  if (move[0]) {
+    pool = K.keys.filter(k => k.pitch === cur.pitch && k !== cur)
+      .map(k => ({ k, d: (((k.yaw - cur.yaw) * move[0]) % 360 + 360) % 360 })).sort((a, b) => a.d - b.d);
+  } else {
+    const rings = [...new Set(K.keys.map(k => k.pitch))].sort((a, b) => a - b);
+    const next = rings[rings.indexOf(cur.pitch) + move[1]];
+    if (next === undefined) return;
+    pool = K.keys.filter(k => k.pitch === next).map(k => ({ k, d: angleBetween(k.dir, cur.dir) })).sort((a, b) => a.d - b.d);
+  }
+  if (pool.length) jumpTo(pool[0].k);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
+new MutationObserver(() => { dirty = true; }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+load().then(init).then(() => { if (location.hash.length > 1) openKey(location.hash.slice(1)); }).catch(err => {
+  $('loading').innerHTML = `<div class="error">The viewer could not start: ${err.message}. Reload the page to try again.</div>`;
+  console.error(err);
+});
+</script>
