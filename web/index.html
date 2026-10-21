@@ -839,7 +839,7 @@ function makeRoom(floorY) {
 // texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
 // with her heading; the ground moves under her as she walks.
 const scenes = {};
-const props = [];
+const props = [], mounds = [];
 let frontRenderer = null;
 // Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
 function aimProps() {
@@ -968,6 +968,25 @@ function makeBliss(floorY) {
   const g = new THREE.Mesh(geo, grassMat);
   g.position.set(K.target[0], floorY, K.target[2]);
   ground.add(g);
+  // Painted mounds: a hill sprite in the painting's style stands on each distant mound, facing the
+  // camera, its base fading into the meadow and its ridge softening into the sky (scripts/mounds.py).
+  fetch('mounds.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(list => {
+    if (!list?.length) return;
+    const mats = list.map(m => new THREE.MeshBasicMaterial({ map: tex(versioned(m.sheet, m.v)), transparent: true, depthWrite: false, fog: true }));
+    for (let i = 0; i < 13; i++) {
+      const a = (i / 13) * Math.PI * 2 + 0.31 * Math.sin(i * 7.3), r = 120 + 45 * ((i * 0.618) % 1);
+      const k = i % list.length, wdt = 38 + 30 * ((i * 0.382) % 1), hgt = wdt / list[k].aspect;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const card = new THREE.Mesh(new THREE.PlaneGeometry(wdt, hgt), mats[k]);
+      // Base well into the ground so the faded lower part sits in the meadow.
+      card.position.set(K.target[0] + x, floorY + height(x, z) - 0.32 * hgt + hgt / 2, K.target[2] + z);
+      card.userData.mound = true;
+      card.renderOrder = 1;
+      ground.add(card);
+      mounds.push(card);
+    }
+    dirty = true;
+  }).catch(() => {});
   roomWorld.add(ground);
   // Ground props: drawn rocks, bushes and grass tufts scattered round her (see scripts/props.py).
   fetch('props.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(P => {
@@ -1027,10 +1046,12 @@ function renderRoom() {
     K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
   // The far horizon turns with her but never comes nearer.
   if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.copy(roomCam.position); }
-  const bliss = state.backdrop === 'bliss' && props.length;
+  const bliss = state.backdrop === 'bliss' && props.length, w = new THREE.Vector3();
   if (bliss) aimProps();
+  // Mound cards turn about their upright axis to face the camera.
+  if (state.backdrop === 'bliss') for (const m of mounds) { m.getWorldPosition(w); m.lookAt(roomCam.position.x, w.y, roomCam.position.z); }
   // Props nearer the camera than her are drawn again on a canvas in front of her.
-  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion), w = new THREE.Vector3();
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion);
   const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
   const front = bliss ? props.filter(m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15) : [];
   roomRenderer.render(roomScene, roomCam);
