@@ -82,12 +82,13 @@ def bfl_edit(png_bytes, prompt, model, key, seed):
                 if r['status'] not in ('Pending', 'Processing', 'Queued'):
                     raise RuntimeError(r['status'])
         except urllib.error.HTTPError as e:
-            if e.code in (400, 401, 402, 403, 422):
+            if e.code in (400, 401, 402, 403, 422) or attempt == 3:
                 raise
         except Exception:
             if attempt == 3:
                 raise
-        time.sleep(2 ** attempt)
+        time.sleep(2 ** (attempt + 1))  # rate limits (429) and dropped connections get a few retries
+    raise RuntimeError('no result after 4 attempts')
 
 
 def head_square(k, view, manifest, bones, fit, size):
