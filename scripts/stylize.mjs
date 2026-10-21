@@ -14,6 +14,9 @@
 // under 512x512, so references are shrunk to fit; it draws at --size (default 832x1248, the
 // renders' 2:3).
 //
+// --model bfl:flux-2-klein-4b (or any bfl:<endpoint>) draws on Black Forest Labs' own API
+// (BFL_API_KEY), with full-size references (up to 4) and --safety (0 strictest .. 7, default 2).
+//
 // Animations (a renders manifest with frames > 1) need drawings that hold still from frame to frame,
 // or line art boils. With --stills, each frame is drawn with two extra references: the still key
 // drawing nearest its camera angle (identity and details at this angle) and the previous frame from
@@ -45,6 +48,7 @@ const { values: opt } = parseArgs({
     stills: { type: 'string' },
     size: { type: 'string', default: '832x1248' }, // Cloudflare models only
     seed: { type: 'string' },
+    safety: { type: 'string', default: '2' }, // BFL models only
   },
 });
 
@@ -197,8 +201,47 @@ async function generateCloudflare(view, images) {
   }
 }
 
+async function generateBfl(view, images) {
+  const key = process.env.BFL_API_KEY;
+  if (!key) throw new Error('OpenRouter 401: set BFL_API_KEY');
+  const [width, height] = opt.size.split('x').map(Number);
+  const refs = images.slice(0, 4);
+  const order = refs.map((img, i) => `Image ${i + 1} is the ${img.label}.`).join(' ');
+  const body = {
+    // FLUX likes to stand figures on a floor with a cast shadow, which the cut-out would keep.
+    prompt: `${order}\nNO SHADOW: the figure floats on a perfectly flat, even chroma background. No cast shadow, no floor, no ground contact shadow under the shoes.\n${buildPrompt(view, refs.some(i => i.label.startsWith('FRONT ANCHOR')))}\nRemember: ${describeView(view).facing}. No shadow under her.`,
+    width, height, output_format: 'png', safety_tolerance: Number(opt.safety),
+    ...(opt.seed ? { seed: Number(opt.seed) } : {}),
+  };
+  refs.forEach((img, i) => { body[i ? `input_image_${i + 1}` : 'input_image'] = img.url.slice(img.url.indexOf(',') + 1); });
+  const headers = { accept: 'application/json', 'content-type': 'application/json', 'x-key': key };
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`https://api.bfl.ai/v1/${opt.model.slice(4)}`, { method: 'POST', headers, body: JSON.stringify(body) });
+    const job = await res.json().catch(() => null);
+    if (!res.ok || !job?.polling_url) {
+      const err = JSON.stringify(job?.detail ?? job).slice(0, 300);
+      if ([400, 401, 402, 403, 404, 422].includes(res.status) || attempt >= 4) throw new Error(`OpenRouter ${res.status === 422 ? 400 : res.status}: BFL: ${err}`);
+      await new Promise(r => setTimeout(r, 2 ** attempt * 1000));
+      continue;
+    }
+    for (;;) {
+      await new Promise(r => setTimeout(r, 700));
+      const r = await (await fetch(job.polling_url, { headers })).json();
+      if (r.status === 'Ready') {
+        totalCost += (job.cost ?? 0) / 100; // credits are cents
+        return r.result.sample;
+      }
+      if (r.status === 'Pending' || r.status === 'Processing' || r.status === 'Queued') continue;
+      // Moderated or failed: moderation won't change on a retry, other failures might.
+      if (/moderat/i.test(r.status) || attempt >= 4) throw new Error(`BFL: ${r.status}${r.details ? ` ${JSON.stringify(r.details)}` : ''}`);
+      break;
+    }
+  }
+}
+
 async function generate(view, images) {
   if (opt.model.startsWith('@cf/')) return generateCloudflare(view, images);
+  if (opt.model.startsWith('bfl:')) return generateBfl(view, images);
   for (let attempt = 1; ; attempt++) {
     const [route, body] = requestFor(view, images);
     const headers = { 'content-type': 'application/json', 'x-title': 'makeanimereal' };
