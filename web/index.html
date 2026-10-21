@@ -1068,14 +1068,50 @@ function poseVtuber(k) {
   const pos = vt.mesh.geometry.attributes.position.array, { cols, rows } = vt;
   // The neck pivot moves with the upper body.
   const neckT = rot(neck[0], neck[1] - breath, hip[0], hip[1], sway);
+  // Arms: each swings gently about its shoulder, the forearm a little more about the elbow, out of
+  // step with each other. Only pixels close to the arm's bones follow (the drawing has nothing
+  // behind the arm, so the swing stays small).
+  const arms = ['Left', 'Right'].map((side, i) => {
+    const S = B[`${side}Arm`], E = B[`${side}ForeArm`], Wr = B[`${side}Hand`], T = B[`${side}HandMiddle4`];
+    if (!S || !E || !Wr) return null;
+    const L = Math.hypot((E[0] - S[0]) * a, E[1] - S[1]);
+    const phase = t * 2 * Math.PI / 3.8 + (i ? Math.PI * 0.85 : 0);
+    const sideSign = (S[0] - hip[0]) > 0 ? 1 : -1;  // swing outward-and-back is mirrored per side
+    return { S, E, Wr, T: T || Wr, L, upper: 3.2 * Math.sin(phase) * sideSign * Math.PI / 180,
+             fore: 2.4 * Math.sin(phase - 0.6) * sideSign * Math.PI / 180, sT: rot(S[0], S[1] - breath, hip[0], hip[1], sway) };
+  }).filter(Boolean);
+  // Distance (in arm lengths) from a point to a segment, and how far along it the closest point is.
+  const toSeg = (x, y, P, Q, L) => {
+    const px = (x - P[0]) * a, py = y - P[1], qx = (Q[0] - P[0]) * a, qy = Q[1] - P[1], qq = qx * qx + qy * qy || 1;
+    const u = Math.min(1, Math.max(0, (px * qx + py * qy) / qq));
+    return [Math.hypot(px - u * qx, py - u * qy) / L, u];
+  };
   for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
     const v = j * (cols + 1) + i;
     let x = k.ox + (i / cols) * k.s, y = k.oy + (j / rows) * k.s;
     const wT = smooth((hip[1] - y) / (hip[1] - chest[1]));
     const wH = smooth((neck[1] + 0.5 * hn - y) / hn) * Math.exp(-(Math.max(0, Math.abs((x - head[0]) * a) / headLen - 1.4) ** 2) / 0.3);
+    // Arm weights, measured on the drawing as drawn.
+    const armW = arms.map(A => {
+      const [d1, u1] = toSeg(x, y, A.S, A.E, A.L), [d2] = toSeg(x, y, A.E, A.Wr, A.L), [d3] = toSeg(x, y, A.Wr, A.T, A.L);
+      const d = Math.min(d1, d2, d3);
+      // Full weight within the arm's thickness, fading out just beyond it; none at the shoulder itself.
+      const near = 1 - smooth((d - 0.17) / 0.16);
+      const along = d1 <= Math.min(d2, d3) ? smooth(u1 / 0.35) : 1;
+      const fore = Math.min(d2, d3) < d1 ? 1 : smooth((u1 - 0.75) / 0.25);
+      return { w: near * along, fore: near * fore };
+    });
     // Upper body: breathe (lift), then sway about the hips.
     y -= breath * wT;
     [x, y] = rot(x, y, hip[0], hip[1], sway * wT);
+    // Arms swing about the (swayed) shoulders; forearms add a little about the elbow.
+    arms.forEach((A, i) => {
+      const { w, fore } = armW[i];
+      if (w <= 0.001) return;
+      const eT = rot(...rot(A.E[0], A.E[1] - breath, hip[0], hip[1], sway), A.sT[0], A.sT[1], A.upper);
+      [x, y] = rot(x, y, A.sT[0], A.sT[1], A.upper * w);
+      if (fore > 0.001) [x, y] = rot(x, y, eT[0], eT[1], A.fore * fore * w);
+    });
     // Head: tilt about the (swayed) neck, turn and nod.
     if (wH > 0) {
       const r = rot(x, y, neckT[0], neckT[1], tilt * wH);
