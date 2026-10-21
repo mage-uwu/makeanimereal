@@ -839,7 +839,7 @@ function makeRoom(floorY) {
 // texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
 // with her heading; the ground moves under her as she walks.
 const scenes = {};
-const props = [], rocks3d = [];
+const props = [], rocks3d = [], fgGrass = [];
 let frontRenderer = null;
 // Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
 function aimProps() {
@@ -1072,7 +1072,7 @@ function makeBliss(floorY) {
     const kinds = Object.entries(P).map(([name, p]) => {
       const tex = loader.load(versioned(p.sheet, p.v), () => { dirty = true; });
       tex.colorSpace = THREE.SRGBColorSpace;
-      return { name, ...p, tex, count: { grass: 70, bush: 8, rock: 0 }[name] ?? 10 };
+      return { name, ...p, tex, count: { grass: 0, bush: 8, rock: 0 }[name] ?? 10 };
     });
     let n = 0;
     const rnd = () => { n = (n * 9301 + 49297) % 233280; return n / 233280; };
@@ -1090,94 +1090,88 @@ function makeBliss(floorY) {
     }
     dirty = true;
   }).catch(() => {});
-  // 3D rocks, painted the way anime backgrounds paint them: big flat planes, a warm lit tone, a mid
-  // stone tone and cool blue-violet shadow with a hard edge between them, moss as solid painted
-  // shapes on the planes facing up, a touch of the hills' brushwork, and a dark violet outline.
+  // 3D rocks with painted stone: smooth boulders wrapped (triplanar) in a hand-painted stone
+  // texture in the Bliss style, lit softly the way a background painter would: warm on the lit
+  // side, cool lilac in shadow, a soft edge between, darker where they sit in the grass, soft moss
+  // on top, and a thin dark outline.
   let rs = 5;
   const rr = () => { rs = (rs * 16807) % 2147483647; return rs / 2147483647; };
-  const SUN = new THREE.Vector3(4, 11, 3).normalize();  // the scene's sun, raised: anime rocks are lit mostly from above
+  const SUN = new THREE.Vector3(4, 11, 3).normalize();
+  const stoneTex = tex('scene/rock-tex.webp');
   const rockMat = () => new THREE.ShaderMaterial({
     fog: true,
     uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
-      uRot: { value: new THREE.Matrix3() }, uSun: { value: SUN }, uPaint: { value: grassMat.uniforms.uHill.value },
-      uLit: { value: new THREE.Color('#e4dcc8') }, uMid: { value: new THREE.Color('#b3ada0') }, uShadow: { value: new THREE.Color('#96939f') },
-      uMossLit: { value: new THREE.Color('#a8d84e') }, uMossShadow: { value: new THREE.Color('#4f8f4a') },
+      uRot: { value: new THREE.Matrix3() }, uSun: { value: SUN }, uStone: { value: stoneTex }, uMossTex: { value: grassMat.uniforms.uHill.value },
+      uLit: { value: new THREE.Color('#fff4e2') }, uShadow: { value: new THREE.Color('#b4b6d2') },
     }]),
     vertexShader: /* glsl */`
       #include <fog_pars_vertex>
       uniform mat3 uRot;
-      attribute float aMoss;
       varying vec3 vN, vP;
-      varying float vMoss;
       void main() {
-        vN = normalize(uRot * normal); vMoss = aMoss; vP = position;
+        vN = normalize(uRot * normalize(position)); vP = position;
         vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
         gl_Position = projectionMatrix * mvPosition;
         #include <fog_vertex>
       }`,
     fragmentShader: /* glsl */`
       #include <fog_pars_fragment>
-      uniform vec3 uSun, uLit, uMid, uShadow, uMossLit, uMossShadow;
-      uniform sampler2D uPaint;
+      uniform vec3 uSun, uLit, uShadow;
+      uniform sampler2D uStone, uMossTex;
       varying vec3 vN, vP;
-      varying float vMoss;
       void main() {
-        float l = dot(normalize(vN), uSun);
-        // Hard terminator: shadow / mid / lit planes, as a painter would block them in.
-        vec3 stone = l > 0.55 ? uLit : l > 0.12 ? uMid : uShadow;
-        stone *= 0.9 + 0.14 * clamp(l, 0.0, 1.0);          // a soft gradient within each plane
-        vec3 moss = l > 0.25 ? uMossLit : uMossShadow;
-        vec3 c = mix(stone, moss, step(0.5, vMoss));
-        // A whisper of the hills' brushwork across the planes.
-        float paint = dot(texture2D(uPaint, vP.xz * 0.9 + vP.y * 0.4).rgb, vec3(0.3, 0.59, 0.11)) / 0.32;
-        c *= mix(0.84, 1.1, clamp(paint, 0.0, 1.0));
-        // Darker toward the base, where it sits in the grass.
-        c *= mix(0.72, 1.0, smoothstep(-0.7, 0.35, vP.y));
+        vec3 n = normalize(vN), w = pow(abs(n), vec3(4.0));
+        w /= w.x + w.y + w.z;
+        vec3 stone = texture2D(uStone, vP.zy * 0.7).rgb * w.x + texture2D(uStone, vP.xz * 0.7).rgb * w.y + texture2D(uStone, vP.xy * 0.7).rgb * w.z;
+        float l = dot(n, uSun);
+        vec3 c = stone * 1.18 * mix(uShadow, uLit, smoothstep(-0.05, 0.4, l));
+        // Moss on top, with a soft painted edge.
+        float mossy = smoothstep(0.45, 0.75, n.y + 0.25 * sin(vP.x * 5.0) * sin(vP.z * 4.3));
+        vec3 moss = texture2D(uMossTex, vP.xz * 0.5).rgb * mix(vec3(0.75, 0.9, 0.8), vec3(1.15, 1.1, 0.85), smoothstep(-0.05, 0.4, l));
+        c = mix(c, moss, mossy * 0.9);
+        c *= mix(0.68, 1.0, smoothstep(-0.7, 0.3, vP.y));
         gl_FragColor = vec4(c, 1.0);
         #include <colorspace_fragment>
         #include <fog_fragment>
       }`,
   });
   for (let i = 0; i < 9; i++) {
-    // Low detail, so the rock reads as a few big planes; then split so every face is flat.
-    const g = new THREE.IcosahedronGeometry(1, 2);
-    const p0 = g.attributes.position, v = new THREE.Vector3();
-    const bumps = Array.from({ length: 6 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.12 + 0.3 * rr()]);
-    const flat = 0.85 + 0.35 * rr(), stretch = 1 + 0.3 * rr();
-    const moved = new Map();
+    const g = new THREE.IcosahedronGeometry(1, 4), p0 = g.attributes.position, v = new THREE.Vector3();
+    const bumps = Array.from({ length: 7 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.1 + 0.25 * rr()]);
+    const flat = 0.7 + 0.3 * rr(), stretch = 1 + 0.35 * rr();
     for (let j = 0; j < p0.count; j++) {
       v.fromBufferAttribute(p0, j);
-      const key = `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
-      if (!moved.has(key)) {
-        let r = 0.92 + 0.16 * rr();
-        for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
-        moved.set(key, [v.x * r * stretch, Math.max(v.y * r * flat, -0.25), v.z * r]);
-      }
-      p0.setXYZ(j, ...moved.get(key));
+      let r = 1;
+      for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
+      p0.setXYZ(j, v.x * r * stretch, v.y * r * flat, v.z * r);
     }
-    // (Icosahedron geometry is already one vertex per face corner, so the faces come out flat.)
-    g.computeVertexNormals();
-    const pos = g.attributes.position, nrm = g.attributes.normal, moss = new Float32Array(pos.count);
-    for (let f = 0; f < pos.count; f += 3) {
-      const up = nrm.getY(f), cx = (pos.getX(f) + pos.getX(f + 1) + pos.getX(f + 2)) / 3, cz = (pos.getZ(f) + pos.getZ(f + 1) + pos.getZ(f + 2)) / 3;
-      const m = up > 0.55 && Math.sin(cx * 3.1 + i) * Math.cos(cz * 2.7 - i) > -0.35 ? 1 : 0;
-      moss[f] = moss[f + 1] = moss[f + 2] = m;
-    }
-    g.setAttribute('aMoss', new THREE.BufferAttribute(moss, 1));
     const rock = new THREE.Group();
     const mat = rockMat();
     rock.add(new THREE.Mesh(g, mat));
-    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#33303f', side: THREE.BackSide }));
-    hull.scale.setScalar(1.03);
+    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#3b3a4c', side: THREE.BackSide }));
+    hull.scale.setScalar(1.02);
     rock.add(hull);
     const size = 0.25 + 0.75 * rr() ** 1.5, a = rr() * Math.PI * 2, d = 2.6 + 9 * rr();
     rock.scale.setScalar(size);
     rock.rotation.y = rr() * Math.PI * 2;
-    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.62, K.target[2] + Math.sin(a) * d);
+    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.55, K.target[2] + Math.sin(a) * d);
     rock.updateMatrix();
     mat.uniforms.uRot.value.setFromMatrix4(new THREE.Matrix4().extractRotation(rock.matrix));
     ground.add(rock);
     rocks3d.push(rock);
+  }
+  // Foreground grass: painted clumps in the painting's own foreground style, upright billboards.
+  const clumpTex = ['a', 'b', 'c'].map(n => tex(`scene/fg-grass-${n}.webp`));
+  const clumpAspect = [512 / 226, 512 / 188, 338 / 512];
+  for (let i = 0; i < 70; i++) {
+    const k = i % 7 === 0 ? 2 : i % 2, sz = (k === 2 ? 0.55 : 0.5) * (0.6 + 0.8 * rr());
+    const r = 1.4 + 15 * Math.pow(rr(), 1.5), a = rr() * Math.PI * 2;
+    const w = k === 2 ? sz * clumpAspect[2] : sz * clumpAspect[k] * 0.55, h = k === 2 ? sz : sz * 0.55;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h).translate(0, h / 2 - 0.02, 0),
+      new THREE.MeshBasicMaterial({ map: clumpTex[k], transparent: true, alphaTest: 0.3, side: THREE.DoubleSide }));
+    m.position.set(K.target[0] + Math.cos(a) * r, floorY, K.target[2] + Math.sin(a) * r);
+    ground.add(m);
+    fgGrass.push(m);
   }
   // The haze matches the painting's meadow near the horizon, so the ground melts into it.
   // Distance haze: the colour of the painting's far meadow and hills, so the terrain's last hills
@@ -1219,7 +1213,9 @@ function renderRoom() {
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion);
   const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
   const near = m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15;
-  const front = bliss ? [...props.filter(near), ...rocks3d.filter(near).flatMap(r => r.children)] : [];
+  // Grass clumps turn upright to face the camera.
+  if (state.backdrop === 'bliss') for (const m of fgGrass) { m.getWorldPosition(w); m.lookAt(roomCam.position.x, w.y, roomCam.position.z); }
+  const front = state.backdrop === 'bliss' ? [...props.filter(near), ...fgGrass.filter(near), ...rocks3d.filter(near).flatMap(r => r.children)] : [];
   roomRenderer.render(roomScene, roomCam);
   const fc = $('frontgl');
   fc.hidden = !front.length;
