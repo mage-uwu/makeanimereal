@@ -839,60 +839,52 @@ function makeRoom(floorY) {
 const scenes = {};
 const SKY_TOP = new THREE.Color('#1557d6'), SKY_HAZE = new THREE.Color('#b9d7f2');
 function makeBliss(floorY) {
-  const R = 45, ARC = 0.36;                         // painting spans 36% of the horizon
-  const loader = new THREE.TextureLoader(), sky = { value: null }, has = { value: 0 };
-  loader.load('scene/bliss-sky.webp', t => { t.colorSpace = THREE.SRGBColorSpace; t.generateMipmaps = true; sky.value = t; has.value = 1; dirty = true; });
-  const height = 2 * Math.PI * R * ARC / (1672 / 941);
-  const far = new THREE.Group();
-  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(R, R, height, 160, 1, true), new THREE.ShaderMaterial({
+  const R = 45;
+  const sky = { value: null }, has = { value: 0 }, loader = new THREE.TextureLoader();
+  loader.load('scene/bliss-sky.webp', t => { t.colorSpace = THREE.SRGBColorSpace; sky.value = t; has.value = 1; dirty = true; });
+  // The painting by direction: across half the horizon and mirrored back across the other half (no
+  // seam), its distant hill line (66% down the painting) on the true horizon, at the same angular
+  // scale both ways. Above it, open sky; below, the painted meadow carries on.
+  const far = new THREE.Mesh(new THREE.SphereGeometry(R, 96, 48), new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
-    uniforms: { uSky: sky, uHas: has, uArc: { value: ARC }, uTop: { value: SKY_TOP }, uHaze: { value: SKY_HAZE } },
-    vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    uniforms: { uSky: sky, uHas: has, uTop: { value: SKY_TOP }, uHaze: { value: SKY_HAZE }, uFloor: { value: floorY } },
+    vertexShader: /* glsl */`varying vec3 vDir; void main() { vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: /* glsl */`
-      uniform sampler2D uSky; uniform float uHas, uArc; uniform vec3 uTop, uHaze;
-      varying vec2 vUv;
+      uniform sampler2D uSky; uniform float uHas; uniform vec3 uTop, uHaze;
+      varying vec3 vDir;
+      const float PI = 3.14159265, HORIZON = 0.66, SPAN = 101.0;  // painting rows: horizon, degrees top to bottom
       void main() {
-        vec3 grad = mix(uHaze, uTop, smoothstep(0.35, 1.0, vUv.y));
-        vec3 c = grad;
+        vec3 d = normalize(vDir);
+        float az = atan(d.x, d.z) / (2.0 * PI) + 0.5;           // 0..1 round the horizon
+        float t = mod(az * 2.0 + 0.8, 2.0), x = 1.0 - abs(1.0 - t); // painting, then mirrored
+        float elev = degrees(asin(clamp(d.y, -1.0, 1.0)));
+        float row = HORIZON - elev / SPAN;                        // 0 = painting's top row
+        vec3 c = mix(uHaze, uTop, smoothstep(0.0, 40.0, elev));
         if (uHas > 0.5) {
-          // Painting across [0, uArc] of the way round (seen from inside, so x runs backwards).
-          float u = 1.0 - vUv.x;
-          if (u < uArc) c = texture2D(uSky, vec2(u / uArc, vUv.y)).rgb;
-          else {
-            // Round the back: the painting's two edge columns, softened, blended across.
-            float k = (u - uArc) / (1.0 - uArc);
-            vec3 right = textureLod(uSky, vec2(0.995, vUv.y), 5.0).rgb, left = textureLod(uSky, vec2(0.005, vUv.y), 5.0).rgb;
-            c = mix(right, left, smoothstep(0.0, 1.0, k));
-            c = mix(c, grad, 0.35 * sin(k * 3.14159));
-          }
+          vec3 p = texture2D(uSky, vec2(clamp(x, 0.002, 0.998), 1.0 - clamp(row, 0.002, 0.998))).rgb;
+          // Past the painting's top edge, fade into open sky.
+          c = row >= 0.0 ? p : mix(p, uTop, smoothstep(0.0, 0.12, -row));
         }
         gl_FragColor = vec4(c, 1.0);
         #include <colorspace_fragment>
       }`,
   }));
-  // The painting's distant hill line sits about 35% up from its bottom: put that on the horizon, and
-  // let the ground hide the painted foreground below it.
-  const below = 0.35 * height;
-  cyl.position.y = floorY + height / 2 - below;
-  cyl.renderOrder = -2;
-  far.add(cyl);
-  // Above the painting: open sky.
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(R * 1.05, 48, 16, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshBasicMaterial({ color: SKY_TOP, side: THREE.BackSide, fog: false, depthWrite: false }));
-  dome.position.y = floorY + height - below - 0.02 * height;
-  dome.renderOrder = -3;
-  far.add(dome);
+  far.renderOrder = -2;
+  const farGroup = new THREE.Group();
+  farGroup.add(far);
   const ground = new THREE.Group();
   const grassMat = new THREE.MeshBasicMaterial({ color: '#4caa2c', side: THREE.DoubleSide });
   loader.load('scene/bliss-grass.webp', t => {
-    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(60, 60); t.anisotropy = 8;
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(22, 22); t.anisotropy = 8;
     grassMat.map = t; grassMat.color.set('#ffffff'); grassMat.needsUpdate = true; dirty = true;
   });
-  const g = new THREE.Mesh(new THREE.PlaneGeometry(2 * R, 2 * R), grassMat);
+  const g = new THREE.Mesh(new THREE.CircleGeometry(R * 0.9, 96), grassMat);
   g.rotation.x = -Math.PI / 2;
   g.position.y = floorY;
   ground.add(g);
   roomWorld.add(ground);
-  return { group: ground, far, background: SKY_HAZE.clone(), fog: new THREE.Fog(SKY_HAZE, 25, 70), half: 18 };
+  // The haze matches the painting's meadow near the horizon, so the ground melts into it.
+  return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#7fb24a', 12, R * 0.85), half: 18 };
 }
 function setBackdrop(name) {
   state.backdrop = scenes[name] ? name : 'room';
@@ -922,7 +914,7 @@ function renderRoom() {
     K.target[0] - (Math.cos(h) * walker.x + Math.sin(h) * walker.z), 0,
     K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
   // The far horizon turns with her but never comes nearer.
-  if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.set(K.target[0], 0, K.target[2]); }
+  if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.copy(roomCam.position); }
   roomRenderer.render(roomScene, roomCam);
 }
 
