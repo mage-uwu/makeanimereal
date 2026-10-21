@@ -32,7 +32,7 @@ def key_id(path):
     m = re.match(r'(?:(\w+)_f(\d+)_)?y([\d.]+)_p(-?[\d.]+)$', path.stem)
     anim, frame, yaw, pitch = m.groups()
     yaw = f'{float(yaw):g}'
-    return f'{anim.lower()}/f{frame}/y{yaw}/p{pitch}' if anim else f'still/y{yaw}/p{pitch}'
+    return f'{ {"Walking": "walk"}.get(anim, anim.lower())}/f{frame}/y{yaw}/p{pitch}' if anim else f'still/y{yaw}/p{pitch}'
 
 
 def main():
