@@ -945,7 +945,16 @@ function makeBliss(floorY) {
       uniform vec3 uShade, uLit, uCrest;
       varying vec3 vPos, vColor;
       void main() {
-        vec3 near = texture2D(uGrass, vPos.xz / 4.5).rgb * vColor;
+        // Near her: the same painted brushwork as the hills, at a finer scale, in broad patches of
+        // sun and shade; a little of the meadow tile shows through for flower specks.
+        vec3 nStrokes = texture2D(uHill, vec2(vPos.x / 9.0 + 0.37 * vPos.z / 9.0, vPos.z / 3.2)).rgb;
+        float nl = dot(nStrokes, vec3(0.3, 0.59, 0.11)) / 0.32;
+        float patchy = 0.5 + 0.5 * sin(vPos.x * 0.21 + 1.3 * sin(vPos.z * 0.17)) * sin(vPos.z * 0.15 + 0.6);
+        vec3 nBase = mix(uShade, uLit * 0.92, 0.2 + 0.65 * patchy);
+        vec3 near = nBase * mix(0.5, 1.5, clamp(nl, 0.0, 1.0));
+        near = mix(near, nStrokes * (dot(nBase, vec3(0.33)) / 0.3), 0.3);
+        vec3 tile = texture2D(uGrass, vPos.xz / 4.5).rgb;
+        near = mix(near, tile, 0.18 * smoothstep(0.75, 0.95, dot(tile, vec3(0.33))) + 0.08);
         // Painted hills: the hill tile's strokes, stretched along the slopes like the painting's.
         vec3 strokes = texture2D(uHill, vec2(vPos.x / 38.0, vPos.z / 13.0)).rgb;
         float luma = dot(strokes, vec3(0.3, 0.59, 0.11)) / 0.32;
