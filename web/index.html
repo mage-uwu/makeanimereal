@@ -839,7 +839,7 @@ function makeRoom(floorY) {
 // texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
 // with her heading; the ground moves under her as she walks.
 const scenes = {};
-const props = [], mounds = [];
+const props = [];
 let frontRenderer = null;
 // Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
 function aimProps() {
@@ -926,7 +926,7 @@ function makeBliss(floorY) {
   const grassMat = new THREE.ShaderMaterial({
     side: THREE.FrontSide, fog: true, vertexColors: true,
     uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
-      uGrass: { value: null }, uHill: { value: null }, uFlat: { value: FLAT },
+      uGrass: { value: null }, uHill: { value: null }, uSkin: { value: null }, uFlat: { value: FLAT },
       uShade: { value: new THREE.Color('#2f7a24') }, uLit: { value: new THREE.Color('#9fd84a') }, uCrest: { value: new THREE.Color('#c8ec7a') },
     }]),
     vertexShader: /* glsl */`
@@ -940,7 +940,7 @@ function makeBliss(floorY) {
       }`,
     fragmentShader: /* glsl */`
       #include <fog_pars_fragment>
-      uniform sampler2D uGrass, uHill;
+      uniform sampler2D uGrass, uHill, uSkin;
       uniform float uFlat;
       uniform vec3 uShade, uLit, uCrest;
       varying vec3 vPos, vColor;
@@ -957,7 +957,16 @@ function makeBliss(floorY) {
         vec3 painted = base * mix(0.55, 1.4, clamp(luma, 0.0, 1.0)) * mix(0.84, 1.1, swath);
         // A little of the strokes' own colour (flowers, yellow highlights) shows through.
         painted = mix(painted, strokes * (dot(base, vec3(0.33)) / 0.3), 0.25);
-        float w = smoothstep(uFlat - 4.0, uFlat + 22.0, length(vPos.xz));
+        // The skin: painted hillside (the mound pictures, stitched round 360 degrees) projected onto the
+        // terrain from where she stands, by direction and elevation. The terrain's own ridges cut it,
+        // so the painting lies on the mounds, not in the sky. The slope light keeps their 3D form.
+        float r = length(vPos.xz);
+        float az = atan(vPos.z, vPos.x) / 6.2831853 + 0.5;
+        float elev = degrees(atan(vPos.y - 1.0, r));
+        vec2 suv = vec2(fract(az * 3.0), clamp((5.8 - elev) / 17.5, 0.0, 1.0));
+        vec3 skin = texture2D(uSkin, vec2(suv.x, 1.0 - suv.y)).rgb * mix(0.88, 1.08, clamp((vColor.r - 0.8) / 0.26, 0.0, 1.0));
+        painted = mix(painted, skin, 0.92);
+        float w = smoothstep(uFlat - 4.0, uFlat + 22.0, r);
         gl_FragColor = vec4(mix(near, painted, w), 1.0);
         #include <colorspace_fragment>
         #include <fog_fragment>
@@ -965,28 +974,10 @@ function makeBliss(floorY) {
   });
   grassMat.uniforms.uGrass.value = tex('scene/bliss-grass.webp');
   grassMat.uniforms.uHill.value = tex('scene/bliss-hill.webp');
+  grassMat.uniforms.uSkin.value = tex('scene/bliss-skin.webp');
   const g = new THREE.Mesh(geo, grassMat);
   g.position.set(K.target[0], floorY, K.target[2]);
   ground.add(g);
-  // Painted mounds: a hill sprite in the painting's style stands on each distant mound, facing the
-  // camera, its base fading into the meadow and its ridge softening into the sky (scripts/mounds.py).
-  fetch('mounds.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(list => {
-    if (!list?.length) return;
-    const mats = list.map(m => new THREE.MeshBasicMaterial({ map: tex(versioned(m.sheet, m.v)), transparent: true, depthWrite: false, fog: true }));
-    for (let i = 0; i < 13; i++) {
-      const a = (i / 13) * Math.PI * 2 + 0.31 * Math.sin(i * 7.3), r = 120 + 45 * ((i * 0.618) % 1);
-      const k = i % list.length, wdt = 38 + 30 * ((i * 0.382) % 1), hgt = wdt / list[k].aspect;
-      const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      const card = new THREE.Mesh(new THREE.PlaneGeometry(wdt, hgt), mats[k]);
-      // Base well into the ground so the faded lower part sits in the meadow.
-      card.position.set(K.target[0] + x, floorY + height(x, z) - 0.32 * hgt + hgt / 2, K.target[2] + z);
-      card.userData.mound = true;
-      card.renderOrder = 1;
-      ground.add(card);
-      mounds.push(card);
-    }
-    dirty = true;
-  }).catch(() => {});
   roomWorld.add(ground);
   // Ground props: drawn rocks, bushes and grass tufts scattered round her (see scripts/props.py).
   fetch('props.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(P => {
@@ -1048,8 +1039,6 @@ function renderRoom() {
   if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.copy(roomCam.position); }
   const bliss = state.backdrop === 'bliss' && props.length, w = new THREE.Vector3();
   if (bliss) aimProps();
-  // Mound cards turn about their upright axis to face the camera.
-  if (state.backdrop === 'bliss') for (const m of mounds) { m.getWorldPosition(w); m.lookAt(roomCam.position.x, w.y, roomCam.position.z); }
   // Props nearer the camera than her are drawn again on a canvas in front of her.
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion);
   const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
