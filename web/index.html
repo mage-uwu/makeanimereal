@@ -224,6 +224,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
             <button type="button" data-anim="blink" aria-pressed="false">Blink</button>
             <button type="button" data-anim="wink" aria-pressed="false">Wink</button>
             <button type="button" data-anim="talk" aria-pressed="false">Talk</button>
+            <button type="button" data-anim="vtuber" aria-pressed="false">VTuber</button>
           </div>
         </div>
         <div class="scrub" id="scrub">
@@ -950,6 +951,7 @@ function frame(t) {
   if (state.spin && !drag) { state.yaw = (state.yaw + dt * 12) % 360; dirty = true; }
   if (walker.keys.size && K) walk(dt);
   if (walking() && (state.playing || walker.keys.size)) { anim.t += dt; dirty = true; }
+  if (vtuberOn() && state.playing) { vt.t += dt; dirty = true; }
   if (dirty) { render(); dirty = false; }
   requestAnimationFrame(frame);
 }
@@ -980,17 +982,131 @@ for (const name of ANIMS) fetch(`${name}.json`, { cache: 'no-cache' }).then(r =>
   showAnim();
   dirty = true;
 }).catch(() => {});
-function walkSheet(a) {
+function walkSheet(a, all = anim.data?.angles || []) {
   if (!anim.sheets.has(a)) {
     anim.sheets.set(a, null);
     image(versioned(a.sheet, a.v)).then(img => { anim.sheets.set(a, img); dirty = true; }, () => {});
     // The rest stream in behind it, so turning never waits long.
-    for (const b of anim.data.angles) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(versioned(b.sheet, b.v)).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
+    for (const b of all) if (!anim.sheets.has(b)) { anim.sheets.set(b, null); image(versioned(b.sheet, b.v)).then(img => { anim.sheets.set(b, img); dirty = true; }, () => {}); }
   }
   return anim.sheets.get(a);
 }
 const walkCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
 const IDENTITY = new THREE.Matrix4();
+
+// VTuber: the held key drawing as a soft 2D mesh, posed Live2D-style from the rig's skeleton. Her
+// hips, chest, neck and head bones, projected into the drawing, are the pivots: the upper body
+// sways about the hips and breathes, the head tilts, nods and turns (toward the pointer, like face
+// tracking) about the neck, and the legs stay planted. Forward-facing keys also blink, using the
+// face patches. Every pixel still comes from the drawing; it is only bent.
+const vt = { t: 0, cols: 40, rows: 60, scene: null, look: new THREE.Vector2(), want: new THREE.Vector2(), blinkAt: 1.5, blinkStart: -9 };
+const vtuberOn = () => state.anim === 'vtuber' && !walker.keys.size;
+const vtCam = new THREE.PerspectiveCamera(22, 1, 0.05, 50);
+function makeVtuber() {
+  const { cols, rows } = vt, n = (cols + 1) * (rows + 1);
+  const g = new THREE.BufferGeometry(), uv = new Float32Array(n * 2), idx = [];
+  for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) { const v = j * (cols + 1) + i; uv[v * 2] = i / cols; uv[v * 2 + 1] = j / rows; }
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const a = j * (cols + 1) + i, b = a + 1, c = a + cols + 1, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  vt.canvas = document.createElement('canvas');
+  vt.ctx = vt.canvas.getContext('2d');
+  vt.tex = new THREE.CanvasTexture(vt.canvas);
+  vt.tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    uniforms: { uTex: { value: vt.tex }, uClip: { value: new THREE.Matrix4() } },
+    vertexShader: /* glsl */`
+      uniform mat4 uClip;
+      varying vec2 vUv;
+      // position.xy: frame coordinates (0..1, y down).
+      void main() { vUv = uv; gl_Position = uClip * vec4(position.x * 2.0 - 1.0, 1.0 - position.y * 2.0, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uTex;
+      varying vec2 vUv;
+      void main() {
+        vec4 s = texture2D(uTex, vec2(vUv.x, 1.0 - vUv.y));
+        if (s.a < 0.01) discard;
+        gl_FragColor = s;
+        #include <colorspace_fragment>
+      }`,
+  });
+  vt.mesh = new THREE.Mesh(g, m);
+  vt.mesh.frustumCulled = false;
+  vt.scene = new THREE.Scene();
+  vt.scene.add(vt.mesh);
+}
+// The rig's bones seen from a key's camera, in frame coordinates (0..1, y down).
+function bonesOf(k) {
+  if (k.bones) return k.bones;
+  vtCam.fov = K.fov; vtCam.aspect = K.aspect; vtCam.updateProjectionMatrix();
+  placeCamera(vtCam, k.yaw, k.pitch, K.radius);
+  const vp = new THREE.Matrix4().multiplyMatrices(vtCam.projectionMatrix, vtCam.matrixWorldInverse), B = {};
+  for (const b of skeleton) { const q = b.pos.clone().applyMatrix4(vp); B[b.name.replace('mixamorig', '')] = [(q.x + 1) / 2, (1 - q.y) / 2]; }
+  return (k.bones = B);
+}
+const smooth = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+function poseVtuber(k) {
+  const B = bonesOf(k), a = K.aspect, t = vt.t;
+  const hip = B.Hips, chest = B.Spine2, neck = B.Neck, head = B.Head, top = B.HeadTop_End;
+  const headLen = Math.hypot((top[0] - head[0]) * a, top[1] - head[1]), hn = Math.max(0.01, neck[1] - head[1]);
+  // Idle motion, plus the head turning toward the pointer.
+  vt.look.lerp(vt.want, 0.08);
+  const sway = 1.6 * Math.sin(t * 2 * Math.PI / 4.3) * Math.PI / 180;
+  const tilt = (4 * Math.sin(t * 2 * Math.PI / 3.4 + 1) - 5 * vt.look.x) * Math.PI / 180;
+  const turn = (0.35 * Math.sin(t * 2 * Math.PI / 5.1) + vt.look.x) * headLen * 0.10;
+  const nod = (0.4 * Math.sin(t * 2 * Math.PI / 2.9) + vt.look.y) * headLen * 0.05;
+  const breath = (0.5 + 0.5 * Math.sin(t * 2 * Math.PI / 3.6)) * (hip[1] - chest[1]) * 0.012;
+  const rot = (x, y, px, py, ang) => {
+    const X = (x - px) * a, Y = y - py, c = Math.cos(ang), s_ = Math.sin(ang);
+    return [px + (X * c - Y * s_) / a, py + X * s_ + Y * c];
+  };
+  const pos = vt.mesh.geometry.attributes.position.array, { cols, rows } = vt;
+  // The neck pivot moves with the upper body.
+  const neckT = rot(neck[0], neck[1] - breath, hip[0], hip[1], sway);
+  for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
+    const v = j * (cols + 1) + i;
+    let x = k.ox + (i / cols) * k.s, y = k.oy + (j / rows) * k.s;
+    const wT = smooth((hip[1] - y) / (hip[1] - chest[1]));
+    const wH = smooth((neck[1] + 0.5 * hn - y) / hn) * Math.exp(-(Math.max(0, Math.abs((x - head[0]) * a) / headLen - 1.4) ** 2) / 0.3);
+    // Upper body: breathe (lift), then sway about the hips.
+    y -= breath * wT;
+    [x, y] = rot(x, y, hip[0], hip[1], sway * wT);
+    // Head: tilt about the (swayed) neck, turn and nod.
+    if (wH > 0) {
+      const r = rot(x, y, neckT[0], neckT[1], tilt * wH);
+      x = r[0] + turn * wH / a; y = r[1] + nod * wH;
+    }
+    pos[v * 3] = x; pos[v * 3 + 1] = y;
+  }
+  vt.mesh.geometry.attributes.position.needsUpdate = true;
+  // Blinks at natural, uneven intervals (forward-facing keys have the face patches).
+  if (vt.t > vt.blinkAt) { vt.blinkStart = vt.t; vt.blinkAt = vt.t + 2 + Math.random() * 3.5; }
+  const b = anim.all.blink, face = b?.angles.find(f => f.key === k.file), since = vt.t - vt.blinkStart;
+  const frame = since < 0.08 ? 1 : since < 0.2 ? 2 : since < 0.28 ? 1 : 0;
+  const sheet = face ? walkSheet(face, b.angles) : null;
+  const want = `${k.file} ${frame} ${sheet ? 1 : 0}`;
+  if (vt.drawn !== want) {
+    vt.drawn = want;
+    vt.canvas.width = k.img.naturalWidth || k.img.width; vt.canvas.height = k.img.naturalHeight || k.img.height;
+    vt.ctx.drawImage(k.img, 0, 0);
+    if (frame && sheet) {
+      const P = b.patch, [cx, cy, cw, ch] = face.crop, W = vt.canvas.width, H = vt.canvas.height;
+      vt.ctx.drawImage(sheet, frame * P, face.row * P, P, P, cx * W, cy * H, cw * W, ch * H);
+    }
+    vt.tex.needsUpdate = true;
+  }
+}
+viewportEl.addEventListener('pointermove', e => {
+  if (drag) return;
+  const r = stageEl.getBoundingClientRect();
+  vt.want.set(THREE.MathUtils.clamp((e.clientX - r.left) / r.width * 2 - 1, -1, 1), THREE.MathUtils.clamp((e.clientY - r.top) / (r.height * 0.5) - 0.6, -1, 1));
+});
+viewportEl.addEventListener('pointerleave', () => vt.want.set(0, 0));
 
 function render() {
   placeCamera(camera, state.yaw, state.pitch, K.radius);
@@ -1013,8 +1129,8 @@ function render() {
     walkAngle = anim.data.angles.reduce((a, b) => angleBetween(camDir, b.dir) < angleBetween(camDir, a.dir) ? b : a);
     walkImg = walkSheet(walkAngle);
   }
-  const walkOn = !!walkImg, faceOn = !!faceImg;
-  const neuro = mode === 'neuro' && !onKey && !walkOn && !faceOn;
+  const walkOn = !!walkImg, faceOn = !!faceImg, vtOn = vtuberOn() && !walkOn && lead.ready;
+  const neuro = mode === 'neuro' && !onKey && !walkOn && !faceOn && !vtOn;
   let towards = [];
 
   mesh.visible = card.visible = projected;
@@ -1113,6 +1229,12 @@ function render() {
     }
     renderer.render(neuroScene, camera);
   }
+  if (vtOn) {
+    if (!vt.scene) makeVtuber();
+    poseVtuber(lead);
+    vt.mesh.material.uniforms.uClip.value.copy(upright.clip);
+    renderer.render(vt.scene, orthoCam);
+  }
   if (stretched) {
     towards = stretchTowards(lead, camDir);
     const d = keyData(lead), u = stretchMat.uniforms;
@@ -1139,7 +1261,7 @@ function render() {
   } else if (!projected && !stretched && !neuro) {
     anim.shown = null;
     ctx.setTransform(...upright.canvas);
-    drawKey(lead);
+    if (!vtOn) drawKey(lead);
     if (faceOn) {
       const d = anim.data, n = animFrame(), m = sheetFrame(n), P = d.patch, [cx, cy, cw, ch] = faceAngle.crop;
       const W = flat.width, H = flat.height;
@@ -1276,12 +1398,20 @@ function updateSheet(around, onKey, towards) {
   $('yaw').textContent = Math.round(state.yaw);
   $('pitch').textContent = Math.round(state.pitch);
   const chip = $('state');
-  chip.textContent = anim.shown ? `${animTitle(anim.shown.name)} frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
+  const vtShown = vtuberOn() && !anim.shown;
+  chip.textContent = vtShown ? 'VTuber idle' : anim.shown ? `${animTitle(anim.shown.name)} frame ${anim.shown.n + 1} of ${anim.data.frames}` : onKey ? 'Key drawing, as drawn' : state.mode === 'flipbook' ? 'Holding nearest key' : 'In-between';
   chip.classList.toggle('key', onKey);
   const lead = around[0].key;
   showKeyId(anim.shown
     ? { id: `${anim.shown.name}/f${String(anim.shown.n).padStart(2, '0')}/y${anim.shown.angle.yaw}/p${anim.shown.angle.pitch}`, exact: angleBetween(dirOf(state.yaw, state.pitch), anim.shown.angle.dir) < 0.25 }
     : { id: `still/y${around[0].key.yaw}/p${around[0].key.pitch}`, exact: onKey });
+  if (vtShown) {
+    $('weights').innerHTML = `<li class="lead"><span>${keyName(around[0].key)}</span><span class="role">Held and posed from the rig's hips, chest, neck and head bones</span><span class="pct">${around[0].angle.toFixed(1)}° away</span></li>`;
+    drawRadar([{ key: around[0].key }]);
+    showAnim();
+    saveView();
+    return;
+  }
   if (anim.shown) {
     const a = anim.shown.angle;
     $('weights').innerHTML = `<li class="lead"><span>${anim.shown.name} y${a.yaw} p${a.pitch}</span><span class="role">${anim.data.face ? `Face edit of the key drawing (${anim.data.expressions[sheetFrame(anim.shown.n)].replace('_', ' ')})` : `Nearest of ${anim.data.angles.length} drawn ${anim.shown.name} angles`}</span><span class="pct">${angleBetween(dirOf(state.yaw, state.pitch), a.dir).toFixed(1)}° away</span></li>`;
@@ -1399,9 +1529,11 @@ addEventListener('hashchange', () => openKey(location.hash.slice(1)));
 
 function showAnim() {
   for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-pressed', String(b.dataset.anim === state.anim));
-  const on = !!(state.anim && anim.data);
+  const on = !!(state.anim && anim.data) || state.anim === 'vtuber';
   $('scrub').setAttribute('aria-disabled', String(!on));
   $('play').textContent = state.playing ? 'Pause' : 'Play';
+  $('frame').hidden = state.anim === 'vtuber';
+  if (state.anim === 'vtuber') { $('frame-out').textContent = 'live, follows the pointer'; return; }
   if (!anim.data) return;
   $('frame').max = anim.data.frames;
   const n = animFrame() + 1;
