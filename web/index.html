@@ -839,7 +839,7 @@ function makeRoom(floorY) {
 // texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
 // with her heading; the ground moves under her as she walks.
 const scenes = {};
-const props = [];
+const props = [], rocks3d = [];
 let frontRenderer = null;
 // Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
 function aimProps() {
@@ -1072,7 +1072,7 @@ function makeBliss(floorY) {
     const kinds = Object.entries(P).map(([name, p]) => {
       const tex = loader.load(versioned(p.sheet, p.v), () => { dirty = true; });
       tex.colorSpace = THREE.SRGBColorSpace;
-      return { name, ...p, tex, count: { grass: 70, bush: 8, rock: 10 }[name] ?? 10 };
+      return { name, ...p, tex, count: { grass: 70, bush: 8, rock: 0 }[name] ?? 10 };
     });
     let n = 0;
     const rnd = () => { n = (n * 9301 + 49297) % 233280; return n / 233280; };
@@ -1090,6 +1090,47 @@ function makeBliss(floorY) {
     }
     dirty = true;
   }).catch(() => {});
+  // 3D rocks, cel-shaded: irregular boulders with three hard toon bands from the scene's sun, moss
+  // on the faces that look up, and an inverted-hull outline, so they sit in the anime style.
+  const gradient = new THREE.DataTexture(new Uint8Array([70, 70, 70, 255, 150, 150, 150, 255, 255, 255, 255, 255]), 3, 1);
+  gradient.minFilter = gradient.magFilter = THREE.NearestFilter;
+  gradient.needsUpdate = true;
+  let rs = 5;
+  const rr = () => { rs = (rs * 16807) % 2147483647; return rs / 2147483647; };
+  const stone = new THREE.Color('#a9a79c'), stoneDark = new THREE.Color('#8b8a82'), moss = new THREE.Color('#7fbf3a');
+  for (let i = 0; i < 9; i++) {
+    const g = new THREE.IcosahedronGeometry(1, 3), p = g.attributes.position, v = new THREE.Vector3();
+    const bumps = Array.from({ length: 9 }, () => [new THREE.Vector3(rr() - 0.5, rr() - 0.5, rr() - 0.5).normalize(), 0.12 + 0.28 * rr()]);
+    const flat = 0.7 + 0.35 * rr(), stretch = 1 + 0.35 * rr();
+    for (let j = 0; j < p.count; j++) {
+      v.fromBufferAttribute(p, j);
+      let r = 1;
+      for (const [d, a] of bumps) r += a * Math.max(0, v.dot(d)) ** 2;
+      p.setXYZ(j, v.x * r * stretch, v.y * r * flat, v.z * r);
+    }
+    g.computeVertexNormals();
+    const n = g.attributes.normal, col = new Float32Array(p.count * 3), c = new THREE.Color();
+    for (let j = 0; j < p.count; j++) {
+      const up = n.getY(j), speck = Math.sin(p.getX(j) * 9.1 + p.getZ(j) * 7.3) * Math.sin(p.getZ(j) * 11.7);
+      c.copy(stone).lerp(stoneDark, 0.5 + 0.5 * speck);
+      // Moss in patches on the upper faces, not a cap.
+      const patch = Math.sin(p.getX(j) * 4.3 + 1.1) * Math.sin(p.getZ(j) * 3.7 - 0.4) + 0.5 * Math.sin(p.getY(j) * 6.1 + p.getX(j) * 2.3);
+      if (up > 0.35 && patch > 0.35) c.copy(moss).lerp(stone, 0.15 * (1 - up));
+      col.set([c.r, c.g, c.b], j * 3);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const rock = new THREE.Group();
+    rock.add(new THREE.Mesh(g, new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: gradient })));
+    const hull = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#283023', side: THREE.BackSide }));
+    hull.scale.setScalar(1.035);
+    rock.add(hull);
+    const size = 0.25 + 0.75 * rr() ** 1.5, a = rr() * Math.PI * 2, d = 2.6 + 9 * rr();
+    rock.scale.setScalar(size);
+    rock.rotation.y = rr() * Math.PI * 2;
+    rock.position.set(K.target[0] + Math.cos(a) * d, floorY + size * flat * 0.55, K.target[2] + Math.sin(a) * d);
+    ground.add(rock);
+    rocks3d.push(rock);
+  }
   // The haze matches the painting's meadow near the horizon, so the ground melts into it.
   // Distance haze: the colour of the painting's far meadow and hills, so the terrain's last hills
   // fade into the painted horizon instead of meeting it at an edge.
@@ -1129,7 +1170,8 @@ function renderRoom() {
   // Props nearer the camera than her are drawn again on a canvas in front of her.
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion);
   const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
-  const front = bliss ? props.filter(m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15) : [];
+  const near = m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15;
+  const front = bliss ? [...props.filter(near), ...rocks3d.filter(near).flatMap(r => r.children)] : [];
   roomRenderer.render(roomScene, roomCam);
   const fc = $('frontgl');
   fc.hidden = !front.length;
@@ -1141,7 +1183,7 @@ function renderRoom() {
     }
     frontRenderer.setSize(vr.width, vr.height, false);
     const keep = roomScene.children.map(c => c.visible), keepBg = roomScene.background, inFront = new Set(front);
-    roomScene.children.forEach(c => { c.visible = c === roomWorld; });
+    roomScene.children.forEach(c => { c.visible = c === roomWorld || !!c.isLight; });
     const shown = [];
     roomWorld.traverse(o => { if (o.isMesh) { shown.push([o, o.visible]); o.visible = inFront.has(o); } });
     roomScene.background = null;
