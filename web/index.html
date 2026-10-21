@@ -186,6 +186,11 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
           <input type="range" id="relief" min="0" max="1" step="0.05" value="1">
           <div class="relief-ends"><span>Flat card, no deformation</span><span>Full smoothed shell</span></div>
         </div>
+        <div class="relief" id="handover-row">
+          <label for="handover">Line hand-over <output id="handover-out">50%</output></label>
+          <input type="range" id="handover" min="0.2" max="1" step="0.05" value="0.5">
+          <div class="relief-ends"><span>Crisp, lines switch near halfway</span><span>Continuous, faint doubling</span></div>
+        </div>
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
@@ -240,7 +245,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <dl class="method">
           <div><dt>All modes</dt><dd>On a key angle, the key drawing is shown exactly as drawn. Arrow keys and the key map land on key angles.</dd></div>
           <div><dt>Neuromation</dt><dd>Latent rotation. Every drawing is a view of one latent object, and each was drawn from a slightly different vantage than requested (often turned a few degrees less, or seen from a little higher). That vantage is learned per drawing, and the drawing becomes a rigid shell: every point sits on the ray from its vantage at a smoothed depth, so the vantage sees it exactly as drawn and the shell can't shear or tear. Between keys the shell rotates; your angle maps to a latent angle that blends the nearby drawings' vantages. Depth relief sets how curved the shell is, from a flat card (no deformation at all) to the full smoothed shape.</dd></div>
-          <div><dt>Walsh</dt><dd>Walsh (sequency) interpolation, built on Neuromation. Both drawings either side of your angle are turned as rigid shells, with the rig's articulated hand-off, to the same in-between vantage. Each is split into Walsh/Haar sequency bands by box-averaging (the GPU's mip pyramid: additions only, no network). The low bands, her shape, colour and shading, interpolate smoothly with the blend proportion. The high bands, her line art, are never averaged (averaging them is what makes ghost double-lines): they switch from one drawing to the other over a short stretch around the midpoint, with their spectral energy kept constant so lines don't fade as they hand over. Anything only one drawing has, like a ribbon drawn in a different place, is shown only while that drawing leads, so nothing is duplicated. On a key angle the bands sum back to the drawing exactly.</dd></div>
+          <div><dt>Walsh</dt><dd>Walsh (sequency) interpolation, built on Neuromation. Both drawings either side of your angle are turned as rigid shells, with the rig's articulated hand-off, to the same in-between vantage. Each is split into Walsh/Haar sequency bands by box-averaging (the GPU's mip pyramid: additions only, no network). The low bands, her shape, colour and shading, interpolate smoothly with the blend proportion. The high bands, her line art, are never averaged (averaging them is what makes ghost double-lines): they hand over from one drawing to the other around the midpoint (Line hand-over sets how wide: narrow keeps lines crisp, wide flows continuously with faint doubling), with their spectral energy kept constant so lines don't fade as they hand over. Anything only one drawing has, like a ribbon drawn in a different place, is shown only while that drawing leads, so nothing is duplicated. On a key angle the bands sum back to the drawing exactly.</dd></div>
           <div><dt>Flipbook</dt><dd>The nearest drawing held still, like a 2D game sprite, until the next one takes over.</dd></div>
         </dl>
         <p class="facts" id="facts">Tencent Hy Image 3.5 · $0.024 per drawing · 600 × 900 WebP</p>
@@ -264,13 +269,13 @@ const viewportEl = $('viewport'), stageEl = $('stage'), glCanvas = $('gl'), flat
 const MODES = ['neuro', 'walsh', 'flipbook'];
 const NOTES = {
   neuro: 'Between keys, each drawing turns as one rigid, gently curved shell, seen from the angle it really depicts. Less relief means less deformation.',
-  walsh: 'Neuromation for both neighbouring drawings at once, merged by sequency band: shape and shading blend smoothly, line art switches cleanly, so there are no ghost lines.',
+  walsh: 'Neuromation for both neighbouring drawings at once, merged by sequency band: shape and shading blend smoothly while the line art hands over. Narrow hand-over keeps lines crisp; wide flows continuously.',
   projected: 'Between keys, the nearest drawing is bent by her hidden 3D shape until the next key takes over.',
   flipstretch: 'Between keys, the nearest drawing is stretched toward the neighbouring drawings. No 3D model is used.',
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, room: true, anim: '', playing: true };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, handover: 0.5, room: true, anim: '', playing: true };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -1156,11 +1161,11 @@ const walshFx = { rts: null, scene: null };
 function makeWalsh() {
   const m = new THREE.ShaderMaterial({
     transparent: true, depthTest: false, depthWrite: false,
-    uniforms: { uA: { value: null }, uB: { value: null }, uT: { value: 0 } },
+    uniforms: { uA: { value: null }, uB: { value: null }, uT: { value: 0 }, uWidth: { value: 0.5 } },
     vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
     fragmentShader: /* glsl */`
       uniform sampler2D uA, uB;
-      uniform float uT;
+      uniform float uT, uWidth;
       varying vec2 vUv;
       const vec3 LUM = vec3(0.3, 0.59, 0.11);
       const float TOP = 5.0;  // coarsest band: 32 px boxes; finer bands telescope down to the drawing
@@ -1174,11 +1179,12 @@ function makeWalsh() {
           if (hasA ? uT > 0.5 : uT <= 0.5) discard;
           c = hasA ? a0 : b0;
         } else {
-          // Low sequency: linear blend. High sequency: switch over t in [0.4, 0.6].
+          // Low sequency: linear blend. High sequency: switch around halfway (see uWidth).
           vec4 coarse = mix(textureLod(uA, vUv, TOP), textureLod(uB, vUv, TOP), uT);
           // The bands telescope: their sum is the drawing minus its coarsest band.
           vec4 dA = a0 - textureLod(uA, vUv, TOP), dB = b0 - textureLod(uB, vUv, TOP);
-          float s = smoothstep(0.4, 0.6, uT);
+          // The line hand-over spans uWidth of the way between the two drawings, centred on halfway.
+          float s = smoothstep(0.5 - 0.5 * uWidth, 0.5 + 0.5 * uWidth, uT);
           vec4 d = mix(dA, dB, s);
           // Where the two hand over, keep the detail's energy (its contrast) at what the drawings
           // have, so lines don't fade to half strength. Off the hand-over this is exactly 1.
@@ -1223,6 +1229,7 @@ function renderWalsh(around) {
   const u = walshFx.mat.uniforms;
   u.uA.value = walshFx.rts[0].texture; u.uB.value = walshFx.rts[1].texture;
   u.uT.value = around[1] ? offA / (offA + offB) : 0;
+  u.uWidth.value = state.handover;
   renderer.render(walshFx.scene, orthoCam);
 }
 
@@ -1543,7 +1550,7 @@ function updateSheet(around, onKey, towards) {
   if (!onKey && state.mode === 'walsh' && around[1]) {
     const tt = around[0].angle / (around[0].angle + around[1].angle);
     rows[0].note = `${Math.round((1 - tt) * 100)}% weight`;
-    rows.push({ key: around[1].key, role: tt > 0.4 ? 'Taking over the lines' : 'Blended into shape and shading', note: `${Math.round(tt * 100)}% weight` });
+    rows.push({ key: around[1].key, role: tt > 0.5 - 0.5 * state.handover ? 'Taking over the lines' : 'Blended into shape and shading', note: `${Math.round(tt * 100)}% weight` });
   } else if (!onKey && state.mode === 'neuro') {
     for (const t of towards) rows.push({ key: lead.near[t.i], role: 'Lends its vantage', note: `${Math.round(t.t * 100)}% there` });
     if (around[1]) rows.push({ key: around[1].key, role: 'Fills torn or hidden parts', note: `${around[1].angle.toFixed(1)}° away` });
@@ -1557,7 +1564,7 @@ function updateSheet(around, onKey, towards) {
   saveView();
 }
 function saveView() {
-  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, room: state.room, anim: state.anim, playing: state.playing })); } catch {}
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, handover: state.handover, room: state.room, anim: state.anim, playing: state.playing })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
@@ -1619,6 +1626,7 @@ function setMode(mode) {
   for (const b of document.querySelectorAll('.modes button')) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
   $('mode-note').textContent = NOTES[mode];
   $('relief-row').hidden = mode !== 'neuro' && mode !== 'walsh';
+  $('handover-row').hidden = mode !== 'walsh';
   dirty = true;
 }
 for (const b of document.querySelectorAll('.modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
@@ -1691,6 +1699,9 @@ $('skeleton').checked = state.skeleton;
 const showRelief = () => { $('relief').value = state.relief; $('relief-out').textContent = `${Math.round(state.relief * 100)}%`; };
 showRelief();
 $('relief').addEventListener('input', e => { state.relief = +e.target.value; showRelief(); dirty = true; });
+const showHandover = () => { $('handover').value = state.handover; $('handover-out').textContent = `${Math.round(state.handover * 100)}%`; };
+showHandover();
+$('handover').addEventListener('input', e => { state.handover = +e.target.value; showHandover(); dirty = true; });
 $('skeleton').addEventListener('change', e => { state.skeleton = e.target.checked; dirty = true; });
 const showRoom = () => { $('room').checked = state.room; $('roomgl').hidden = !state.room; };
 showRoom();
