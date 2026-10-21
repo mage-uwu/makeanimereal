@@ -1801,10 +1801,12 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, flat.width, flat.height);
   if (walkOn) {
-    const d = anim.data, n = animFrame(), m = sheetFrame(n), f = walkAngle.frames[m];
-    const [fw, fh] = d.frame, W = flat.width, H = flat.height;
+    // A direction may have fewer frames than the cycle (a drawn loop not yet replaced): hold each.
+    const d = anim.data, n = animFrame(), cnt = walkAngle.frames.length;
+    const m = cnt < d.frames ? Math.floor(n * cnt / d.frames) : sheetFrame(n), f = walkAngle.frames[m];
+    const [fw, fh] = walkAngle.frame || d.frame, cols = walkAngle.cols || d.cols, W = flat.width, H = flat.height;
     ctx.setTransform(...upright.canvas);
-    ctx.drawImage(walkImg, (m % d.cols) * fw, Math.floor(m / d.cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
+    ctx.drawImage(walkImg, (m % cols) * fw, Math.floor(m / cols) * fh, fw, fh, f.ox * W, f.oy * H, f.s * W, f.s * H);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     anim.shown = { angle: walkAngle, n, name: anim.name };
   } else if (!projected && !stretched && !neuro) {

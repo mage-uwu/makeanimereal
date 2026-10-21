@@ -58,7 +58,11 @@ def main():
     p.add_argument('--web', default='out/web2')
     args = p.parse_args()
     frames, cache, web = Path(args.frames), Path(args.cache), Path(args.web)
-    old = json.loads((web / 'walk.json').read_text())
+    # The drawn walk's layout (saved once, before the first video build replaces walk.json).
+    drawn_json = web / 'walk-drawn.json'
+    if not drawn_json.exists():
+        drawn_json.write_text((web / 'walk.json').read_text())
+    old = json.loads(drawn_json.read_text())
     old_angles = {(a['yaw'], a['pitch']): a for a in old['angles']}
     angles = []
     for d in sorted(x for x in frames.iterdir() if x.is_dir()):
@@ -87,9 +91,16 @@ def main():
             sheet.paste(Image.fromarray(c).resize((TW, TH), Image.LANCZOS), ((j % COLS) * TW, (j // COLS) * TH))
         name = f'walk/y{yaw:g}_p{pitch:g}.webp'
         sheet.save(web / name, 'WEBP', quality=90, method=6)
-        angles.append({'yaw': yaw, 'pitch': pitch, 'sheet': name, 'v': bw.version(web / name), 'frames': [place] * N})
+        angles.append({'yaw': yaw, 'pitch': pitch, 'sheet': name, 'v': bw.version(web / name), 'frames': [place] * N, 'source': 'video'})
         print(f'{name}: scale {s:.3f}')
-    (web / 'walk.json').write_text(json.dumps({**old, 'frames': N, 'frame': [TW, TH], 'cols': COLS, 'angles': angles, 'source': 'flux-3-video'}))
+    # Directions without a video cycle yet keep their drawn loop (fewer frames, its own tile size).
+    done = {(a['yaw'], a['pitch']) for a in angles}
+    for k, a in old_angles.items():
+        if k not in done and a.get('source') != 'video':
+            angles.append({**a, 'frame': a.get('frame', old['frame']), 'cols': a.get('cols', old['cols'])})
+    for a in angles:
+        a.setdefault('frame', [TW, TH]); a.setdefault('cols', COLS)
+    (web / 'walk.json').write_text(json.dumps({**old, 'frames': N, 'frame': [TW, TH], 'cols': COLS, 'angles': angles}))
     print(f'{len(angles)} angles -> {web}/walk.json')
 
 

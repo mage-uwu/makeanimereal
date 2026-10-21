@@ -29,6 +29,7 @@ PROMPT = ('2D anime character animation, one smooth looping walk cycle in slow m
           'translucent ribbon twin-tails with clover charms, black and green hair, sage vest with gold buttons, black bow). '
           'Flat solid magenta background throughout, no scenery, no shadow, no camera movement.')
 OUT_FRAMES = 24
+SAFETY = 2
 
 
 def b64(path):
@@ -46,7 +47,7 @@ def run(angle, keys, out, draft, key):
         kf = [[round(i * 5 / 6, 3), b64(p)] for i, p in enumerate(drawn)]
         kf[-1][0] = 4.99
         body = {'mode': 'i2v', 'prompt': PROMPT, 'keyframes': kf, 'duration': 5, 'resolution': 'hd', 'aspect_ratio': 'auto',
-                'generate_audio': False, 'draft': draft}
+                'generate_audio': False, 'draft': draft, 'safety_tolerance': SAFETY}
         h = {'x-key': key, 'content-type': 'application/json', 'accept': 'application/json'}
         for attempt in range(4):
             try:
@@ -92,6 +93,7 @@ def main():
     p.add_argument('--angles')
     p.add_argument('--draft', action='store_true')
     p.add_argument('--concurrency', type=int, default=4)
+    p.add_argument('--safety', type=int, default=2, help='moderation tolerance 0 (strict) .. 7')
     args = p.parse_args()
     keys, out = Path(args.keys), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,8 @@ def main():
     else:
         angles = sorted({f.stem.split('_', 2)[2] for f in keys.glob('Walking_f00_*.png')})
         angles = [a for a in angles if all((keys / f'Walking_f{f:02d}_{a}.png').exists() for f in range(0, 12, 2))]
+    global SAFETY
+    SAFETY = args.safety
     key = os.environ['BFL_API_KEY']
     with ThreadPoolExecutor(args.concurrency) as ex:
         futs = {ex.submit(run, a, keys, out, args.draft, key): a for a in angles}
