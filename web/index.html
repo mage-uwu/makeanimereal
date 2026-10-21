@@ -115,6 +115,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .toggles { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .toggles label { display: inline-flex; gap: 7px; align-items: center; font-size: 13px; cursor: pointer; }
 .toggles input { accent-color: var(--emerald); }
+.toggles select { font: 13px/1.2 var(--font-body); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 3px 4px; }
 
 .readout { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .angles { font: 500 22px/1 var(--font-data); font-variant-numeric: tabular-nums; }
@@ -194,7 +195,8 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
         <div class="toggles">
           <label><input type="checkbox" id="spin"> Turn slowly</label>
           <label><input type="checkbox" id="skeleton"> Show skeleton</label>
-          <label><input type="checkbox" id="room"> 3D room</label>
+          <label><input type="checkbox" id="room"> 3D backdrop</label>
+          <label>Scene <select id="backdrop"><option value="room">White room</option><option value="bliss">Bliss field</option></select></label>
         </div>
         </div>
         </details>
@@ -275,7 +277,7 @@ const NOTES = {
   flipbook: 'Between keys, the nearest drawing is held still and jumps to the next one, like a 2D game sprite.',
 };
 
-const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, handover: 0.5, room: true, anim: '', playing: true };
+const state = { yaw: 20, pitch: 6, mode: 'neuro', spin: false, skeleton: false, relief: 1, handover: 0.5, room: true, backdrop: 'room', anim: '', playing: true };
 try { Object.assign(state, JSON.parse(localStorage.getItem('pixie-view') || '{}')); } catch {}
 if (!MODES.includes(state.mode)) state.mode = 'neuro';
 const hot = window.claude?.hot;
@@ -801,13 +803,15 @@ function makeRoom(floorY) {
   // orbit, and walking moves the room the other way.
   roomWorld = new THREE.Group();
   roomScene.add(roomWorld);
+  const white = new THREE.Group();
+  roomWorld.add(white);
   const wall = new THREE.MeshStandardMaterial({ color: '#f6f4f0', roughness: 0.95 });
   const base = new THREE.MeshStandardMaterial({ color: '#dedad3', roughness: 0.8 });
   const tex = floorTexture();
   tex.repeat.set(W / 1.2, W / 1.2);
   // Double-sided: low camera angles sit below floor level and look up through it, like a glass floor.
   const floorMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, side: THREE.DoubleSide });
-  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); roomWorld.add(m); return m; };
+  const add = (geo, mat, pos, rot) => { const m = new THREE.Mesh(geo, mat); m.position.set(...pos); if (rot) m.rotation.set(...rot); white.add(m); return m; };
   add(new THREE.PlaneGeometry(W, W), floorMat, [t[0], floorY, t[2]], [-Math.PI / 2, 0, 0]);
   add(new THREE.PlaneGeometry(W, W), wall, [t[0], floorY + H, t[2]], [Math.PI / 2, 0, 0]);
   for (let i = 0; i < 4; i++) {
@@ -821,8 +825,85 @@ function makeRoom(floorY) {
   sun.position.set(4, floorY + 6, 3);
   sun.target.position.set(0, floorY, 0);
   roomWorld.add(sun, sun.target);
-  walker.half = W / 2 - 0.6;
-  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 60);
+  roomCam = new THREE.PerspectiveCamera(K.fov, 1, 0.05, 200);
+  scenes.room = { group: white, background: new THREE.Color('#f3f1ed'), fog: null, half: W / 2 - 0.6 };
+  scenes.bliss = makeBliss(floorY);
+  roomScene.add(scenes.bliss.far);
+  setBackdrop(state.backdrop);
+}
+
+// Bliss field: an open meadow. The landscape painting wraps one stretch of the horizon on a far
+// cylinder (its edge columns, softened, carry the sky and hills on round the back), and the grass
+// texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
+// with her heading; the ground moves under her as she walks.
+const scenes = {};
+const SKY_TOP = new THREE.Color('#1557d6'), SKY_HAZE = new THREE.Color('#b9d7f2');
+function makeBliss(floorY) {
+  const R = 45, ARC = 0.36;                         // painting spans 36% of the horizon
+  const loader = new THREE.TextureLoader(), sky = { value: null }, has = { value: 0 };
+  loader.load('scene/bliss-sky.webp', t => { t.colorSpace = THREE.SRGBColorSpace; t.generateMipmaps = true; sky.value = t; has.value = 1; dirty = true; });
+  const height = 2 * Math.PI * R * ARC / (1672 / 941);
+  const far = new THREE.Group();
+  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(R, R, height, 160, 1, true), new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uSky: sky, uHas: has, uArc: { value: ARC }, uTop: { value: SKY_TOP }, uHaze: { value: SKY_HAZE } },
+    vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform sampler2D uSky; uniform float uHas, uArc; uniform vec3 uTop, uHaze;
+      varying vec2 vUv;
+      void main() {
+        vec3 grad = mix(uHaze, uTop, smoothstep(0.35, 1.0, vUv.y));
+        vec3 c = grad;
+        if (uHas > 0.5) {
+          // Painting across [0, uArc] of the way round (seen from inside, so x runs backwards).
+          float u = 1.0 - vUv.x;
+          if (u < uArc) c = texture2D(uSky, vec2(u / uArc, vUv.y)).rgb;
+          else {
+            // Round the back: the painting's two edge columns, softened, blended across.
+            float k = (u - uArc) / (1.0 - uArc);
+            vec3 right = textureLod(uSky, vec2(0.995, vUv.y), 5.0).rgb, left = textureLod(uSky, vec2(0.005, vUv.y), 5.0).rgb;
+            c = mix(right, left, smoothstep(0.0, 1.0, k));
+            c = mix(c, grad, 0.35 * sin(k * 3.14159));
+          }
+        }
+        gl_FragColor = vec4(c, 1.0);
+        #include <colorspace_fragment>
+      }`,
+  }));
+  // The painting's distant hill line sits about 35% up from its bottom: put that on the horizon, and
+  // let the ground hide the painted foreground below it.
+  const below = 0.35 * height;
+  cyl.position.y = floorY + height / 2 - below;
+  cyl.renderOrder = -2;
+  far.add(cyl);
+  // Above the painting: open sky.
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(R * 1.05, 48, 16, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshBasicMaterial({ color: SKY_TOP, side: THREE.BackSide, fog: false, depthWrite: false }));
+  dome.position.y = floorY + height - below - 0.02 * height;
+  dome.renderOrder = -3;
+  far.add(dome);
+  const ground = new THREE.Group();
+  const grassMat = new THREE.MeshBasicMaterial({ color: '#4caa2c', side: THREE.DoubleSide });
+  loader.load('scene/bliss-grass.webp', t => {
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(60, 60); t.anisotropy = 8;
+    grassMat.map = t; grassMat.color.set('#ffffff'); grassMat.needsUpdate = true; dirty = true;
+  });
+  const g = new THREE.Mesh(new THREE.PlaneGeometry(2 * R, 2 * R), grassMat);
+  g.rotation.x = -Math.PI / 2;
+  g.position.y = floorY;
+  ground.add(g);
+  roomWorld.add(ground);
+  return { group: ground, far, background: SKY_HAZE.clone(), fog: new THREE.Fog(SKY_HAZE, 25, 70), half: 18 };
+}
+function setBackdrop(name) {
+  state.backdrop = scenes[name] ? name : 'room';
+  for (const [n, sc] of Object.entries(scenes)) { sc.group.visible = n === state.backdrop; if (sc.far) sc.far.visible = n === state.backdrop; }
+  const sc = scenes[state.backdrop];
+  roomScene.background = sc.background;
+  roomScene.fog = sc.fog;
+  walker.half = sc.half;
+  walker.x = THREE.MathUtils.clamp(walker.x, -sc.half, sc.half);
+  walker.z = THREE.MathUtils.clamp(walker.z, -sc.half, sc.half);
+  dirty = true;
 }
 function renderRoom() {
   if (!state.room || !roomRenderer) return;
@@ -840,6 +921,8 @@ function renderRoom() {
   roomWorld.position.set(
     K.target[0] - (Math.cos(h) * walker.x + Math.sin(h) * walker.z), 0,
     K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
+  // The far horizon turns with her but never comes nearer.
+  if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.set(K.target[0], 0, K.target[2]); }
   roomRenderer.render(roomScene, roomCam);
 }
 
@@ -1564,7 +1647,7 @@ function updateSheet(around, onKey, towards) {
   saveView();
 }
 function saveView() {
-  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, handover: state.handover, room: state.room, anim: state.anim, playing: state.playing })); } catch {}
+  try { localStorage.setItem('pixie-view', JSON.stringify({ yaw: state.yaw, pitch: state.pitch, mode: state.mode, skeleton: state.skeleton, relief: state.relief, handover: state.handover, room: state.room, backdrop: state.backdrop, anim: state.anim, playing: state.playing })); } catch {}
 }
 
 const radar = $('radar'), rctx = radar.getContext('2d');
@@ -1706,6 +1789,8 @@ $('skeleton').addEventListener('change', e => { state.skeleton = e.target.checke
 const showRoom = () => { $('room').checked = state.room; $('roomgl').hidden = !state.room; };
 showRoom();
 $('room').addEventListener('change', e => { state.room = e.target.checked; showRoom(); dirty = true; });
+$('backdrop').value = state.backdrop;
+$('backdrop').addEventListener('change', e => { if (roomScene) setBackdrop(e.target.value); else state.backdrop = e.target.value; saveView(); });
 $('spin').addEventListener('change', e => { state.spin = e.target.checked; dirty = true; });
 
 // Below the lowest ring there are no drawings; above the highest the top ring's drawings carry on
