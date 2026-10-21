@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">{ "imports": { "three": "/node_modules/three/build/three.module.js" } }</script>
+</head>
+<body style="margin:0">
+<script type="module">
+// Headless renderer for ground props (rock, bush, grass tuft): simple procedural 3D proxies, shot
+// from a ring of angles like the character, then redrawn as anime background art. Driven by
+// scripts/props.mjs.
+import * as THREE from 'three';
+
+// Deterministic noise so every run builds the same proxies.
+let seed = 7;
+const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+
+function rock() {
+  seed = 11;
+  const g = new THREE.IcosahedronGeometry(0.32, 3), p = g.attributes.position, v = new THREE.Vector3();
+  const bumps = Array.from({ length: 9 }, () => [new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize(), 0.04 + 0.08 * rand()]);
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const n = v.clone().normalize();
+    let r = 0.32;
+    for (const [d, a] of bumps) r += a * Math.max(0, n.dot(d)) ** 3;
+    v.copy(n).multiplyScalar(r);
+    v.y = v.y * 0.62 + 0.03;
+    v.x *= 1.15;
+    p.setXYZ(i, v.x, Math.max(v.y, -0.02), v.z);
+  }
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: '#8d8a80', roughness: 1, flatShading: true }));
+}
+function bush() {
+  seed = 23;
+  const grp = new THREE.Group();
+  const greens = ['#3f7f2c', '#4f9334', '#5ca43b', '#356f27'];
+  for (let i = 0; i < 9; i++) {
+    const r = 0.18 + 0.12 * rand(), a = rand() * Math.PI * 2, d = 0.22 * rand();
+    const m = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 2), new THREE.MeshStandardMaterial({ color: greens[i % 4], roughness: 1, flatShading: true }));
+    m.position.set(Math.cos(a) * d, r * 0.8 + 0.25 * rand(), Math.sin(a) * d);
+    grp.add(m);
+  }
+  return grp;
+}
+function grass() {
+  seed = 37;
+  const grp = new THREE.Group();
+  for (let i = 0; i < 46; i++) {
+    const h = 0.18 + 0.22 * rand(), a = rand() * Math.PI * 2, d = 0.12 * Math.sqrt(rand());
+    const blade = new THREE.Mesh(new THREE.ConeGeometry(0.012, h, 3), new THREE.MeshStandardMaterial({ color: rand() > 0.5 ? '#5fae2e' : '#7cc23a', roughness: 1, flatShading: true }));
+    blade.position.set(Math.cos(a) * d, h / 2, Math.sin(a) * d);
+    blade.rotation.set((rand() - 0.5) * 0.7, rand() * Math.PI, (rand() - 0.5) * 0.7);
+    grp.add(blade);
+  }
+  return grp;
+}
+
+const SIZE = 512, FOV = 22;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(SIZE, SIZE);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const camera = new THREE.PerspectiveCamera(FOV, 1, 0.01, 100);
+let scene, center, radius;
+
+window.setup = name => {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color('#c006a6');
+  scene.add(new THREE.HemisphereLight('#ffffff', '#6b6355', 2.0));
+  const sun = new THREE.DirectionalLight('#fff4e0', 2.2);
+  sun.position.set(2, 4, 3);
+  scene.add(sun);
+  const obj = { rock, bush, grass }[name]();
+  scene.add(obj);
+  const box = new THREE.Box3().setFromObject(obj), s = box.getSize(new THREE.Vector3());
+  center = box.getCenter(new THREE.Vector3());
+  radius = 0.5 * Math.max(s.x, s.y, s.z) * 1.15;
+  // The frame is a square this many metres across at the prop's centre, from every angle.
+  return { frame: 2 * radius, center: center.toArray(), base: box.min.y };
+};
+window.shot = ({ yaw, pitch }) => {
+  const d = radius / Math.tan(THREE.MathUtils.degToRad(FOV / 2)), y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);
+  camera.position.set(center.x + d * Math.cos(p) * Math.sin(y), center.y + d * Math.sin(p), center.z + d * Math.cos(p) * Math.cos(y));
+  camera.lookAt(center);
+  renderer.render(scene, camera);
+  return renderer.domElement.toDataURL('image/png');
+};
+</script>
+</body>
+</html>

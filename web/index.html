@@ -50,6 +50,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 .viewport.dragging { cursor: grabbing; }
 .viewport #roomgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .viewport .stage { z-index: 1; }
+.viewport #frontgl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; z-index: 2; pointer-events: none; }
 /* The drawings are 2:3, so the character frame is the largest 2:3 box that fits the window. */
 .stage {
   position: relative; height: min(100%, 150vw); aspect-ratio: 2 / 3; max-width: 100%;
@@ -163,6 +164,7 @@ h1 .jp { color: var(--emerald); font-size: .55em; margin-left: .35em; vertical-a
 <main>
     <div class="viewport" id="viewport">
       <canvas id="roomgl" hidden></canvas>
+      <canvas id="frontgl" hidden></canvas>
       <div class="stage" id="stage" tabindex="0" aria-label="Character viewer. Drag or use arrow keys to orbit the camera.">
         <canvas id="gl"></canvas>
         <canvas id="flat"></canvas>
@@ -837,6 +839,24 @@ function makeRoom(floorY) {
 // texture tiles the ground, hazing into the horizon in the distance. The far cylinder only turns
 // with her heading; the ground moves under her as she walks.
 const scenes = {};
+const props = [];
+let frontRenderer = null;
+// Each prop faces the camera and shows its drawn view nearest the camera's direction round it.
+function aimProps() {
+  const cam = roomCam.position, w = new THREE.Vector3();
+  for (const m of props) {
+    const { kind: kd, spin } = m.userData;
+    m.getWorldPosition(w);
+    const dx = cam.x - w.x, dy = cam.y - w.y, dz = cam.z - w.z;
+    const yaw = Math.atan2(dx, dz) / D2R - roomWorld.rotation.y / D2R - spin;
+    const pitch = Math.atan2(dy, Math.hypot(dx, dz)) / D2R;
+    const ny = kd.yaws.length, step = 360 / ny;
+    const iy = ((Math.round(yaw / step) % ny) + ny) % ny;
+    const ip = kd.pitches.reduce((b, p, i) => Math.abs(p - pitch) < Math.abs(kd.pitches[b] - pitch) ? i : b, 0);
+    m.material.map.offset.set(iy / ny, 1 - (ip + 1) / kd.pitches.length);
+    m.lookAt(cam);
+  }
+}
 const SKY_TOP = new THREE.Color('#1557d6'), SKY_HAZE = new THREE.Color('#b9d7f2');
 function makeBliss(floorY) {
   const R = 45;
@@ -883,6 +903,30 @@ function makeBliss(floorY) {
   g.position.y = floorY;
   ground.add(g);
   roomWorld.add(ground);
+  // Ground props: drawn rocks, bushes and grass tufts scattered round her (see scripts/props.py).
+  fetch('props.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).then(P => {
+    if (!P) return;
+    const kinds = Object.entries(P).map(([name, p]) => {
+      const tex = loader.load(versioned(p.sheet, p.v), () => { dirty = true; });
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return { name, ...p, tex, count: { grass: 70, bush: 8, rock: 10 }[name] ?? 10 };
+    });
+    let n = 0;
+    const rnd = () => { n = (n * 9301 + 49297) % 233280; return n / 233280; };
+    for (const kd of kinds) for (let i = 0; i < kd.count; i++) {
+      // Rings from 1.4 m to 16 m round her start, thinning with distance.
+      const r = 1.4 + 14.6 * Math.pow(rnd(), 1.6), a = rnd() * Math.PI * 2, s = 0.75 + 0.6 * rnd();
+      const map = kd.tex.clone();
+      map.repeat.set(1 / kd.yaws.length, 1 / kd.pitches.length);
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(kd.frame * s, kd.frame * s),
+        new THREE.MeshBasicMaterial({ map, transparent: true, alphaTest: 0.35, depthWrite: true, side: THREE.DoubleSide }));
+      m.position.set(K.target[0] + Math.cos(a) * r, floorY + kd.center * s, K.target[2] + Math.sin(a) * r);
+      m.userData = { kind: kd, spin: rnd() * 360 };
+      ground.add(m);
+      props.push(m);
+    }
+    dirty = true;
+  }).catch(() => {});
   // The haze matches the painting's meadow near the horizon, so the ground melts into it.
   return { group: ground, far: farGroup, background: SKY_HAZE.clone(), fog: new THREE.Fog('#7fb24a', 12, R * 0.85), half: 18 };
 }
@@ -898,7 +942,7 @@ function setBackdrop(name) {
   dirty = true;
 }
 function renderRoom() {
-  if (!state.room || !roomRenderer) return;
+  if (!state.room || !roomRenderer) { $('frontgl').hidden = true; return; }
   const vr = viewportEl.getBoundingClientRect(), fr = stageEl.getBoundingClientRect();
   // Same camera as the character's frame, widened to the whole window around that frame.
   // The world camera, with its frame (the centred 2:3 box) widened to the whole window.
@@ -915,7 +959,33 @@ function renderRoom() {
     K.target[2] - (-Math.sin(h) * walker.x + Math.cos(h) * walker.z));
   // The far horizon turns with her but never comes nearer.
   if (scenes.bliss?.far) { scenes.bliss.far.rotation.y = h; scenes.bliss.far.position.copy(roomCam.position); }
+  const bliss = state.backdrop === 'bliss' && props.length;
+  if (bliss) aimProps();
+  // Props nearer the camera than her are drawn again on a canvas in front of her.
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(roomCam.quaternion), w = new THREE.Vector3();
+  const herDepth = new THREE.Vector3(...K.target).sub(roomCam.position).dot(fwd);
+  const front = bliss ? props.filter(m => m.getWorldPosition(w).sub(roomCam.position).dot(fwd) < herDepth - 0.15) : [];
   roomRenderer.render(roomScene, roomCam);
+  const fc = $('frontgl');
+  fc.hidden = !front.length;
+  if (front.length) {
+    if (!frontRenderer) {
+      frontRenderer = new THREE.WebGLRenderer({ canvas: fc, antialias: true, alpha: true });
+      frontRenderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      frontRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    }
+    frontRenderer.setSize(vr.width, vr.height, false);
+    const keep = roomScene.children.map(c => c.visible), keepBg = roomScene.background, inFront = new Set(front);
+    roomScene.children.forEach(c => { c.visible = c === roomWorld; });
+    const shown = [];
+    roomWorld.traverse(o => { if (o.isMesh) { shown.push([o, o.visible]); o.visible = inFront.has(o); } });
+    roomScene.background = null;
+    frontRenderer.setClearColor(0x000000, 0);
+    frontRenderer.render(roomScene, roomCam);
+    shown.forEach(([o, v]) => { o.visible = v; });
+    roomScene.children.forEach((c, i) => { c.visible = keep[i]; });
+    roomScene.background = keepBg;
+  }
 }
 
 function init(data) {
