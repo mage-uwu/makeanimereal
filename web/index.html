@@ -1415,6 +1415,10 @@ function poseVtuber(k) {
   const lean = 0.35 * Math.sin(t * 2 * Math.PI / 7.3 + 0.7) * Math.PI / 180;
   // Which knee softens: the one on the side the hips move away from.
   const knees = [LK, RK].filter(Boolean).map(Kn => ({ Kn, soft: Math.max(0, -shift * Math.sign(Kn[0] - hip[0])) }));
+  // A gentle settle at the knees: every few seconds she sinks a touch and rises again. Full above
+  // the knees, fading to nothing at the shoes, so the shins compress and the feet stay put.
+  const kneeY = LK && RK ? (LK[1] + RK[1]) / 2 : hip[1] + 0.5 * legLen;
+  const settle = 0.011 * legLen * (0.5 - 0.5 * Math.cos(t * 2 * Math.PI / 4.8)) ** 1.5;
   for (let j = 0; j <= rows; j++) for (let i = 0; i <= cols; i++) {
     const v = j * (cols + 1) + i;
     let x = k.ox + (i / cols) * k.s, y = k.oy + (j / rows) * k.s;
@@ -1450,6 +1454,7 @@ function poseVtuber(k) {
     // Legs: from planted feet (0) to hips (1) the weight shift carries through.
     const up = smooth((footY - y0) / legLen);
     x += hipDx * up; y += hipDy * up;
+    y += settle * smooth((footY - y0) / Math.max(0.01, footY - kneeY));
     for (const { Kn, soft } of knees) {
       if (soft <= 0) continue;
       const g = Math.exp(-(((x0 - Kn[0]) * a) ** 2 + (y0 - Kn[1]) ** 2) / (2 * (0.09 * legLen) ** 2));
