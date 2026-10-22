@@ -78,26 +78,30 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 } }
 </script>
 <script type="module">
-// Live learned shader. Every frame: render the base model's G-buffer from the current camera
-// (colour as MToon draws it, view-space normal, depth, surface UV with a part id), pack it into the
-// network's input (sampling the neural texture per part), then run the decoder's convolutions as
-// fragment-shader passes over half-float array textures, exactly as coverage/shader/train.py
-// defines them, and show the drawing. The camera and lights match the coverage renders the shader
-// learned from (coverage/orbit-page.html).
+// Live learned shader. Every frame: three.js renders the base model's G-buffer from the current
+// camera (colour as MToon draws it; view-space normal with depth; surface UV with a part id), then a
+// small raw-WebGL2 engine on the same context packs it into the network's input (sampling the
+// neural texture per part) and runs the decoder exactly as coverage/shader/train.py defines it.
+//
+// Speed: the G-buffer is drawn at the network's own size; each convolution pass writes up to 8
+// channel groups at once (multiple render targets) so an input texel is read once, not once per
+// group; weights sit in a 2D texture addressed without division; and all network passes are
+// scissored to a box around the character (padded past the network's reach), since the background
+// is constant. Camera and lights match the coverage renders the shader learned from.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
-const GW = 720, GH = 1280;          // G-buffer, as the film was rendered
-const NW = 360, NH = 640;           // network, as it was trained
+const NW = 360, NH = 640;           // network and G-buffer, as the shader was trained
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
 const status = document.getElementById('status');
 
 const canvas = document.getElementById('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.autoClear = true;
+const gl = renderer.getContext();
 
 // ---------- the model, posed and lit as in the coverage renders ----------
 const scene = new THREE.Scene();
@@ -105,9 +109,8 @@ scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(1, 3, 2);
 scene.add(sun);
-const camera = new THREE.PerspectiveCamera(FOV, GW / GH, 0.01, 100);
-let vrm, target, radius, parts = [];
-const rest = {};
+const camera = new THREE.PerspectiveCamera(FOV, NW / NH, 0.01, 100);
+let vrm, target, radius, parts = [], bones = [];
 
 // The model ships as bytes packed into an opaque RGB PNG (coverage/live/slim_vrm.py): 3 bytes a
 // pixel, after a 4-byte little-endian length.
@@ -129,7 +132,7 @@ async function loadModel() {
   const gltf = await loader.parseAsync(await unpackPng('model.vrm.png'), '');
   vrm = gltf.userData.vrm;
   VRMUtils.rotateVRM0(vrm);
-  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  vrm.scene.traverse(o => { o.frustumCulled = false; if (o.isBone) bones.push(o); });
   scene.add(vrm.scene);
   setPose('stand', 0);
   vrm.update(0);
@@ -194,7 +197,7 @@ function setPose(name, t) {
   }
 }
 
-// ---------- G-buffer passes ----------
+// ---------- G-buffer (three.js): colour, normal + depth, UV + part ----------
 const gbufVert = `#include <common>
   #include <uv_pars_vertex>
   #include <skinning_pars_vertex>
@@ -210,25 +213,22 @@ const gbufVert = `#include <common>
     #include <project_vertex>
     vNormal = normalize(transformedNormal); vUv0 = uv; vDepth = -mvPosition.z;
   }`;
-const normalMat = new THREE.ShaderMaterial({
-  vertexShader: gbufVert, side: THREE.DoubleSide,
-  fragmentShader: `varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
-    void main() { vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0); gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }`,
-});
-const depthMat = new THREE.ShaderMaterial({
+// Normal (encoded as the coverage renders stored it) and depth (near white) in one pass.
+const ndMat = new THREE.ShaderMaterial({
   vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { near: { value: 0 }, far: { value: 1 } },
   fragmentShader: `uniform float near, far; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
-    void main() { float d = 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0); gl_FragColor = vec4(vec3(d), 1.0); }`,
+    void main() {
+      vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+      gl_FragColor = vec4(n * 0.5 + 0.5, 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0));
+    }`,
 });
 const uvMat = new THREE.ShaderMaterial({
   vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { part: { value: 0 } },
   fragmentShader: `uniform float part; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
     void main() { gl_FragColor = vec4(fract(vUv0), part, 1.0); }`,
 });
-const rt = (type, samples = 0) => new THREE.WebGLRenderTarget(GW, GH, { type, samples, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true });
-const gColor = rt(THREE.HalfFloatType, 4), gNormal = rt(THREE.HalfFloatType, 4), gDepth = rt(THREE.HalfFloatType, 4);
-const gUv = rt(THREE.FloatType);
-gUv.texture.minFilter = gUv.texture.magFilter = THREE.NearestFilter;
+const rt = (type, samples) => new THREE.WebGLRenderTarget(NW, NH, { type, samples, depthBuffer: true, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+const gColor = rt(THREE.HalfFloatType, 4), gND = rt(THREE.HalfFloatType, 4), gUv = rt(THREE.FloatType, 0);
 
 function assignParts(names) {
   vrm.scene.traverse(o => {
@@ -241,249 +241,355 @@ function assignParts(names) {
   });
 }
 
-function renderGBuffer() {
+function placeCamera() {
   const y = THREE.MathUtils.degToRad(cam.yaw), p = THREE.MathUtils.degToRad(cam.pitch);
   camera.position.set(target.x + radius * Math.cos(p) * Math.sin(y), target.y + radius * Math.sin(p), target.z + radius * Math.cos(p) * Math.cos(y));
   camera.lookAt(target);
+  camera.updateMatrixWorld();
+}
+
+function renderGBuffer() {
+  placeCamera();
   scene.background = new THREE.Color(GREEN);
   renderer.setRenderTarget(gColor); renderer.render(scene, camera);
   for (const m of shorts) m.visible = false;
-  scene.background = new THREE.Color(0x000000);
-  depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
-  for (const [t, m] of [[gNormal, normalMat], [gDepth, depthMat]]) {
-    scene.overrideMaterial = m; renderer.setRenderTarget(t); renderer.render(scene, camera);
-  }
-  // The UV pass carries coverage in alpha, so it clears to transparent.
   scene.background = null;
   renderer.setClearColor(0x000000, 0);
+  ndMat.uniforms.near.value = radius - 0.8; ndMat.uniforms.far.value = radius + 0.8;
+  scene.overrideMaterial = ndMat; renderer.setRenderTarget(gND); renderer.render(scene, camera);
   scene.overrideMaterial = uvMat; renderer.setRenderTarget(gUv); renderer.render(scene, camera);
   scene.overrideMaterial = null;
   for (const m of shorts) m.visible = true;
+  renderer.setRenderTarget(null);
 }
 
-// ---------- the network ----------
-const quadScene = new THREE.Scene(), quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
-quadScene.add(quad);
-function pass(material, target, layer = 0) {
-  quad.material = material;
-  renderer.setRenderTarget(target, layer);
-  renderer.render(quadScene, quadCam);
+// The character's box on screen, from its bones (hair and skirt included), in network pixels.
+const v3 = new THREE.Vector3();
+let lastCrop = null;
+function cropBox() {
+  let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
+  for (const b of bones) {
+    b.getWorldPosition(v3).project(camera);
+    x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y);
+  }
+  // Bones sit inside the skin, cloth and hair: pad by a fixed share of the frame, then by the reach.
+  const px = x => (x * 0.5 + 0.5) * NW, py = y => (y * 0.5 + 0.5) * NH;
+  const m = 0.12 * NH + CROP_PAD;
+  let box = [px(x0) - m, py(y0) - m, px(x1) + m, py(y1) + m];
+  const now = box;
+  if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
+  lastCrop = now;  // this frame's box, so next frame also clears what she leaves behind
+  const snap = 16;
+  return [Math.max(0, Math.floor(box[0] / snap) * snap), Math.max(0, Math.floor(box[1] / snap) * snap),
+    Math.min(NW, Math.ceil(box[2] / snap) * snap), Math.min(NH, Math.ceil(box[3] / snap) * snap)];
 }
-const tensor = (w, h, layers) => {
-  const t = new THREE.WebGLArrayRenderTarget(w, h, layers, { depthBuffer: false });
-  // The array target makes its own texture and ignores the type option: set it on the texture, or
-  // the tensors are 8-bit and clamp every negative activation to 0.
-  t.texture.type = THREE.HalfFloatType;
-  t.texture.minFilter = t.texture.magFilter = THREE.LinearFilter;
-  t.texture.generateMipmaps = false;
+
+// ---------- the network engine (raw WebGL2) ----------
+const MAXM = Math.min(8, gl.getParameter(gl.MAX_DRAW_BUFFERS), gl.getParameter(gl.MAX_COLOR_ATTACHMENTS));
+const vao = gl.createVertexArray();
+const VS = `#version 300 es
+void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
+function program(fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = 0, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name.replace('[0]', '');
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+const outs = m => Array.from({ length: m }, (_, k) => `layout(location = ${k}) out vec4 o${k};`).join('\n');
+
+function arrayTexture(w, h, layers) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA16F, w, h, layers);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, k, v);
+  return { tex: t, w, h, layers, fbos: new Map() };
+}
+// A framebuffer writing layers first..first+m-1 of a tensor, one per draw buffer.
+function fbo(t, first, m) {
+  const key = `${first}:${m}`;
+  if (!t.fbos.has(key)) {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    for (let k = 0; k < m; k++) gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + k, t.tex, 0, first + k);
+    gl.drawBuffers(Array.from({ length: m }, (_, k) => gl.COLOR_ATTACHMENT0 + k));
+    t.fbos.set(key, f);
+  }
+  return t.fbos.get(key);
+}
+function bindTex(unit, target, tex) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(target, tex); }
+
+let net, tensors = {}, layers = [], featTex = [], weightTex, progs = {}, timer = null, gpuMs = null;
+// The WebGL texture behind a three.js render target (already live once three has drawn into it).
+const glTex = t => renderer.properties.get(t).__webglTexture;
+
+async function loadImage(url) {
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, gl.RGB, gl.UNSIGNED_BYTE, img);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+    gl.texParameteri(gl.TEXTURE_2D, k, v);
   return t;
-};
-const VERT = `out vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
-const glsl = (frag, uniforms) => new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, vertexShader: VERT, fragmentShader: frag, uniforms, depthTest: false, depthWrite: false });
-
-let net, X, tensors = {}, featTex = [], weights, packMat, convMat, poolMat, showMat;
-
-function halfToFloat(h) {
-  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
-  if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
-  if (e === 31) return f ? NaN : s * Infinity;
-  return s * Math.pow(2, e - 15) * (1 + f / 1024);
 }
 
 async function loadNet() {
   net = await (await fetch('shader.json')).json();
   parts = net.parts;
-  const texLoader = new THREE.TextureLoader();
-  featTex = await Promise.all([0, 1, 2].map(k => texLoader.loadAsync(`feat${k}.png`)));
-  for (const t of featTex) {
-    t.flipY = false; t.colorSpace = THREE.NoColorSpace; t.generateMipmaps = false;
-    t.minFilter = t.magFilter = THREE.LinearFilter; t.needsUpdate = true;
-  }
-  const size = { x: [NW, NH] };
-  const sizeOf = name => {
-    const base = name.replace(/_mid$/, '');
-    const div = { x: 1, d0: 1, d1: 2, d2: 4, d3: 8, u0: 4, u1: 2, u2: 1, rgba: 1 }[base];
-    return [NW / div, NH / div];
-  };
+  featTex = await Promise.all([0, 1, 2].map(k => loadImage(`feat${k}.png`)));
+  const div = { x: 1, d0: 1, d1: 2, d2: 4, d3: 8, u0: 4, u1: 2, u2: 1, rgba: 1 };
   const chans = { ...net.channels, rgba: 4 };
   for (const l of net.layers) chans[l.out] = l.cout;
-  const layersOf = name => Math.ceil((chans[name.replace(/_pool$/, '')] ?? chans[name]) / 4);
-  X = tensor(NW, NH, 5);
-  tensors.x = X;
-  for (const l of net.layers) { const [w, h] = sizeOf(l.out); tensors[l.out] = tensor(w, h, Math.ceil(l.cout / 4)); }
-  for (const [pool, src] of Object.entries(net.pools)) {
-    const [w, h] = sizeOf(src); tensors[pool] = tensor(w / 2, h / 2, layersOf(src));
+  const chansOf = n => chans[n.replace(/_pool$/, '')] ?? chans[n];
+  tensors.x = arrayTexture(NW, NH, 5);
+  for (const l of net.layers) {
+    const base = l.out.replace(/_mid$/, '');
+    tensors[l.out] = arrayTexture(NW / div[base], NH / div[base], Math.ceil(l.cout / 4));
   }
-  // Weights: per layer, per output group of 4, per input layer, per tap, a 4x4 block (4 texels).
-  const blocks = [];
-  let total = 0;
+  for (const [pool, src] of Object.entries(net.pools)) {
+    const s = tensors[src];
+    tensors[pool] = arrayTexture(s.w / 2, s.h / 2, s.layers);
+  }
+  // Weights: one row per output group of 4; along the row, input layer l and tap t at (l * T + t) * 4 + j.
+  let rows = 0, width = 0;
+  for (const l of net.layers) {
+    const ins = l.inputs.map(n => ({ n, c: chansOf(n) }));
+    l.L = ins.reduce((s, i) => s + Math.ceil(i.c / 4), 0);
+    l.T = l.k * l.k; l.groups = Math.ceil(l.cout / 4); l.row = rows; l.ins = ins;
+    l.la = Math.ceil(ins[0].c / 4);
+    rows += l.groups; width = Math.max(width, l.L * l.T * 4);
+  }
+  // The weights are float16 already, so the texture is too: half the bandwidth, nothing lost.
+  const data = new Uint16Array(width * rows * 4);
   for (const l of net.layers) {
     const raw = new Uint16Array(Uint8Array.from(atob(l.w), c => c.charCodeAt(0)).buffer);
-    const T = l.k * l.k, outGroups = Math.ceil(l.cout / 4);
-    const ins = l.inputs.map(n => ({ n, c: chans[n.replace(/_pool$/, '')] ?? chans[n] }));
-    const L = ins.reduce((s, i) => s + Math.ceil(i.c / 4), 0);
-    l.L = L; l.T = T; l.base = total; l.groups = outGroups;
-    l.la = Math.ceil(ins[0].c / 4); l.lb = ins[1] ? Math.ceil(ins[1].c / 4) : 0;
-    const block = new Float32Array(outGroups * L * T * 16);
-    let cOffset = 0, layerOffset = 0;
-    for (const inp of ins) {
+    let cOff = 0, lOff = 0;
+    for (const inp of l.ins) {
       for (let c = 0; c < inp.c; c++) {
-        const layer = layerOffset + (c >> 2), comp = c & 3, tc = cOffset + c;
-        for (let o = 0; o < l.cout; o++) for (let t = 0; t < T; t++) {
-          const w = halfToFloat(raw[((o * l.cin + tc) * T) + t]);
-          const og = o >> 2, j = o & 3;
-          block[(((og * L + layer) * T + t) * 4 + j) * 4 + comp] = w;
+        const layer = lOff + (c >> 2), comp = c & 3, tc = cOff + c;
+        for (let o = 0; o < l.cout; o++) for (let t = 0; t < l.T; t++) {
+          const x = (layer * l.T + t) * 4 + (o & 3), y = l.row + (o >> 2);
+          data[(y * width + x) * 4 + comp] = raw[(o * l.cin + tc) * l.T + t];
         }
       }
-      cOffset += inp.c; layerOffset += Math.ceil(inp.c / 4);
+      cOff += inp.c; lOff += Math.ceil(inp.c / 4);
     }
-    blocks.push(block);
-    total += block.length / 4;
+    // Per-group bias and output affine, padded to 4.
+    l.bias = Float32Array.from({ length: l.groups * 4 }, (_, i) => l.b[i] ?? 0);
+    l.scale = Float32Array.from({ length: l.groups * 4 }, (_, i) => l.affine ? (l.affine[0][i] ?? 1) : 1);
+    l.shift = Float32Array.from({ length: l.groups * 4 }, (_, i) => l.affine ? (l.affine[1][i] ?? 0) : 0);
+    delete l.w;
   }
-  const WIDTH = 4096, height = Math.ceil(total / WIDTH);
-  const data = new Float32Array(WIDTH * height * 4);
-  let off = 0;
-  for (const b of blocks) { data.set(b, off); off += b.length; }
-  weights = new THREE.DataTexture(data, WIDTH, height, THREE.RGBAFormat, THREE.FloatType);
-  weights.needsUpdate = true;
+  weightTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, weightTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, rows, 0, gl.RGBA, gl.HALF_FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  layers = net.layers;
 
-  packMat = glsl(`precision highp float; precision highp sampler2DArray;
-    uniform sampler2D color, normalT, depthT, uvT, f0, f1, f2;
-    uniform int layer; uniform float sinP, cosP; uniform vec4 lo0, lo1, hi0, hi1; uniform vec2 tiles; uniform float tile;
-    in vec2 vUv; out vec4 o;
-    vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
-    void main() {
-      ivec2 px = ivec2(gl_FragCoord.xy);
-      vec4 uvp = texelFetch(uvT, ivec2(px.x * 2 + 1, px.y * 2), 0);
-      float mask = uvp.a > 0.5 ? 1.0 : 0.0;
-      if (layer < 2) {
-        vec3 c = toSrgb(texture(color, vUv).rgb);
-        vec3 n = texture(normalT, vUv).rgb * 2.0 - 1.0;
-        float d = texture(depthT, vUv).r;
-        o = layer == 0 ? vec4(c, n.x) : vec4(n.y, n.z, d, mask);
-        return;
-      }
-      if (layer == 4) { o = vec4(sinP, cosP, 0.0, 0.0); return; }
-      float part = floor(uvp.b + 0.5);
-      vec2 cell = vec2(mod(part, tiles.x), floor(part / tiles.x));
-      vec2 inTile = clamp(uvp.rg, 0.5 / tile, 1.0 - 0.5 / tile);
-      vec2 a = (cell + inTile) / tiles;
-      vec3 s0 = texture(f0, a).rgb, s1 = texture(f1, a).rgb, s2 = texture(f2, a).rgb;
-      vec4 q0 = vec4(s0, s1.r), q1 = vec4(s1.gb, s2.rg);
-      o = layer == 2 ? (lo0 + q0 * (hi0 - lo0)) * mask : (lo1 + q1 * (hi1 - lo1)) * mask;
-    }`, {
-    color: { value: gColor.texture }, normalT: { value: gNormal.texture }, depthT: { value: gDepth.texture }, uvT: { value: gUv.texture },
-    f0: { value: featTex[0] }, f1: { value: featTex[1] }, f2: { value: featTex[2] }, layer: { value: 0 },
-    sinP: { value: 0 }, cosP: { value: 1 }, tiles: { value: new THREE.Vector2(net.cols, net.rows) }, tile: { value: net.tile },
-    lo0: { value: new THREE.Vector4(...net.feat_lo.slice(0, 4)) }, lo1: { value: new THREE.Vector4(...net.feat_lo.slice(4, 8)) },
-    hi0: { value: new THREE.Vector4(...net.feat_hi.slice(0, 4)) }, hi1: { value: new THREE.Vector4(...net.feat_hi.slice(4, 8)) },
-  });
-
-  convMat = glsl(`precision highp float; precision highp sampler2DArray;
-    uniform sampler2DArray A, B; uniform highp sampler2D W;
-    uniform int la, lb, L, T, K, base, og, act; uniform vec2 outSize; uniform vec4 bias, scale, shift;
-    out vec4 o;
-    vec4 w(int i) { return texelFetch(W, ivec2(i % 4096, i / 4096), 0); }
-    // tanh's argument is clamped: GLSL tanh overflows (inf / inf) for large inputs, and it is ±1 there anyway.
-    float gelu(float x) { return 0.5 * x * (1.0 + tanh(clamp(0.7978845608 * (x + 0.044715 * x * x * x), -10.0, 10.0))); }
-    void main() {
-      vec4 acc = bias;
-      int r = K / 2;
-      for (int t = 0; t < T; t++) {
-        vec2 q = gl_FragCoord.xy + vec2(float(t % K - r), -float(t / K - r));
-        if (q.x < 0.0 || q.y < 0.0 || q.x > outSize.x || q.y > outSize.y) continue;
-        vec2 uv = q / outSize;
-        for (int l = 0; l < L; l++) {
-          vec4 v = l < la ? texture(A, vec3(uv, float(l))) : texture(B, vec3(uv, float(l - la)));
-          int i = base + ((og * L + l) * T + t) * 4;
-          acc += vec4(dot(w(i), v), dot(w(i + 1), v), dot(w(i + 2), v), dot(w(i + 3), v));
-        }
-      }
-      if (act == 1) acc = vec4(gelu(acc.x), gelu(acc.y), gelu(acc.z), gelu(acc.w));
-      if (act == 2) acc = 1.0 / (1.0 + exp(-acc));
-      o = acc * scale + shift;
-    }`, {
-    A: { value: null }, B: { value: null }, W: { value: weights }, la: { value: 0 }, lb: { value: 0 }, L: { value: 0 }, T: { value: 9 },
-    K: { value: 3 }, base: { value: 0 }, og: { value: 0 }, act: { value: 1 }, outSize: { value: new THREE.Vector2() },
-    bias: { value: new THREE.Vector4() }, scale: { value: new THREE.Vector4(1, 1, 1, 1) }, shift: { value: new THREE.Vector4() },
-  });
-
-  poolMat = glsl(`precision highp float; precision highp sampler2DArray;
-    uniform sampler2DArray S; uniform int layer; out vec4 o;
-    void main() {
-      ivec2 p = ivec2(gl_FragCoord.xy) * 2;
-      o = 0.25 * (texelFetch(S, ivec3(p, layer), 0) + texelFetch(S, ivec3(p + ivec2(1, 0), layer), 0)
-        + texelFetch(S, ivec3(p + ivec2(0, 1), layer), 0) + texelFetch(S, ivec3(p + ivec2(1, 1), layer), 0));
-    }`, { S: { value: null }, layer: { value: 0 } });
-
-  showMat = glsl(`precision highp float; precision highp sampler2DArray;
-    uniform sampler2DArray R; uniform sampler2D raw; uniform int mode; uniform vec3 top, bottom; uniform vec4 box;
-    in vec2 vUv; out vec4 o;
-    vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
-    vec3 toLin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
-    void main() {
-      vec3 bg = mix(bottom, top, vUv.y);
-      vec2 p = (vUv - box.xy) / box.zw;
-      if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = vec4(toLin(bg), 1.0); return; }
-      if (mode == 1) {
-        vec3 c = toSrgb(texture(raw, p).rgb);
-        float green = step(0.25, c.g - max(c.r, c.b));
-        o = vec4(toLin(mix(c, bg, green)), 1.0);
-        return;
-      }
-      vec4 d = texture(R, vec3(p, 0.0));
-      o = vec4(toLin(mix(bg, d.rgb, d.a)), 1.0);
-    }`, { R: { value: null }, raw: { value: gColor.texture }, mode: { value: 0 },
-    top: { value: new THREE.Color() }, bottom: { value: new THREE.Color() }, box: { value: new THREE.Vector4() } });
-  showMat.uniforms.R.value = tensors.rgba.texture;
+  const ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+  if (ext) timer = { ext, q: null };
 }
 
-function runNet() {
+// Convolution writing m output groups per pass.
+function convProg(m) {
+  return progs[`conv${m}`] ??= program(`#version 300 es
+precision highp float; precision highp sampler2DArray; precision highp sampler2D;
+uniform sampler2DArray A, B; uniform sampler2D W;
+uniform int la, L, T, K, row0, act; uniform vec2 outSize;
+uniform vec4 bias[${m}], scale[${m}], shift[${m}];
+${outs(m)}
+float gelu(float x) { return 0.5 * x * (1.0 + tanh(clamp(0.7978845608 * (x + 0.044715 * x * x * x), -10.0, 10.0))); }
+void main() {
+  vec4 acc[${m}];
+  for (int k = 0; k < ${m}; k++) acc[k] = bias[k];
+  int r = K / 2;
+  for (int t = 0; t < T; t++) {
+    vec2 q = gl_FragCoord.xy + vec2(float(t % K - r), -float(t / K - r));
+    if (q.x < 0.0 || q.y < 0.0 || q.x > outSize.x || q.y > outSize.y) continue;
+    vec2 uv = q / outSize;
+    for (int l = 0; l < L; l++) {
+      vec4 v = l < la ? texture(A, vec3(uv, float(l))) : texture(B, vec3(uv, float(l - la)));
+      int x = (l * T + t) * 4;
+      for (int k = 0; k < ${m}; k++) {
+        int y = row0 + k;
+        acc[k] += vec4(dot(texelFetch(W, ivec2(x, y), 0), v), dot(texelFetch(W, ivec2(x + 1, y), 0), v),
+                       dot(texelFetch(W, ivec2(x + 2, y), 0), v), dot(texelFetch(W, ivec2(x + 3, y), 0), v));
+      }
+    }
+  }
+  for (int k = 0; k < ${m}; k++) {
+    vec4 a = acc[k];
+    if (act == 1) a = vec4(gelu(a.x), gelu(a.y), gelu(a.z), gelu(a.w));
+    if (act == 2) a = 1.0 / (1.0 + exp(-a));
+    acc[k] = a * scale[k] + shift[k];
+  }
+  ${Array.from({ length: m }, (_, k) => `o${k} = acc[${k}];`).join(' ')}
+}`);
+}
+
+function poolProg(m) {
+  return progs[`pool${m}`] ??= program(`#version 300 es
+precision highp float; precision highp sampler2DArray;
+uniform sampler2DArray S; uniform int first;
+${outs(m)}
+vec4 avg(int l) {
+  ivec2 p = ivec2(gl_FragCoord.xy) * 2;
+  return 0.25 * (texelFetch(S, ivec3(p, l), 0) + texelFetch(S, ivec3(p + ivec2(1, 0), l), 0)
+    + texelFetch(S, ivec3(p + ivec2(0, 1), l), 0) + texelFetch(S, ivec3(p + ivec2(1, 1), l), 0));
+}
+void main() { ${Array.from({ length: m }, (_, k) => `o${k} = avg(first + ${k});`).join(' ')} }`);
+}
+
+function packProg(m) {
+  return progs[`pack${m}`] ??= program(`#version 300 es
+precision highp float; precision highp sampler2D;
+uniform sampler2D color, nd, uvT, f0, f1, f2;
+uniform int first; uniform float sinP, cosP; uniform vec4 lo0, lo1, hi0, hi1; uniform vec2 tiles; uniform float tile;
+${outs(m)}
+vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+void main() {
+  ivec2 px = ivec2(gl_FragCoord.xy);
+  vec4 uvp = texelFetch(uvT, px, 0);
+  float mask = uvp.a > 0.5 ? 1.0 : 0.0;
+  vec3 c = toSrgb(texelFetch(color, px, 0).rgb);
+  vec4 ndv = texelFetch(nd, px, 0);
+  vec3 n = ndv.rgb * 2.0 - 1.0;
+  float part = floor(uvp.b + 0.5);
+  vec2 cell = vec2(mod(part, tiles.x), floor(part / tiles.x));
+  vec2 a = (cell + clamp(uvp.rg, 0.5 / tile, 1.0 - 0.5 / tile)) / tiles;
+  vec3 s0 = texture(f0, a).rgb, s1 = texture(f1, a).rgb, s2 = texture(f2, a).rgb;
+  vec4 L[5];
+  L[0] = vec4(c, n.x);
+  L[1] = vec4(n.y, n.z, ndv.a, mask);
+  L[2] = (lo0 + vec4(s0, s1.r) * (hi0 - lo0)) * mask;
+  L[3] = (lo1 + vec4(s1.gb, s2.rg) * (hi1 - lo1)) * mask;
+  L[4] = vec4(sinP, cosP, 0.0, 0.0);
+  ${Array.from({ length: m }, (_, k) => `o${k} = L[first + ${k}];`).join(' ')}
+}`);
+}
+
+const showProg = () => progs.show ??= program(`#version 300 es
+precision highp float; precision highp sampler2DArray; precision highp sampler2D;
+uniform sampler2DArray R; uniform sampler2D raw; uniform int mode; uniform vec3 top, bottom; uniform vec4 box, crop; uniform vec2 view;
+out vec4 o;
+vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+void main() {
+  vec2 uv = gl_FragCoord.xy / view;
+  vec3 bg = mix(bottom, top, uv.y);
+  vec2 p = (uv - box.xy) / box.zw;
+  vec2 q = p * vec2(${NW}.0, ${NH}.0);
+  if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = vec4(bg, 1.0); return; }
+  if (mode == 1) {
+    vec3 c = toSrgb(texture(raw, p).rgb);
+    float green = step(0.25, c.g - max(c.r, c.b));
+    o = vec4(mix(c, bg, green), 1.0);
+    return;
+  }
+  if (q.x < crop.x || q.y < crop.y || q.x > crop.z || q.y > crop.w) { o = vec4(bg, 1.0); return; }
+  vec4 d = texture(R, vec3(p, 0.0));
+  o = vec4(mix(bg, d.rgb, d.a), 1.0);
+}`);
+
+// Draw one pass into tensor `out`, layers first..first+m-1, scissored to the crop at its scale.
+function draw(pr, out, first, m, crop) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo(out, first, m));
+  gl.viewport(0, 0, out.w, out.h);
+  const s = out.w / NW;
+  gl.scissor(Math.floor(crop[0] * s), Math.floor(crop[1] * s), Math.ceil((crop[2] - crop[0]) * s) + 1, Math.ceil((crop[3] - crop[1]) * s) + 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function runNet(crop) {
+  gl.bindVertexArray(vao);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST);
+  gl.colorMask(true, true, true, true);
+  gl.enable(gl.SCISSOR_TEST);
+  // Pack the G-buffer into the input tensor.
   const pr = THREE.MathUtils.degToRad(cam.pitch);
-  packMat.uniforms.sinP.value = Math.sin(pr); packMat.uniforms.cosP.value = Math.cos(pr);
-  for (let k = 0; k < 5; k++) { packMat.uniforms.layer.value = k; pass(packMat, X, k); }
-  const u = convMat.uniforms;
-  for (const l of net.layers) {
-    const out = tensors[l.out];
-    const A = tensors[l.inputs[0]], B = l.inputs[1] ? tensors[l.inputs[1]] : A;
-    u.A.value = A.texture; u.B.value = B.texture; u.la.value = l.la; u.lb.value = l.lb; u.L.value = l.L;
-    u.T.value = l.T; u.K.value = l.k; u.base.value = l.base; u.outSize.value.set(out.width, out.height);
-    u.act.value = l.act === 'gelu' ? 1 : 2;
-    for (let g = 0; g < l.groups; g++) {
-      u.og.value = g;
-      const b = [0, 1, 2, 3].map(j => l.b[g * 4 + j] ?? 0);
-      u.bias.value.set(...b);
-      if (l.affine) {
-        u.scale.value.set(...[0, 1, 2, 3].map(j => l.affine[0][g * 4 + j] ?? 1));
-        u.shift.value.set(...[0, 1, 2, 3].map(j => l.affine[1][g * 4 + j] ?? 0));
-      } else { u.scale.value.set(1, 1, 1, 1); u.shift.value.set(0, 0, 0, 0); }
-      pass(convMat, out, g);
+  for (let first = 0; first < 5; first += MAXM) {
+    const m = Math.min(MAXM, 5 - first), P = packProg(m);
+    gl.useProgram(P.p);
+    [[gColor.texture, 'color'], [gND.texture, 'nd'], [gUv.texture, 'uvT']].forEach(([t, n], i) => { bindTex(i, gl.TEXTURE_2D, glTex(t)); gl.uniform1i(P.u[n], i); });
+    featTex.forEach((t, i) => { bindTex(3 + i, gl.TEXTURE_2D, t); gl.uniform1i(P.u[`f${i}`], 3 + i); });
+    gl.uniform1i(P.u.first, first);
+    gl.uniform1f(P.u.sinP, Math.sin(pr)); gl.uniform1f(P.u.cosP, Math.cos(pr));
+    gl.uniform4fv(P.u.lo0, net.feat_lo.slice(0, 4)); gl.uniform4fv(P.u.lo1, net.feat_lo.slice(4, 8));
+    gl.uniform4fv(P.u.hi0, net.feat_hi.slice(0, 4)); gl.uniform4fv(P.u.hi1, net.feat_hi.slice(4, 8));
+    gl.uniform2f(P.u.tiles, net.cols, net.rows); gl.uniform1f(P.u.tile, net.tile);
+    draw(P, tensors.x, first, m, crop);
+  }
+  for (const l of layers) {
+    const out = tensors[l.out], A = tensors[l.inputs[0]], B = tensors[l.inputs[1] ?? l.inputs[0]];
+    for (let g = 0; g < l.groups; g += MAXM) {
+      const m = Math.min(MAXM, l.groups - g), P = convProg(m);
+      gl.useProgram(P.p);
+      bindTex(0, gl.TEXTURE_2D_ARRAY, A.tex); gl.uniform1i(P.u.A, 0);
+      bindTex(1, gl.TEXTURE_2D_ARRAY, B.tex); gl.uniform1i(P.u.B, 1);
+      bindTex(2, gl.TEXTURE_2D, weightTex); gl.uniform1i(P.u.W, 2);
+      gl.uniform1i(P.u.la, l.la); gl.uniform1i(P.u.L, l.L); gl.uniform1i(P.u.T, l.T); gl.uniform1i(P.u.K, l.k);
+      gl.uniform1i(P.u.row0, l.row + g); gl.uniform1i(P.u.act, l.act === 'gelu' ? 1 : 2);
+      gl.uniform2f(P.u.outSize, out.w, out.h);
+      gl.uniform4fv(P.u.bias, l.bias.subarray(g * 4, (g + m) * 4));
+      gl.uniform4fv(P.u.scale, l.scale.subarray(g * 4, (g + m) * 4));
+      gl.uniform4fv(P.u.shift, l.shift.subarray(g * 4, (g + m) * 4));
+      draw(P, out, g, m, crop);
     }
     const pooled = Object.entries(net.pools).find(([, src]) => src === l.out);
     if (pooled) {
       const dst = tensors[pooled[0]];
-      poolMat.uniforms.S.value = out.texture;
-      for (let k = 0; k < dst.depth; k++) { poolMat.uniforms.layer.value = k; pass(poolMat, dst, k); }
+      for (let first = 0; first < dst.layers; first += MAXM) {
+        const m = Math.min(MAXM, dst.layers - first), P = poolProg(m);
+        gl.useProgram(P.p);
+        bindTex(0, gl.TEXTURE_2D_ARRAY, out.tex); gl.uniform1i(P.u.S, 0);
+        gl.uniform1i(P.u.first, first);
+        draw(P, dst, first, m, crop);
+      }
     }
   }
+  gl.disable(gl.SCISSOR_TEST);
 }
 
 // ---------- show ----------
 let mode = 0;
-const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-function show() {
-  renderer.setRenderTarget(null);
+const css = n => new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue(n).trim());
+function show(crop) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   const size = renderer.getSize(new THREE.Vector2());
   if (size.x !== w || size.y !== h) renderer.setSize(w, h, false);
-  const s = Math.min(w / NW, h / NH), bw = NW * s / w, bh = NH * s / h;
-  showMat.uniforms.box.value.set((1 - bw) / 2, (1 - bh) / 2, bw, bh);
-  showMat.uniforms.mode.value = mode;
-  showMat.uniforms.top.value.set(css('--stage-top'));
-  showMat.uniforms.bottom.value.set(css('--stage-bottom'));
-  quad.material = showMat;
-  renderer.render(quadScene, quadCam);
+  const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
+  const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
+  const P = showProg();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST); gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  gl.bindVertexArray(vao);
+  gl.useProgram(P.p);
+  bindTex(0, gl.TEXTURE_2D_ARRAY, tensors.rgba.tex); gl.uniform1i(P.u.R, 0);
+  bindTex(1, gl.TEXTURE_2D, glTex(gColor.texture)); gl.uniform1i(P.u.raw, 1);
+  gl.uniform1i(P.u.mode, mode);
+  const top = css('--stage-top'), bottom = css('--stage-bottom');
+  gl.uniform3f(P.u.top, top.r, top.g, top.b); gl.uniform3f(P.u.bottom, bottom.r, bottom.g, bottom.b);
+  gl.uniform4f(P.u.box, (1 - bw) / 2, (1 - bh) / 2, bw, bh);
+  gl.uniform4f(P.u.crop, ...crop);
+  gl.uniform2f(P.u.view, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
 // ---------- camera and loop ----------
@@ -502,6 +608,7 @@ stage.addEventListener('keydown', e => {
   if (s) { e.preventDefault(); cam.yaw += s[0]; cam.pitch += s[1]; dirty = true; }
 });
 addEventListener('resize', () => { dirty = true; });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
 
 function setPressed(sel, el) { document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', b === el)); }
 document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
@@ -510,63 +617,89 @@ document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
 });
 
-let lastT = performance.now(), avg = 0;
+// One frame: G-buffer, network (when shown), display. GPU time comes from a timer query where the
+// browser has one; otherwise the readout shows the frame rate.
+function drawFrame() {
+  renderGBuffer();
+  const crop = cropBox();
+  renderer.resetState();
+  if (timer && !timer.q) { timer.q = gl.createQuery(); gl.beginQuery(timer.ext.TIME_ELAPSED_EXT, timer.q); timer.open = true; }
+  if (mode === 0) runNet(crop);
+  if (timer?.open) { gl.endQuery(timer.ext.TIME_ELAPSED_EXT); timer.open = false; }
+  show(crop);
+  renderer.resetState();
+  return crop;
+}
+function readTimer() {
+  if (!timer?.q) return;
+  if (gl.getQueryParameter(timer.q, gl.QUERY_RESULT_AVAILABLE) && !gl.getParameter(timer.ext.GPU_DISJOINT_EXT)) {
+    const ms = gl.getQueryParameter(timer.q, gl.QUERY_RESULT) / 1e6;
+    gpuMs = gpuMs == null ? ms : gpuMs * 0.8 + ms * 0.2;
+    gl.deleteQuery(timer.q); timer.q = null;
+  }
+}
+
+let lastT = performance.now(), fps = 0;
 function frame(now) {
-  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  const dt = Math.min(0.05, (now - lastT) / 1000);
   if (!dragging && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) {
     cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true;
   }
   cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
   const animated = pose !== 'stand';
+  readTimer();
   if (animated || dirty) {
+    const interval = now - lastT;
+    fps = fps ? fps * 0.9 + (1000 / Math.max(1, interval)) * 0.1 : 1000 / Math.max(1, interval);
     setPose(pose, (now - poseStart) / 1000);
     vrm.update(animated ? dt : 0);
-    const t0 = performance.now();
-    renderGBuffer();
-    if (mode === 0) runNet();
-    show();
-    avg = avg ? avg * 0.9 + (performance.now() - t0) * 0.1 : performance.now() - t0;
+    drawFrame();
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}°`;
-    document.getElementById('r-time').textContent = mode === 0 ? `shader ${avg.toFixed(0)} ms / frame` : 'raw render';
+    document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
+      : gpuMs != null ? `shader ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${Math.round(fps)} fps`;
     dirty = false;
   }
+  lastT = now;
   requestAnimationFrame(frame);
 }
 
-// For checks: the network's output for a given camera, as a PNG data URL (360 x 640).
+// ---------- checks ----------
+function readLayer(t, layer, w, h, type = gl.FLOAT) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, t.tex, 0, layer);
+  const px = new Float32Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(f);
+  const out = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) out.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+  return out;
+}
+// The network's output for a camera (and pose), as a PNG data URL, row 0 at the top.
 window.debugFrame = (yaw, pitch, poseName = 'stand', t = 0) => {
-  cam.yaw = yaw; cam.pitch = pitch; pose = poseName;
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
   setPose(poseName, t); vrm.update(0);
-  renderGBuffer(); runNet();
-  const read = new THREE.WebGLRenderTarget(NW, NH, { type: THREE.UnsignedByteType });
-  const copy = glsl(`precision highp float; precision highp sampler2DArray; uniform sampler2DArray R; in vec2 vUv; out vec4 o;
-    void main() { o = texture(R, vec3(vUv, 0.0)); }`, { R: { value: tensors.rgba.texture } });
-  pass(copy, read);
-  const px = new Uint8Array(NW * NH * 4);
-  renderer.readRenderTargetPixels(read, 0, 0, NW, NH, px);
+  const t0 = performance.now();
+  drawFrame();
+  const out = readLayer(tensors.rgba, 0, NW, NH);
+  renderer.resetState();
+  window.lastFrameMs = performance.now() - t0;
   const c = document.createElement('canvas'); c.width = NW; c.height = NH;
   const id = c.getContext('2d').createImageData(NW, NH);
-  for (let y = 0; y < NH; y++) id.data.set(px.subarray((NH - 1 - y) * NW * 4, (NH - y) * NW * 4), y * NW * 4);
+  for (let i = 0; i < out.length; i++) id.data[i] = Math.round(Math.min(1, Math.max(0, out[i])) * 255);
   c.getContext('2d').putImageData(id, 0, 0);
   return c.toDataURL('image/png');
 };
-
-// For checks: one layer of a network tensor (after debugFrame), as plain floats, row 0 at the top.
+// One layer of a network tensor (after debugFrame), as plain floats, row 0 at the top.
 window.debugTensor = (name, layer) => {
-  const t = tensors[name], w = t.width, h = t.height;
-  const read = new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType });
-  const copy = glsl(`precision highp float; precision highp sampler2DArray; uniform sampler2DArray R; uniform int layer; out vec4 o;
-    void main() { o = texelFetch(R, ivec3(ivec2(gl_FragCoord.xy), layer), 0); }`, { R: { value: t.texture }, layer: { value: layer } });
-  pass(copy, read);
-  const px = new Float32Array(w * h * 4);
-  renderer.readRenderTargetPixels(read, 0, 0, w, h, px);
-  const out = new Float32Array(w * h * 4);
-  for (let y = 0; y < h; y++) out.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
-  return { w, h, data: Array.from(out) };
+  const t = tensors[name];
+  const data = readLayer(t, layer, t.w, t.h);
+  renderer.resetState();
+  return { w: t.w, h: t.h, data: Array.from(data) };
 };
 
 try {
-  const gl = renderer.getContext();
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
   await Promise.all([loadModel(), loadNet()]);
   assignParts(parts);

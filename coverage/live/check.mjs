@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const live = path.join(root, 'coverage/live');
-const { values: opt } = parseArgs({ options: { out: { type: 'string', default: '/tmp/check' }, deep: { type: 'boolean', default: false } } });
+const { values: opt } = parseArgs({ options: { out: { type: 'string', default: '/tmp/check' }, deep: { type: 'boolean', default: false }, poses: { type: 'boolean', default: false } } });
 await fs.mkdir(opt.out, { recursive: true });
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png' };
@@ -46,7 +46,7 @@ try {
   console.log(`frame ${ref.frame} (yaw ${ref.yaw}, pitch ${ref.pitch}) drawn in ${Date.now() - t0} ms (software GL)`);
   await fs.writeFile(path.join(opt.out, 'browser.png'), Buffer.from(url.split(',')[1], 'base64'));
   // With --deep: poses the shader never saw (for a look by eye), the input tensor and intermediates.
-  if (opt.deep) for (const [name, y, p] of [['wave', 20, 5], ['look', 330, 10]]) {
+  if (opt.deep && opt.poses) for (const [name, y, p] of [['wave', 20, 5], ['look', 330, 10]]) {
     const u = await page.evaluate(([n, y, p]) => window.debugFrame(y, p, n, 0.3), [name, y, p]);
     await fs.writeFile(path.join(opt.out, `pose-${name}.png`), Buffer.from(u.split(',')[1], 'base64'));
   }
