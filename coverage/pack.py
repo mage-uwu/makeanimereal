@@ -2,7 +2,7 @@
 """Pack the restyled coverage film for the viewer: every frame keyed off its green background and
 laid into sprite sheets, with the camera each frame was taken from.
 
-    python3 coverage/pack.py <film.mp4> [--cameras out/coverage/cameras.json] [--out coverage/web]
+    python3 coverage/pack.py <film.mp4 | folder of chunk_NN.mp4> [--cameras out/coverage/cameras.json] [--out coverage/web]
                              [--width 540] [--grid 4x4]
 
 Writes <out>/film/sNN.webp (grid of frames, row by row) and <out>/film.json:
@@ -28,6 +28,19 @@ def frames_of(video):
     return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3)
 
 
+def frames_of_chunks(folder, total, chunk, overlap):
+    """Join the pod's chunk_NN.mp4 files (as far as they go) back into one run of film frames."""
+    stride = chunk - overlap
+    starts = sorted({min(i * stride, total - chunk) for i in range(-(-(total - overlap) // stride))})
+    out = []
+    for k, s in enumerate(starts):
+        path = Path(folder) / f'chunk_{k:02d}.mp4'
+        if not path.exists():
+            break
+        out.extend(frames_of(str(path))[len(out) - s:])
+    return np.stack(out)
+
+
 def key_green(rgb):
     """Alpha from greenness: the background is a (slightly mottled) green, and nothing she wears is."""
     f = rgb.astype(np.float32)
@@ -51,7 +64,7 @@ def main():
     a = p.parse_args()
     cols, rows = map(int, a.grid.split('x'))
     cams = json.loads(Path(a.cameras).read_text())
-    video = frames_of(a.film)
+    video = frames_of_chunks(a.film, len(cams['cameras']), 81, 17) if Path(a.film).is_dir() else frames_of(a.film)
     n = len(video)
     h = round(a.width * video.shape[1] / video.shape[2])
     out = Path(a.out)
