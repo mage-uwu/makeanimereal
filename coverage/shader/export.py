@@ -49,7 +49,10 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     ck = torch.load(a.ckpt, map_location='cpu')
-    sd, parts = ck['model'], ck['parts']
+    sd, parts = dict(ck['model']), ck['parts']
+    sharp = 'sr' in ck  # train_sr.py: decoder at half resolution, plus a full-resolution head
+    if sharp:
+        sd.update({f'sr.{k}': v.detach() for k, v in ck['sr'].items()})
     P = len(parts)
 
     # Neural texture: fine + coarse (upsampled), [8, P, T, T].
@@ -101,15 +104,31 @@ def main():
         layers.append(conv(f'{name}a', f'dec.up.{k}.0', [h, skip], 'gelu', f'{name}_mid'))
         layers.append(conv(f'{name}b', f'dec.up.{k}.2', [f'{name}_mid'], 'gelu', name))
         h = name
-    layers.append(conv('head', 'dec.head', ['u2', 'x'], 'sigmoid', 'rgba'))
+    if sharp:
+        chans['xf'] = 18
+        layers.append(conv('srh', 'sr.conv', ['u2', 'xf'], 'gelu', 'srh'))
+        layers.append(conv('srhead', 'sr.head', ['srh', 'xf'], 'sigmoid', 'rgba'))
+    else:
+        layers.append(conv('head', 'dec.head', ['u2', 'x'], 'sigmoid', 'rgba'))
+    # Every tensor's size, so the runtime needn't know the architecture.
+    full = [720, 1280] if sharp else [360, 640]
+    dims = {'x': [360, 640], 'd0_mid': [360, 640], 'd0': [360, 640], 'd0_pool': [180, 320], 'd1_mid': [180, 320], 'd1': [180, 320],
+            'd1_pool': [90, 160], 'd2_mid': [90, 160], 'd2': [90, 160], 'd2_pool': [45, 80], 'd3_mid': [45, 80], 'd3': [45, 80],
+            'u0_mid': [90, 160], 'u0': [90, 160], 'u1_mid': [180, 320], 'u1': [180, 320], 'u2_mid': [360, 640], 'u2': [360, 640],
+            'xf': full, 'srh': full, 'rgba': full}
     meta = {'parts': parts, 'tile': T, 'cols': COLS, 'rows': ROWS, 'feat_lo': lo.tolist(), 'feat_hi': hi.tolist(),
-            'channels': chans, 'size': [360, 640], 'layers': layers,
+            'channels': chans, 'size': [360, 640], 'full': full, 'sharp': sharp, 'dims': dims, 'layers': layers,
             'pools': {'d0_pool': 'd0', 'd1_pool': 'd1', 'd2_pool': 'd2'}}
     (out / 'shader.json').write_text(json.dumps(meta))
 
     # Reference output for one held-out frame, through the exported (baked, quantised) texture.
     model = train.Shader(P, sd['codes.weight'].shape[0], ck['arch'], widths=tuple(w))
-    model.load_state_dict(sd)
+    model.load_state_dict(ck['model'])
+    if sharp:
+        import train_sr
+        model = train_sr.Sharp(model, w[0], ck['sr_width'])
+        model.conv.load_state_dict({k[len('sr.conv.'):]: v for k, v in sd.items() if k.startswith('sr.conv.')})
+        model.head.load_state_dict({k[len('sr.head.'):]: v for k, v in sd.items() if k.startswith('sr.head.')})
     model.eval()
     meta_d, x, y, pitch = train.load(a.data[0])
     i = 5

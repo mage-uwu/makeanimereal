@@ -32,6 +32,7 @@ def main():
     p.add_argument('--overlap', type=int, default=1)
     p.add_argument('--cameras', help='cameras.json (default: the G-buffer dir\'s; any render of the same path will do)')
     p.add_argument('--parts-from', help='a cameras.json that lists the parts, if --cameras doesn\'t')
+    p.add_argument('--every', type=int, default=1, help='keep every n-th frame')
     p.add_argument('--canon', help='JSON list of part names every dataset shares: part ids are remapped onto it')
     a = p.parse_args()
     w, h = map(int, a.size.split('x'))
@@ -53,6 +54,8 @@ def main():
         name = f'{i:04d}'
         if not (gb / 'uvb' / f'{name}.png').exists():
             break
+        if i % a.every:
+            continue
         Image.fromarray(pack.key_green(f), 'RGBA').resize((w, h), Image.LANCZOS).save(out / f'{name}_target.png')
         for kind, resample in [('frames', Image.BILINEAR), ('normal', Image.BILINEAR), ('depth', Image.BILINEAR),
                                ('uva', Image.NEAREST), ('uvb', Image.NEAREST)]:

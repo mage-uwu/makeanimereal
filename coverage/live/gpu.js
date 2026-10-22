@@ -38,9 +38,15 @@ export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = f
   const chansOf = n => chans[n.replace(/_pool$/, '')] ?? chans[n];
   const T = {};
   const tensor = (w, h, layers) => ({ w, h, layers, buf: buf(w * h * layers * bytes, STORE) });
+  // Sizes come from shader.json where it has them; a sharp model also has a full-resolution input
+  // (xf) and draws at full resolution.
+  const dimsOf = name => net.dims?.[name] ?? [NW / div[name.replace(/_mid$/, '')], NH / div[name.replace(/_mid$/, '')]];
+  const [GW, GH] = net.sharp ? net.full : [NW, NH];  // the G-buffer's size
   T.x = tensor(NW, NH, 5);
-  for (const l of net.layers) { const d = div[l.out.replace(/_mid$/, '')]; T[l.out] = tensor(NW / d, NH / d, Math.ceil(l.cout / 4)); }
+  if (net.sharp) T.xf = tensor(GW, GH, 5);
+  for (const l of net.layers) { const [w, h] = dimsOf(l.out); T[l.out] = tensor(w, h, Math.ceil(l.cout / 4)); }
   for (const [pool, src] of Object.entries(net.pools)) T[pool] = tensor(T[src].w / 2, T[src].h / 2, T[src].layers);
+  const [OW, OH] = [T.rgba.w, T.rgba.h];
 
   // ---- weights: per layer, per output group g, input layer l, tap t: 4 vec4 (one per output j) ----
   let wTotal = 0, rows = 0;
@@ -80,7 +86,7 @@ export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = f
   device.queue.writeBuffer(affBuf, 0, aff);
 
   // ---- textures: the G-buffer atlas and the neural texture ----
-  const gbuf = device.createTexture({ size: [NW * TILES, NH], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+  const gbuf = device.createTexture({ size: [GW * TILES, GH], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
   const featTex = feats.map(bmp => {
     const t = device.createTexture({ size: [bmp.width, bmp.height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
     device.queue.copyExternalImageToTexture({ source: bmp }, { texture: t }, [bmp.width, bmp.height]);
@@ -99,8 +105,9 @@ fn cropOf(w: i32, h: i32) -> vec4<i32> {
                    min(w, i32(ceil(f32(crop.z) * s)) + 1), min(h, i32(ceil(f32(crop.w) * s)) + 1));
 }`;
 
-  // ---- pack: G-buffer atlas -> input tensor x ----
-  const packPipe = pipe(`
+  // ---- pack: G-buffer atlas -> an input tensor, at the G-buffer's size (down 1) or half of it (down 2:
+  // 2 x 2 averages for colour, normal and depth, the top-left texel's UV, part and coverage, as train_sr.py) ----
+  const packPipeFor = (down) => pipe(`
 struct PP { sinP: f32, cosP: f32, tile: f32, cols: f32, rows: f32, pad0: f32, pad1: f32, pad2: f32, lo0: vec4<f32>, lo1: vec4<f32>, hi0: vec4<f32>, hi1: vec4<f32> };
 @group(0) @binding(0) var<uniform> pp: PP;
 @group(0) @binding(1) var<uniform> crop: vec4<i32>;
@@ -111,16 +118,24 @@ struct PP { sinP: f32, cosP: f32, tile: f32, cols: f32, rows: f32, pad0: f32, pa
 @group(0) @binding(6) var smp: sampler;
 @group(0) @binding(7) var<storage, read_write> X: array<vec4<S>>;
 ${CROP}
+const D = ${down}; const OWP = ${GW / down}; const OHP = ${GH / down};
+fn tileAt(k: i32, x: i32, y: i32) -> vec4<f32> { return textureLoad(gb, vec2<i32>(x + k * ${GW}, y), 0); }
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let c = cropOf(${NW}, ${NH});
+  let c = cropOf(OWP, OHP);
   let x = c.x + i32(id.x); let y = c.y + i32(id.y);
   if (x >= c.z || y >= c.w) { return; }
-  let col = textureLoad(gb, vec2<i32>(x, y), 0).rgb;
-  let n = textureLoad(gb, vec2<i32>(x + ${NW}, y), 0).rgb * 2.0 - 1.0;
-  let d = textureLoad(gb, vec2<i32>(x + ${NW * 2}, y), 0).r;
-  let a = textureLoad(gb, vec2<i32>(x + ${NW * 3}, y), 0);
-  let b = textureLoad(gb, vec2<i32>(x + ${NW * 4}, y), 0);
+  var col = vec3<f32>(0.0); var nrm = vec3<f32>(0.0); var d = 0.0;
+  for (var j = 0; j < D; j++) {
+    for (var i = 0; i < D; i++) {
+      col += tileAt(0, x * D + i, y * D + j).rgb; nrm += tileAt(1, x * D + i, y * D + j).rgb; d += tileAt(2, x * D + i, y * D + j).r;
+    }
+  }
+  let inv = 1.0 / f32(D * D);
+  col *= inv; d *= inv;
+  let n = nrm * inv * 2.0 - 1.0;
+  let a = tileAt(3, x * D, y * D);
+  let b = tileAt(4, x * D, y * D);
   let u = a.r + a.g / 255.0; let v = a.b + b.r / 255.0;
   let part = round(b.g * 255.0);
   let mask = select(0.0, 1.0, b.b > 0.5);
@@ -129,7 +144,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let s0 = textureSampleLevel(f0, smp, uv, 0.0).rgb;
   let s1 = textureSampleLevel(f1, smp, uv, 0.0).rgb;
   let s2 = textureSampleLevel(f2, smp, uv, 0.0).rgb;
-  let i = y * ${NW} + x; let L = ${NW * NH};
+  let i = y * OWP + x; let L = OWP * OHP;
   X[i] = vec4<S>(vec4<f32>(col, n.x));
   X[i + L] = vec4<S>(vec4<f32>(n.y, n.z, d, mask));
   X[i + 2 * L] = vec4<S>((pp.lo0 + vec4<f32>(s0, s1.r) * (pp.hi0 - pp.lo0)) * mask);
@@ -141,11 +156,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   packParams.set(net.feat_lo.slice(0, 4), 8); packParams.set(net.feat_lo.slice(4, 8), 12);
   packParams.set(net.feat_hi.slice(0, 4), 16); packParams.set(net.feat_hi.slice(4, 8), 20);
   const packBuf = buf(packParams.byteLength, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  const packGroup = device.createBindGroup({ layout: packPipe.getBindGroupLayout(0), entries: [
-    { binding: 0, resource: { buffer: packBuf } }, { binding: 1, resource: { buffer: cropBuf } },
-    { binding: 2, resource: gbuf.createView() }, { binding: 3, resource: featTex[0].createView() },
-    { binding: 4, resource: featTex[1].createView() }, { binding: 5, resource: featTex[2].createView() },
-    { binding: 6, resource: linear }, { binding: 7, resource: { buffer: T.x.buf } }] });
+  const packs = (net.sharp ? [[2, T.x], [1, T.xf]] : [[1, T.x]]).map(([down, out]) => {
+    const pp = packPipeFor(down);
+    return { pipe: pp, out, group: device.createBindGroup({ layout: pp.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: packBuf } }, { binding: 1, resource: { buffer: cropBuf } },
+      { binding: 2, resource: gbuf.createView() }, { binding: 3, resource: featTex[0].createView() },
+      { binding: 4, resource: featTex[1].createView() }, { binding: 5, resource: featTex[2].createView() },
+      { binding: 6, resource: linear }, { binding: 7, resource: { buffer: out.buf } }] }) };
+  });
 
   // ---- convolution ----
   const convPipe = pipe(`
@@ -287,19 +305,21 @@ struct V { box: vec4<f32>, crop: vec4<f32>, top: vec4<f32>, bottom: vec4<f32>, v
   let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }
-fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${NH - 1}) * ${NW} + clamp(x, 0, ${NW - 1})]); }
+fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) * ${OW} + clamp(x, 0, ${OW - 1})]); }
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let uv = pos.xy / v.view;
   let bg = mix(v.top.rgb, v.bottom.rgb, uv.y);
   let p = (uv - v.box.xy) / v.box.zw;
   if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { return vec4<f32>(bg, 1.0); }
-  let q = p * vec2<f32>(${NW}.0, ${NH}.0) - 0.5;
+  let q = p * vec2<f32>(${OW}.0, ${OH}.0) - 0.5;
+  let qc = p * vec2<f32>(${NW}.0, ${NH}.0);
   if (v.mode > 0.5) {
-    let c = textureLoad(gb, vec2<i32>(clamp(i32(q.x + 0.5), 0, ${NW - 1}), clamp(i32(q.y + 0.5), 0, ${NH - 1})), 0).rgb;
+    let g = p * vec2<f32>(${GW}.0, ${GH}.0);
+    let c = textureLoad(gb, vec2<i32>(clamp(i32(g.x), 0, ${GW - 1}), clamp(i32(g.y), 0, ${GH - 1})), 0).rgb;
     let green = step(0.25, c.g - max(c.r, c.b));
     return vec4<f32>(mix(c, bg, green), 1.0);
   }
-  if (q.x < v.crop.x || q.y < v.crop.y || q.x > v.crop.z || q.y > v.crop.w) { return vec4<f32>(bg, 1.0); }
+  if (qc.x < v.crop.x || qc.y < v.crop.y || qc.x > v.crop.z || qc.y > v.crop.w) { return vec4<f32>(bg, 1.0); }
   let i = vec2<i32>(floor(q)); let f = q - floor(q);
   let d = mix(mix(px(i.x, i.y), px(i.x + 1, i.y), f.x), mix(px(i.x, i.y + 1), px(i.x + 1, i.y + 1), f.x), f.y);
   return vec4<f32>(mix(bg, d.rgb, d.a), 1.0);  // the canvas is not sRGB: values go out as drawn
@@ -318,7 +338,7 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${NH - 1}) *
 
   // One frame: copy the G-buffer canvas in, run the network on the crop, draw.
   function frame({ source, crop, pitch, mode, top, bottom, limit = Infinity, noCopy = false, noShow = false }) {
-    if (!noCopy) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [NW * TILES, NH]);
+    if (!noCopy) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [GW * TILES, GH]);
     device.queue.writeBuffer(cropBuf, 0, new Int32Array(crop));
     packParams[0] = Math.sin(pitch); packParams[1] = Math.cos(pitch);
     device.queue.writeBuffer(packBuf, 0, packParams);
@@ -329,8 +349,10 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${NH - 1}) *
         const s = w / NW;
         return [Math.ceil((Math.ceil(crop[2] * s) + 1 - Math.floor(crop[0] * s)) / px / 8), Math.ceil((Math.ceil(crop[3] * s) + 1 - Math.floor(crop[1] * s)) / 8)];
       };
-      pass.setPipeline(packPipe); pass.setBindGroup(0, packGroup);
-      if (limit > 0) pass.dispatchWorkgroups(...span(NW, 1, 1), 1);
+      if (limit > 0) for (const pk of packs) {
+        pass.setPipeline(pk.pipe); pass.setBindGroup(0, pk.group);
+        pass.dispatchWorkgroups(...span(pk.out.w, 1, 1), 1);
+      }
       for (const st of steps.slice(0, Math.max(0, limit - 1))) {
         pass.setPipeline(st.pipe); pass.setBindGroup(0, st.group);
         pass.dispatchWorkgroups(...span(st.out.w, 1, st.px), st.z);
@@ -370,7 +392,7 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${NH - 1}) *
     return { w: t.w, h: t.h, data: out };
   }
 
-  return { frame, readTensor, steps: steps.length, f16, get gpuMs() { return gpuMs; }, device };
+  return { frame, readTensor, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 
 function halfToFloat(h) {

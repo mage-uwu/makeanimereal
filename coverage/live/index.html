@@ -65,7 +65,8 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     </div>
     <div class="group" role="group" aria-label="Detail">
       <span class="label">Detail</span>
-      <button id="d-fast" aria-pressed="true">Fast</button>
+      <button id="d-fast" aria-pressed="false">Fast</button>
+      <button id="d-sharp" aria-pressed="true">Sharp</button>
       <button id="d-full" aria-pressed="false">Full</button>
     </div>
     <div class="readout" aria-live="polite">
@@ -99,9 +100,13 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 const NW = 360, NH = 640;           // network and G-buffer, as the shader was trained
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
-// Two trained decoders: 'fast' (channels 16/32/48/64, the default) and the full one (32/48/64/96,
-// about 4x the work), picked with #full.
-const FULL = location.hash.includes('full'), MODEL = FULL ? '' : 'fast/';
+// Three trained shaders: 'sharp' (the fast decoder at half resolution plus a full-resolution head;
+// the default where WebGPU runs it), 'fast' (channels 16/32/48/64 at 360 x 640; the WebGL engine's
+// default) and 'full' (32/48/64/96, about 4x the work). #fast and #full pick the others.
+const ASKED = location.hash.includes('full') ? 'full' : location.hash.includes('fast') ? 'fast' : 'sharp';
+let DETAIL = ASKED;
+const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/' })[DETAIL];
+let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
 const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
 const status = document.getElementById('status');
 
@@ -309,7 +314,7 @@ function renderGBufferTiles() {
   renderer.setScissorTest(true);
   [[GREEN_C, null], [BLACK, normalMat], [BLACK, depthMat], [BLACK, uvMatA], [BLACK, uvMatB]].forEach(([bg, mat], k) => {
     for (const m of shorts) m.visible = !mat;
-    renderer.setViewport(k * NW, 0, NW, NH); renderer.setScissor(k * NW, 0, NW, NH);
+    renderer.setViewport(k * GBW, 0, GBW, GBH); renderer.setScissor(k * GBW, 0, GBW, GBH);
     scene.background = bg; scene.overrideMaterial = mat;
     renderer.render(scene, camera);
   });
@@ -406,9 +411,10 @@ async function loadImage(url) {
 }
 
 async function loadNet() {
-  net = await (await fetch(`${MODEL}shader.json`)).json();
+  if (DETAIL === 'sharp') DETAIL = 'fast';  // the WebGL engine runs the half-resolution shaders
+  net = await (await fetch(`${modelDir()}shader.json`)).json();
   parts = net.parts;
-  featTex = await Promise.all([0, 1, 2].map(k => loadImage(`${MODEL}feat${k}.png`)));
+  featTex = await Promise.all([0, 1, 2].map(k => loadImage(`${modelDir()}feat${k}.png`)));
   const div = { x: 1, d0: 1, d1: 2, d2: 4, d3: 8, u0: 4, u1: 2, u2: 1, rgba: 1 };
   const chans = { ...net.channels, rgba: 4 };
   for (const l of net.layers) chans[l.out] = l.cout;
@@ -670,11 +676,16 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { di
 function setPressed(sel, el) { document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', b === el)); }
 document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
 document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
-// Switching decoders reloads the page with the other model.
-document.getElementById(FULL ? 'd-full' : 'd-fast').setAttribute('aria-pressed', 'true');
-document.getElementById(FULL ? 'd-fast' : 'd-full').setAttribute('aria-pressed', 'false');
-document.getElementById('d-fast').onclick = () => { if (FULL) { location.hash = location.hash.replace('full', ''); location.reload(); } };
-document.getElementById('d-full').onclick = () => { if (!FULL) { location.hash = (location.hash.slice(1) + '-full').replace(/^-/, ''); location.reload(); } };
+// Switching shaders reloads the page with the other model.
+function showDetail() {
+  for (const d of ['fast', 'sharp', 'full']) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
+  document.getElementById('d-sharp').disabled = !gpuAdapter;
+}
+for (const d of ['fast', 'sharp', 'full']) document.getElementById(`d-${d}`).onclick = () => {
+  if (d === DETAIL) return;
+  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full'].includes(t)), ...(d === 'sharp' ? [] : [d])].join('-');
+  location.reload();
+};
 document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
 });
@@ -728,7 +739,7 @@ function frame(now) {
     vrm.update(animated ? dt : 0);
     drawFrame();
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}°`;
-    const engine = gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}` : 'WebGL';
+    const engine = `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
       : gpuMs != null ? `${engine} · ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${engine} · ${Math.round(fps)} fps`;
     dirty = false;
@@ -756,11 +767,12 @@ window.debugFrame = async (yaw, pitch, poseName = 'stand', t = 0) => {
   setPose(poseName, t); vrm.update(0);
   const t0 = performance.now();
   drawFrame();
-  const out = gpu ? (await gpu.readTensor('rgba', 0)).data : readLayer(tensors.rgba, 0, NW, NH);
+  const res = gpu ? await gpu.readTensor('rgba', 0) : { w: NW, h: NH, data: readLayer(tensors.rgba, 0, NW, NH) };
+  const out = res.data;
   renderer.resetState();
   window.lastFrameMs = performance.now() - t0;
-  const c = document.createElement('canvas'); c.width = NW; c.height = NH;
-  const id = c.getContext('2d').createImageData(NW, NH);
+  const c = document.createElement('canvas'); c.width = res.w; c.height = res.h;
+  const id = c.getContext('2d').createImageData(res.w, res.h);
   for (let i = 0; i < out.length; i++) id.data[i] = Math.round(Math.min(1, Math.max(0, out[i])) * 255);
   c.getContext('2d').putImageData(id, 0, 0);
   return c.toDataURL('image/png');
@@ -776,14 +788,15 @@ window.debugTensor = async (name, layer) => {
 
 // WebGPU path: the network, its neural texture and the device (coverage/live/gpu.js).
 async function loadGpu() {
-  const net = await (await fetch(`${MODEL}shader.json`)).json();
+  const net = await (await fetch(`${modelDir()}shader.json`)).json();
+  if (net.sharp) [GBW, GBH] = net.full;
   parts = net.parts;
-  const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${MODEL}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
+  const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${modelDir()}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
   gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32') });
   if (!gpu) throw new Error('WebGPU device unavailable');
   renderer.setPixelRatio(1);
-  renderer.setSize(NW * 5, NH, false);
+  renderer.setSize(GBW * 5, GBH, false);
 }
 
 try {
@@ -796,6 +809,7 @@ try {
   }
   window.__gpu = gpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
   window.engine = gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
+  showDetail();
   assignParts(parts);
   status.hidden = true;
   window.ready = true;
