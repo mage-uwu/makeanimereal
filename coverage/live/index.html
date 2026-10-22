@@ -63,6 +63,11 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button data-pose="look" aria-pressed="false">Look around</button>
       <button data-pose="sway" aria-pressed="false">Idle sway</button>
     </div>
+    <div class="group" role="group" aria-label="Detail">
+      <span class="label">Detail</span>
+      <button id="d-fast" aria-pressed="true">Fast</button>
+      <button id="d-full" aria-pressed="false">Full</button>
+    </div>
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
       <span id="r-time">shader –</span>
@@ -94,6 +99,9 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 const NW = 360, NH = 640;           // network and G-buffer, as the shader was trained
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+// Two trained decoders: 'fast' (channels 16/32/48/64, the default) and the full one (32/48/64/96,
+// about 4x the work), picked with #full.
+const FULL = location.hash.includes('full'), MODEL = FULL ? '' : 'fast/';
 const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
 const status = document.getElementById('status');
 
@@ -398,9 +406,9 @@ async function loadImage(url) {
 }
 
 async function loadNet() {
-  net = await (await fetch('shader.json')).json();
+  net = await (await fetch(`${MODEL}shader.json`)).json();
   parts = net.parts;
-  featTex = await Promise.all([0, 1, 2].map(k => loadImage(`feat${k}.png`)));
+  featTex = await Promise.all([0, 1, 2].map(k => loadImage(`${MODEL}feat${k}.png`)));
   const div = { x: 1, d0: 1, d1: 2, d2: 4, d3: 8, u0: 4, u1: 2, u2: 1, rgba: 1 };
   const chans = { ...net.channels, rgba: 4 };
   for (const l of net.layers) chans[l.out] = l.cout;
@@ -662,6 +670,11 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { di
 function setPressed(sel, el) { document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', b === el)); }
 document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
 document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
+// Switching decoders reloads the page with the other model.
+document.getElementById(FULL ? 'd-full' : 'd-fast').setAttribute('aria-pressed', 'true');
+document.getElementById(FULL ? 'd-fast' : 'd-full').setAttribute('aria-pressed', 'false');
+document.getElementById('d-fast').onclick = () => { if (FULL) { location.hash = location.hash.replace('full', ''); location.reload(); } };
+document.getElementById('d-full').onclick = () => { if (!FULL) { location.hash = (location.hash.slice(1) + '-full').replace(/^-/, ''); location.reload(); } };
 document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
 });
@@ -763,9 +776,9 @@ window.debugTensor = async (name, layer) => {
 
 // WebGPU path: the network, its neural texture and the device (coverage/live/gpu.js).
 async function loadGpu() {
-  const net = await (await fetch('shader.json')).json();
+  const net = await (await fetch(`${MODEL}shader.json`)).json();
   parts = net.parts;
-  const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
+  const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${MODEL}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
   gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32') });
   if (!gpu) throw new Error('WebGPU device unavailable');

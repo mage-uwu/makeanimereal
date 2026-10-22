@@ -40,7 +40,8 @@ try {
   await page.route('https://fonts.**', r => r.fulfill({ body: '', contentType: 'text/css' }));
   await page.goto(`http://127.0.0.1:${server.address().port}/${opt.hash ? '#' + opt.hash : ''}`);
   await page.waitForFunction(() => window.ready || document.getElementById('status').textContent.startsWith('Could'), null, { timeout: 180000 });
-  const ref = JSON.parse(await fs.readFile(path.join(live, 'reference.json'), 'utf8')).frame;
+  const refDir = opt.hash.includes('full') ? live : path.join(live, 'fast');
+  const ref = JSON.parse(await fs.readFile(path.join(refDir, 'reference.json'), 'utf8')).frame;
   console.log('engine', await page.evaluate(() => window.engine));
   const t0 = Date.now();
   const url = await page.evaluate(([y, p]) => window.debugFrame(y, p), [ref.yaw, ref.pitch]);
