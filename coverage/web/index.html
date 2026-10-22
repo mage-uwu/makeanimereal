@@ -1,0 +1,199 @@
+<meta charset="utf-8">
+<title>Magical Girl Orbit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Shippori+Mincho:wght@600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: one full-height stage; the drawing stands in the middle, a coverage map and the controls sit in a strip at the foot. */
+:root {
+  --stage-top: #eef0fb; --stage-bottom: #d9dcf2; --floor: #c7cbe6;
+  --ink: #1d2150; --muted: #5d6293; --gold: #a57a1f; --chip: rgba(255,255,255,.7); --line: rgba(29,33,80,.16);
+  --dot: rgba(29,33,80,.22); --dot-seen: #a57a1f;
+  --display: 'Shippori Mincho', 'Hiragino Mincho ProN', Georgia, serif;
+  --body: 'Zen Kaku Gothic New', 'Hiragino Sans', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --stage-top: #0e1030; --stage-bottom: #1d2052; --floor: #2a2e66;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16);
+  --dot: rgba(238,240,255,.25); --dot-seen: #e2bd62; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --stage-top: #0e1030; --stage-bottom: #1d2052; --floor: #2a2e66;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16);
+  --dot: rgba(238,240,255,.25); --dot-seen: #e2bd62; color-scheme: dark }
+html, body { height: 100%; }
+body { background: var(--stage-bottom); color: var(--ink); font-family: var(--body); overflow: hidden; }
+.app { height: 100%; display: grid; grid-template-rows: auto 1fr auto;
+  background: linear-gradient(var(--stage-top), var(--stage-bottom)); }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding-block: 14px 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { margin: 0; font-family: var(--display); font-size: clamp(1.25rem, 3.5vw, 1.7rem); text-wrap: balance; }
+.hint { color: var(--muted); font-size: .85rem; }
+#stage { position: relative; min-height: 0; touch-action: none; cursor: grab;
+  background: radial-gradient(closest-side, var(--floor), transparent) 50% 94% / min(46vh, 70%) 7% no-repeat; }
+#stage:active { cursor: grabbing; }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; }
+#loading { position: absolute; inset: auto 0 12px; text-align: center; color: var(--muted); font-size: .8rem; font-family: var(--mono); }
+footer { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding-block: 10px 14px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.map { display: grid; gap: 4px; }
+.map canvas { width: 240px; max-width: 100%; height: 72px; border: 1px solid var(--line); border-radius: 6px; background: var(--chip); }
+.label { font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.readout { font-family: var(--mono); font-size: .8rem; font-variant-numeric: tabular-nums; color: var(--ink); display: grid; gap: 2px; min-width: 9.5em; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+button { font: inherit; font-size: .85rem; color: var(--ink); background: var(--chip); border: 1px solid var(--line);
+  border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (max-width: 520px) { .controls { margin-left: 0; } .map canvas { width: 100%; } .map { flex: 1 1 100%; } }
+</style>
+
+<div class="app">
+  <header>
+    <h1>Magical Girl Orbit</h1>
+    <span class="hint">Drag to walk the camera around her. Arrow keys work too.</span>
+  </header>
+  <div id="stage" aria-label="Character view; drag to orbit" tabindex="0">
+    <canvas id="view"></canvas>
+    <div id="loading">loading drawings…</div>
+  </div>
+  <footer>
+    <div class="map">
+      <span class="label">Coverage · yaw 0–360° × pitch</span>
+      <canvas id="map" width="480" height="144" aria-label="Every camera angle in the film, with the current one marked"></canvas>
+    </div>
+    <div class="readout" aria-live="polite">
+      <span id="r-angle">yaw 0° · pitch 0°</span>
+      <span id="r-frame">frame 0 / 0</span>
+    </div>
+    <div class="controls">
+      <button id="b-orbit" aria-pressed="false">Auto orbit</button>
+      <button id="b-film" aria-pressed="false">Play film</button>
+    </div>
+  </footer>
+</div>
+
+<script>
+// Free-camera viewer over one restyled orbit film. Each film frame was drawn from a known camera
+// (yaw, pitch); the viewer shows the frame whose camera is nearest the one you steer. Frames are
+// shown whole, never blended.
+const view = document.getElementById('view'), ctx = view.getContext('2d');
+const mapCanvas = document.getElementById('map'), mctx = mapCanvas.getContext('2d');
+const rad = d => d * Math.PI / 180;
+const dir = (y, p) => [Math.cos(rad(p)) * Math.sin(rad(y)), Math.sin(rad(p)), Math.cos(rad(p)) * Math.cos(rad(y))];
+let film, vecs, sheets = [], cam = { yaw: 0, pitch: 0 }, vel = { yaw: 0, pitch: 0 }, shown = -1;
+let orbit = false, playing = false, playIndex = 0, lastT = 0, pitchRange = [-20, 70];
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+async function boot() {
+  film = await (await fetch('film.json')).json();
+  vecs = film.frames.map(([y, p]) => dir(y, p));
+  const ps = film.frames.map(f => f[1]);
+  pitchRange = [Math.min(...ps), Math.max(...ps)];
+  cam.pitch = Math.max(pitchRange[0], Math.min(pitchRange[1], 0));
+  sheets = film.sheets.map(() => null);
+  loadSheets();
+  requestAnimationFrame(tick);
+}
+
+// Load sheets nearest the current frame first, so the first view arrives quickly.
+async function loadSheets() {
+  const per = film.grid[0] * film.grid[1];
+  const order = film.sheets.map((_, i) => i).sort((a, b) => Math.abs(a * per - nearest()) - Math.abs(b * per - nearest()));
+  let done = 0;
+  await Promise.all(order.map(i => new Promise(res => {
+    const img = new Image();
+    img.onload = () => { sheets[i] = img; done++; shown = -1; status(done); res(); };
+    img.onerror = res;
+    img.src = `${film.sheets[i].file}?v=${film.sheets[i].v}`;
+  })));
+}
+function status(done) {
+  const el = document.getElementById('loading');
+  el.textContent = `loading drawings… ${done}/${film.sheets.length}`;
+  el.hidden = done === film.sheets.length;
+}
+
+function nearest() {
+  const t = dir(cam.yaw, cam.pitch);
+  let best = 0, bd = -2;
+  for (let i = 0; i < vecs.length; i++) {
+    const v = vecs[i], d = v[0] * t[0] + v[1] * t[1] + v[2] * t[2];
+    if (d > bd && sheets[Math.floor(i / (film.grid[0] * film.grid[1]))]) { bd = d; best = i; }
+  }
+  return best;
+}
+
+function draw(i) {
+  const dpr = Math.min(devicePixelRatio || 1, 2), w = view.clientWidth, h = view.clientHeight;
+  if (view.width !== Math.round(w * dpr) || view.height !== Math.round(h * dpr)) { view.width = Math.round(w * dpr); view.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const per = film.grid[0] * film.grid[1], img = sheets[Math.floor(i / per)];
+  if (!img) return;
+  const [fw, fh] = film.frame, k = i % per, sx = (k % film.grid[0]) * fw, sy = Math.floor(k / film.grid[0]) * fh;
+  const s = Math.min(h / fh, w / fw), dw = fw * s, dh = fh * s;
+  ctx.drawImage(img, sx, sy, fw, fh, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  const [y, p] = film.frames[i];
+  document.getElementById('r-angle').textContent = `yaw ${String(Math.round(y)).padStart(3)}° · pitch ${Math.round(p)}°`;
+  document.getElementById('r-frame').textContent = `frame ${i} / ${film.frames.length - 1}`;
+  drawMap(i);
+}
+
+function drawMap(i) {
+  const W = mapCanvas.width, H = mapCanvas.height, pad = 8;
+  const x = y => pad + (y / 360) * (W - 2 * pad), yv = p => H - pad - (p - pitchRange[0]) / (pitchRange[1] - pitchRange[0]) * (H - 2 * pad);
+  mctx.clearRect(0, 0, W, H);
+  mctx.fillStyle = css('--dot');
+  film.frames.forEach(([y, p], j) => { if (j % 3 === 0) mctx.fillRect(x(y) - 1, yv(p) - 1, 2, 2); });
+  const [y, p] = film.frames[i];
+  mctx.fillStyle = css('--dot-seen');
+  mctx.beginPath(); mctx.arc(x(y), yv(p), 6, 0, Math.PI * 2); mctx.fill();
+  mctx.strokeStyle = css('--ink'); mctx.globalAlpha = .5;
+  mctx.beginPath(); mctx.arc(x(((cam.yaw % 360) + 360) % 360), yv(cam.pitch), 9, 0, Math.PI * 2); mctx.stroke();
+  mctx.globalAlpha = 1;
+}
+
+function tick(t) {
+  const dt = Math.min(.05, (t - lastT) / 1000 || 0); lastT = t;
+  let i;
+  if (playing) {
+    playIndex = (playIndex + dt * film.fps) % film.frames.length;
+    i = Math.floor(playIndex);
+    [cam.yaw, cam.pitch] = film.frames[i];
+  } else {
+    if (orbit) cam.yaw += 24 * dt;
+    if (!dragging) { cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= .9; vel.pitch *= .9; }
+    cam.pitch = Math.max(pitchRange[0], Math.min(pitchRange[1], cam.pitch));
+    i = nearest();
+  }
+  if (i !== shown || dirty) { draw(i); shown = i; dirty = false; }
+  requestAnimationFrame(tick);
+}
+
+let dragging = false, last = null, dirty = false;
+const stage = document.getElementById('stage');
+stage.addEventListener('pointerdown', e => { dragging = true; last = [e.clientX, e.clientY]; stage.setPointerCapture(e.pointerId); stopPlay(); });
+stage.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - last[0], dy = e.clientY - last[1]; last = [e.clientX, e.clientY];
+  vel.yaw = -dx * .45; vel.pitch = dy * .3;
+  cam.yaw += vel.yaw; cam.pitch += vel.pitch;
+});
+['pointerup', 'pointercancel'].forEach(n => stage.addEventListener(n, () => { dragging = false; }));
+stage.addEventListener('keydown', e => {
+  const step = { ArrowLeft: [6, 0], ArrowRight: [-6, 0], ArrowUp: [0, 5], ArrowDown: [0, -5] }[e.key];
+  if (step) { e.preventDefault(); stopPlay(); cam.yaw += step[0]; cam.pitch += step[1]; }
+});
+addEventListener('resize', () => { dirty = true; });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { dirty = true; });
+
+const bOrbit = document.getElementById('b-orbit'), bFilm = document.getElementById('b-film');
+bOrbit.onclick = () => { orbit = !orbit; bOrbit.setAttribute('aria-pressed', orbit); stopPlay(); };
+bFilm.onclick = () => { playing = !playing; bFilm.setAttribute('aria-pressed', playing); if (playing) { playIndex = shown; orbit = false; bOrbit.setAttribute('aria-pressed', false); } };
+function stopPlay() { playing = false; bFilm.setAttribute('aria-pressed', false); }
+if (matchMedia('(prefers-reduced-motion: reduce)').matches) orbit = false;
+
+boot();
+</script>

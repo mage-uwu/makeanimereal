@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>html,body{margin:0;overflow:hidden}</style>
+<script type="importmap">
+{ "imports": {
+  "three": "/node_modules/three/build/three.module.js",
+  "three/addons/": "/node_modules/three/examples/jsm/",
+  "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+} }
+</script>
+</head>
+<body>
+<script type="module">
+// Headless VRM renderer for the coverage film. Driven by coverage/render-orbit.mjs through
+// window.setup() and window.shot().
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+let renderer, scene, camera, vrm, target, radius;
+// Linear depth across the character, inverted so nearer is brighter (the video model's convention).
+const depthMat = new THREE.ShaderMaterial({
+  vertexShader: `#include <common>
+    #include <skinning_pars_vertex>
+    varying float vDepth;
+    void main() {
+      #include <skinbase_vertex>
+      #include <begin_vertex>
+      #include <skinning_vertex>
+      #include <project_vertex>
+      vDepth = -mvPosition.z;
+    }`,
+  fragmentShader: `uniform float near, far; varying float vDepth;
+    void main() { float d = 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0); gl_FragColor = vec4(vec3(d), 1.0); }`,
+  uniforms: { near: { value: 0 }, far: { value: 1 } },
+  side: THREE.DoubleSide,
+});
+
+window.setup = async ({ model, width, height, fov, background, armDrop }) => {
+  renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  document.body.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(background);
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  sun.position.set(1, 3, 2);
+  scene.add(sun);
+
+  const loader = new GLTFLoader();
+  loader.register(parser => new VRMLoaderPlugin(parser));
+  const gltf = await loader.loadAsync(model);
+  vrm = gltf.userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  scene.add(vrm.scene);
+
+  // Arms down from the T-pose into a relaxed stand; the rest of the body stays as modelled.
+  const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
+  const drop = THREE.MathUtils.degToRad(armDrop);
+  bone('leftUpperArm').rotation.z = -drop;
+  bone('rightUpperArm').rotation.z = drop;
+  bone('leftLowerArm').rotation.z = -0.15;
+  bone('rightLowerArm').rotation.z = 0.15;
+  vrm.update(0);
+  // Let the spring bones (hair, skirt) settle under gravity before the camera moves.
+  for (let i = 0; i < 240; i++) vrm.update(1 / 60);
+
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  target = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  camera = new THREE.PerspectiveCamera(fov, width / height, 0.01, 100);
+  // Distance that keeps her whole height (plus a small margin) in frame; at high pitch she only
+  // gets shorter on screen, and her width is well inside the portrait frame.
+  radius = size.y * 0.58 / Math.tan(THREE.MathUtils.degToRad(fov) / 2);
+  return { size: size.toArray(), target: target.toArray(), radius };
+};
+
+// Yaw 0 looks at her face; pitch is degrees above the horizon.
+window.shot = (yaw, pitch) => {
+  const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);
+  camera.position.set(
+    target.x + radius * Math.cos(p) * Math.sin(y),
+    target.y + radius * Math.sin(p),
+    target.z + radius * Math.cos(p) * Math.cos(y),
+  );
+  camera.lookAt(target);
+  renderer.render(scene, camera);
+  const png = renderer.domElement.toDataURL('image/png');
+  // Depth pass for the video model's structure control: background black.
+  const bg = scene.background;
+  scene.background = new THREE.Color(0x000000);
+  scene.overrideMaterial = depthMat;
+  depthMat.uniforms.near.value = radius - 0.8;
+  depthMat.uniforms.far.value = radius + 0.8;
+  renderer.render(scene, camera);
+  const depth = renderer.domElement.toDataURL('image/png');
+  scene.background = bg;
+  scene.overrideMaterial = null;
+  return {
+    png, depth,
+    position: camera.position.toArray().map(v => +v.toFixed(5)),
+    quaternion: camera.quaternion.toArray().map(v => +v.toFixed(6)),
+  };
+};
+</script>
+</body>
+</html>

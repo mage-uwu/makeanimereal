@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+// Render the total-coverage film: one camera spiral around the static model that passes every
+// side at every height, as numbered PNGs (colour and depth), MP4s and cameras.json (the exact camera of each frame).
+//
+//   node coverage/render-orbit.mjs [--model coverage/assets/magical_girl_02.vrm] [--out out/coverage]
+//        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
+//        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
+//
+// The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
+// sit (pitch range / turns) apart and every frame moves the same small angle from the last.
+import { chromium } from 'playwright-core';
+import { spawnSync } from 'node:child_process';
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { parseArgs } from 'node:util';
+
+const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const { values: opt } = parseArgs({
+  options: {
+    model: { type: 'string', default: 'coverage/assets/magical_girl_02.vrm' },
+    out: { type: 'string', default: 'out/coverage' },
+    seconds: { type: 'string', default: '60' },
+    fps: { type: 'string', default: '16' },
+    turns: { type: 'string', default: '4' },
+    pitch: { type: 'string', default: '-20:70' },
+    size: { type: 'string', default: '720x1280' },
+    fov: { type: 'string', default: '30' },
+    background: { type: 'string', default: '#00b140' },
+    'arm-drop': { type: 'string', default: '68' },
+    only: { type: 'string' },
+  },
+});
+const [width, height] = opt.size.split('x').map(Number);
+const [p0, p1] = opt.pitch.split(':').map(Number);
+const fps = Number(opt.fps), n = Math.round(Number(opt.seconds) * fps), turns = Number(opt.turns);
+const cam = i => { const t = i / (n - 1); return { yaw: +(t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
+const outDir = path.resolve(opt.out);
+for (const d of ['frames', 'depth']) await fs.mkdir(path.join(outDir, d), { recursive: true });
+
+const server = http.createServer(async (req, res) => {
+  const file = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
+  if (!file.startsWith(root)) return res.writeHead(403).end();
+  try {
+    const body = await fs.readFile(file);
+    res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html' : file.endsWith('.js') ? 'text/javascript' : 'application/octet-stream' }).end(body);
+  } catch { res.writeHead(404).end(); }
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const browser = await chromium.launch({
+  executablePath: process.env.CHROMIUM_PATH || undefined,
+  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
+});
+try {
+  const page = await browser.newPage({ viewport: { width, height } });
+  page.on('pageerror', e => console.error('[page]', e.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}/coverage/orbit-page.html`);
+  await page.waitForFunction(() => window.setup);
+  const info = await page.evaluate(a => window.setup(a), {
+    model: `/${path.relative(root, path.resolve(opt.model))}`, width, height,
+    fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']),
+  });
+  console.log('model', info);
+  const which = opt.only ? opt.only.split(',').map(Number) : [...Array(n).keys()];
+  const cameras = [];
+  for (const i of which) {
+    const c = cam(i);
+    const s = await page.evaluate(([y, p]) => window.shot(y, p), [c.yaw, c.pitch]);
+    const name = `${String(i).padStart(4, '0')}.png`;
+    await fs.writeFile(path.join(outDir, 'frames', name), Buffer.from(s.png.split(',')[1], 'base64'));
+    await fs.writeFile(path.join(outDir, 'depth', name), Buffer.from(s.depth.split(',')[1], 'base64'));
+    cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, position: s.position, quaternion: s.quaternion });
+    if (i % 50 === 0) console.log(`frame ${i}/${n}  yaw ${c.yaw}  pitch ${c.pitch}`);
+  }
+  await fs.writeFile(path.join(outDir, 'cameras.json'), JSON.stringify({
+    fps, frames: n, width, height, fov: Number(opt.fov), turns, pitch: [p0, p1],
+    target: info.target, radius: info.radius, background: opt.background, cameras,
+  }));
+  if (!opt.only) {
+    for (const [dir, file] of [['frames', 'orbit.mp4'], ['depth', 'depth.mp4']])
+      spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(fps), '-i', path.join(outDir, dir, '%04d.png'),
+        '-c:v', 'libx264', '-crf', '14', '-pix_fmt', 'yuv420p', path.join(outDir, file)], { stdio: 'inherit' });
+    console.log(`${n} frames -> ${outDir}/orbit.mp4, depth.mp4`);
+  }
+} finally {
+  await browser.close();
+  server.close();
+}
