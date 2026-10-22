@@ -5,7 +5,7 @@
 //   node coverage/render-orbit.mjs [--model coverage/assets/magical_girl_02.vrm] [--out out/coverage]
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
-//        [--yaw0 0] [--skip-first]   (continue another spiral: start at its end yaw, without repeating that frame)
+//        [--yaw0 0] [--skip-first] [--shorts]   (continue another spiral: start at its end yaw, without repeating that frame)
 //
 // The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
 // sit (pitch range / turns) apart and every frame moves the same small angle from the last.
@@ -26,6 +26,7 @@ const { values: opt } = parseArgs({
     turns: { type: 'string', default: '4' }, // negative turns go the other way round
     yaw0: { type: 'string', default: '0' },
     'skip-first': { type: 'boolean', default: false },
+    shorts: { type: 'boolean', default: false }, // navy safety shorts under the dress, for views from below
     pitch: { type: 'string', default: '-20:70' },
     size: { type: 'string', default: '720x1280' },
     fov: { type: 'string', default: '30' },
@@ -62,7 +63,7 @@ try {
   await page.waitForFunction(() => window.setup);
   const info = await page.evaluate(a => window.setup(a), {
     model: `/${path.relative(root, path.resolve(opt.model))}`, width, height,
-    fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']),
+    fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']), shorts: opt.shorts,
   });
   console.log('model', info);
   const which = opt.only ? opt.only.split(',').map(Number) : [...Array(n).keys()];
