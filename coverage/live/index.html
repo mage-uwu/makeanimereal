@@ -44,7 +44,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 <div class="app">
   <header>
     <h1>Magical Girl Live</h1>
-    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit, scroll to zoom, double-click to reset.</span>
+    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit, scroll to zoom, double-click to reset. Motion capture: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset" style="color:inherit">Bandai Namco Research Motion Dataset</a> (CC BY-NC 4.0), retargeted.</span>
   </header>
   <div id="stage" tabindex="0" aria-label="Live character view; drag to orbit">
     <canvas id="view"></canvas>
@@ -59,9 +59,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     <div class="group" role="group" aria-label="Pose">
       <span class="label">Pose</span>
       <button data-pose="stand" aria-pressed="true">Stand</button>
-      <button data-pose="wave" aria-pressed="false">Wave</button>
-      <button data-pose="look" aria-pressed="false">Look around</button>
-      <button data-pose="sway" aria-pressed="false">Idle sway</button>
+      <span id="clip-buttons" class="group"></span>
     </div>
     <div class="group" role="group" aria-label="Detail">
       <span class="label">Detail</span>
@@ -147,6 +145,18 @@ async function unpackPng(url) {
   return rgb.buffer.slice(4, 4 + n);
 }
 
+const CLIPS = { bye: 'Bye', byebye: 'Bye-bye', bow: 'Bow', guide: 'This way', walk: 'Walk', run: 'Run', dance: 'Dance' };
+let motionsLoad = null;
+const loadMotions = () => motionsLoad ||= fetchMotions();
+async function fetchMotions() {
+  motions = await (await fetch('motions.json')).json();
+  const box = document.getElementById('clip-buttons');
+  for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
+    const b = document.createElement('button');
+    b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');
+    box.append(b); wirePose(b);
+  }
+}
 async function loadModel() {
   const loader = new GLTFLoader();
   loader.register(p => new VRMLoaderPlugin(p));
@@ -155,6 +165,7 @@ async function loadModel() {
   VRMUtils.rotateVRM0(vrm);
   vrm.scene.traverse(o => { o.frustumCulled = false; if (o.isBone) bones.push(o); });
   scene.add(vrm.scene);
+  restFrames();
   setPose('stand', 0);
   vrm.update(0);
   for (let i = 0; i < 240; i++) vrm.update(1 / 60);
@@ -181,7 +192,7 @@ function addShorts() {
     mat.onBeforeCompile = sh => {
       const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
       sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
-        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(transformed, 1.0)).y;\nvW = ${own};`);
+        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(position, 1.0)).y;\nvW = ${own};`);
       sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
         .replace('void main() {', `void main() {\n  if (vW < 0.5 || vY < ${bottom.toFixed(4)} || vY > ${top.toFixed(4)}) discard;`);
     };
@@ -195,27 +206,112 @@ function addShorts() {
 
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
 let pose = 'stand';
+
+// ---------- motion capture, retargeted ----------
+// motions.json (coverage/motion/retarget_bvh.py) holds mocap clips as, per bone and frame, the world
+// direction of the bone and of a reference axis across it (the body's left, or for the arms its
+// forward). The same frames are built here from the model's rest skeleton; a bone's world rotation is
+// then (clip frame) x (rest frame)^-1, and its local one that relative to the nearest posed ancestor.
+let motions = null;
+const rest = {};   // bone -> { q: rest frame, parent: nearest posed ancestor }
+const restQ = new THREE.Quaternion(), toModel = new THREE.Quaternion();
+let legLen = 1, hipsRest = new THREE.Vector3();
+const frameQ = (d, s, out) => {
+  const x = new THREE.Vector3(...d).normalize(), y = new THREE.Vector3(...s);
+  y.addScaledVector(x, -y.dot(x)).normalize();
+  return out.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, new THREE.Vector3().crossVectors(x, y)));
+};
+// Where each bone's direction is measured to (VRM rest), matching the BVH convention: to the child,
+// and for the end bones (head, hands, toes) continuing from the parent.
+const AIM = {
+  hips: ['hips', 'spine'], spine: ['spine', 'chest'], chest: ['chest', 'neck'], neck: ['neck', 'head'], head: ['neck', 'head'],
+  leftShoulder: ['leftShoulder', 'leftUpperArm'], leftUpperArm: ['leftUpperArm', 'leftLowerArm'], leftLowerArm: ['leftLowerArm', 'leftHand'], leftHand: ['leftLowerArm', 'leftHand'],
+  rightShoulder: ['rightShoulder', 'rightUpperArm'], rightUpperArm: ['rightUpperArm', 'rightLowerArm'], rightLowerArm: ['rightLowerArm', 'rightHand'], rightHand: ['rightLowerArm', 'rightHand'],
+  leftUpperLeg: ['leftUpperLeg', 'leftLowerLeg'], leftLowerLeg: ['leftLowerLeg', 'leftFoot'], leftFoot: ['leftFoot', 'leftToes'], leftToes: ['leftFoot', 'leftToes'],
+  rightUpperLeg: ['rightUpperLeg', 'rightLowerLeg'], rightLowerLeg: ['rightLowerLeg', 'rightFoot'], rightFoot: ['rightFoot', 'rightToes'], rightToes: ['rightFoot', 'rightToes'],
+};
+function restFrames() {
+  vrm.humanoid.resetNormalizedPose();
+  vrm.scene.updateMatrixWorld(true);
+  const pos = n => { const b = bone(n); return b && vrm.scene.worldToLocal(b.getWorldPosition(new THREE.Vector3())); };
+  const left = pos('leftUpperLeg').sub(pos('rightUpperLeg')).setY(0).normalize(), up = new THREE.Vector3(0, 1, 0);
+  const fwd = new THREE.Vector3().crossVectors(left, up);
+  // The clips face +Z with the actor's left on +X; the model's own left and forward.
+  toModel.setFromRotationMatrix(new THREE.Matrix4().makeBasis(left, up, fwd));
+  for (const [name, [a, b]] of Object.entries(AIM)) {
+    if (!bone(name) || !bone(a) || !bone(b)) continue;
+    const ref = /Shoulder|Arm|Hand/.test(name) ? fwd : left;
+    rest[name] = { q: frameQ(pos(b).sub(pos(a)).toArray(), ref.toArray(), new THREE.Quaternion()).invert() };
+  }
+  for (const name of Object.keys(rest)) {
+    let p = bone(name).parent;
+    while (p && !Object.keys(rest).some(n => bone(n) === p)) p = p.parent;
+    rest[name].parent = p ? Object.keys(rest).find(n => bone(n) === p) : null;
+  }
+  legLen = pos('leftUpperLeg').distanceTo(pos('leftLowerLeg')) + pos('leftLowerLeg').distanceTo(pos('leftFoot'));
+  hipsRest.copy(bone('hips').position);
+}
+// One clip frame -> { bone: local quaternion }, hips position.
+function clipFrame(clip, f) {
+  const B = motions.bones, world = {}, local = {};
+  const q = new THREE.Quaternion();
+  for (let k = 0; k < B.length; k++) {
+    if (!rest[B[k]]) continue;
+    const o = (f * B.length + k) * 6, a = clip.axes;
+    frameQ([a[o], a[o + 1], a[o + 2]], [a[o + 3], a[o + 4], a[o + 5]], q);
+    world[B[k]] = toModel.clone().multiply(q).multiply(rest[B[k]].q);
+  }
+  for (const n of Object.keys(world)) {
+    const p = rest[n].parent;
+    local[n] = p ? world[p].clone().invert().multiply(world[n]) : world[n];
+  }
+  const h = clip.hips, v = new THREE.Vector3(h[f * 3], 0, h[f * 3 + 2]).applyQuaternion(toModel).multiplyScalar(legLen);
+  const hips = hipsRest.clone().add(v);
+  hips.y += (h[f * 3 + 1] - motions.stand) * legLen;
+  return { local, hips };
+}
+// Clip time t (s) -> pose; the loop crossfades its last FADE seconds into its start.
+const FADE = 0.5;
+function clipPose(clip, t) {
+  const fps = motions.fps, T = (clip.frames - 1) / fps, fade = Math.min(FADE, T / 3);
+  const u = fade + ((t % (T - fade)) + (T - fade)) % (T - fade);
+  const at = time => {
+    const x = Math.min(clip.frames - 1, time * fps), f0 = Math.floor(x), f1 = Math.min(clip.frames - 1, f0 + 1), w = x - f0;
+    const A = clipFrame(clip, f0), B = clipFrame(clip, f1);
+    for (const n in A.local) A.local[n].slerp(B.local[n], w);
+    A.hips.lerp(B.hips, w);
+    return A;
+  };
+  const P = at(u);
+  if (u > T - fade) {
+    const w = (u - (T - fade)) / fade, S = at(u - T + fade), e = w * w * (3 - 2 * w);
+    for (const n in P.local) P.local[n].slerp(S.local[n], e);
+    P.hips.lerp(S.hips, e);
+  }
+  return P;
+}
+const FINGERS = ['Thumb', 'Index', 'Middle', 'Ring', 'Little'].flatMap(f => ['Proximal', 'Intermediate', 'Distal'].map(s => f + s));
+
 function setPose(name, t) {
   const d = THREE.MathUtils.degToRad;
   const set = (n, x, y, z) => { const b = bone(n); if (b) b.rotation.set(x, y, z); };
+  const clip = motions?.clips[name];
+  if (clip) {
+    const P = clipPose(clip, t);
+    for (const n in P.local) bone(n).quaternion.copy(P.local[n]);
+    bone('hips').position.copy(P.hips);
+    if (bone('upperChest')) bone('upperChest').quaternion.identity();
+    // The mocap has no fingers: a relaxed curl.
+    for (const side of ['left', 'right']) for (const f of FINGERS) {
+      const c = f.startsWith('Thumb') ? 0.1 : f.endsWith('Proximal') ? 0.35 : 0.3;
+      set(side + f, 0, 0, side === 'left' ? -c : c);
+    }
+    return;
+  }
   // The training pose: arms relaxed down from the T-pose.
+  vrm.humanoid.resetNormalizedPose();
   set('leftUpperArm', 0, 0, -d(ARM_DROP)); set('rightUpperArm', 0, 0, d(ARM_DROP));
   set('leftLowerArm', 0, 0, -0.15); set('rightLowerArm', 0, 0, 0.15);
-  set('head', 0, 0, 0); set('neck', 0, 0, 0); set('spine', 0, 0, 0); set('hips', 0, 0, 0);
-  if (name === 'wave') {
-    set('rightUpperArm', 0, 0, d(-60));
-    set('rightLowerArm', 0, d(10), d(-60 + Math.sin(t * 6) * 18));
-    set('head', 0, 0, d(-6));
-  } else if (name === 'look') {
-    set('neck', d(Math.sin(t * 0.9) * 8), d(Math.sin(t * 0.7) * 30), 0);
-    set('head', d(Math.sin(t * 1.1) * 6), d(Math.sin(t * 0.7) * 15), d(Math.sin(t * 0.5) * 8));
-  } else if (name === 'sway') {
-    set('hips', 0, d(Math.sin(t * 0.8) * 6), d(Math.sin(t * 1.6) * 2));
-    set('spine', d(Math.sin(t * 1.6) * 2), 0, d(Math.sin(t * 0.8) * -3));
-    set('leftUpperArm', d(Math.sin(t * 1.6) * 6), 0, -d(ARM_DROP - 4 + Math.sin(t * 0.8) * 4));
-    set('rightUpperArm', d(-Math.sin(t * 1.6) * 6), 0, d(ARM_DROP - 4 - Math.sin(t * 0.8) * 4));
-    set('head', 0, d(Math.sin(t * 0.8) * -8), d(Math.sin(t * 1.6) * 3));
-  }
 }
 
 // ---------- G-buffer (three.js): colour, normal + depth, UV + part ----------
@@ -718,9 +814,10 @@ for (const d of ['fast', 'sharp', 'full']) document.getElementById(`d-${d}`).onc
   location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full'].includes(t)), ...(d === 'sharp' ? [] : [d])].join('-');
   location.reload();
 };
-document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
+const wirePose = b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
-});
+};
+document.querySelectorAll('[data-pose]').forEach(wirePose);
 
 // One frame: G-buffer, network (when shown), display. GPU time comes from a timer query where the
 // browser has one; otherwise the readout shows the frame rate.
@@ -809,6 +906,13 @@ window.debugFrame = async (yaw, pitch, poseName = 'stand', t = 0) => {
   c.getContext('2d').putImageData(id, 0, 0);
   return c.toDataURL('image/png');
 };
+// The plain 3D render for a camera and pose (WebGL engine), as a PNG data URL.
+window.debugRaw = (yaw, pitch, poseName = 'stand', t = 0) => {
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 1;
+  setPose(poseName, t); vrm.update(0);
+  drawFrame();
+  return canvas.toDataURL('image/png');
+};
 // One layer of a network tensor (after debugFrame), as plain floats, row 0 at the top.
 window.debugTensor = async (name, layer) => {
   if (gpu) { const r = await gpu.readTensor(name, layer); return { w: r.w, h: r.h, data: Array.from(r.data) }; }
@@ -833,11 +937,11 @@ async function loadGpu() {
 
 try {
   if (gpuAdapter) {
-    try { await Promise.all([loadModel(), loadGpu()]); }
+    try { await Promise.all([loadModel(), loadGpu(), loadMotions()]); }
     catch (e) { console.warn('WebGPU path failed, reload with #webgl for the WebGL engine:', e); throw e; }
   } else {
     if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
-    await Promise.all([loadModel(), loadNet()]);
+    await Promise.all([loadModel(), loadNet(), loadMotions()]);
   }
   window.__gpu = gpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
   window.engine = gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
