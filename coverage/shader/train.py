@@ -70,14 +70,14 @@ def block(i, o):
 
 
 class Decoder(nn.Module):
-    def __init__(self, cin, code, arch):
+    def __init__(self, cin, code, arch, widths=(32, 48, 64, 96)):
         super().__init__()
         self.arch = arch
         if arch == 'mlp':
             self.net = nn.Sequential(nn.Conv2d(cin, 64, 1), nn.GELU(), nn.Conv2d(64, 64, 1), nn.GELU(), nn.Conv2d(64, 4, 1))
             self.film = nn.Linear(code, 128)
             return
-        c = [32, 48, 64, 96]
+        c = list(widths)
         self.down = nn.ModuleList([block(cin, c[0]), block(c[0], c[1]), block(c[1], c[2]), block(c[2], c[3])])
         self.up = nn.ModuleList([block(c[3] + c[2], c[2]), block(c[2] + c[1], c[1]), block(c[1] + c[0], c[0])])
         self.film = nn.Linear(code, 2 * c[3])
@@ -101,12 +101,12 @@ class Decoder(nn.Module):
 
 
 class Shader(nn.Module):
-    def __init__(self, parts, frames, arch, code=16):
+    def __init__(self, parts, frames, arch, code=16, widths=(32, 48, 64, 96)):
         super().__init__()
         self.tex = NeuralTexture(parts)
         self.codes = nn.Embedding(frames, code)
         nn.init.zeros_(self.codes.weight)
-        self.dec = Decoder(3 + 3 + 1 + 1 + 8 + 2, code, arch)
+        self.dec = Decoder(3 + 3 + 1 + 1 + 8 + 2, code, arch, widths)
 
     def forward(self, x, pitch, idx=None):
         # x: [B, H, W, 11] = color 3, normal 3, depth 1, mask 1, u, v, part
@@ -150,6 +150,7 @@ def main():
     ap.add_argument('--batch', type=int, default=4)
     ap.add_argument('--crop', type=int, default=320)
     ap.add_argument('--vgg', type=float, default=0.1)
+    ap.add_argument('--widths', default='32,48,64,96', help='decoder channels per level (the run-time cost scales with their squares)')
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -166,7 +167,8 @@ def main():
     print(f'{n} frames ({len(train_ids)} train, {len(test_ids)} held out), {len(parts)} parts, {X.shape[1:3]}', flush=True)
     Xg, Yg, Pg = torch.from_numpy(X).to(dev), torch.from_numpy(Y).to(dev), torch.from_numpy(P).to(dev)
 
-    model = Shader(len(parts), n, a.arch).to(dev)
+    widths = tuple(int(w) for w in a.widths.split(','))
+    model = Shader(len(parts), n, a.arch, widths=widths).to(dev)
     vgg = VGG().to(dev) if a.vgg else None
     opt = torch.optim.Adam([
         {'params': model.tex.parameters(), 'lr': 1e-2},
@@ -214,7 +216,7 @@ def main():
                     rows = torch.cat([torch.cat([r, q, t], 2) for r, q, t in zip(rd, pr, tg)], 2)
                     Image.fromarray((rows.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)).save(out / f'preview_{it:05d}.png')
             model.train()
-    torch.save({'model': model.state_dict(), 'parts': parts, 'arch': a.arch}, out / 'shader.pt')
+    torch.save({'model': model.state_dict(), 'parts': parts, 'arch': a.arch, 'widths': widths}, out / 'shader.pt')
     print('saved', out / 'shader.pt', flush=True)
 
 

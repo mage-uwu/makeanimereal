@@ -178,11 +178,20 @@ fn loadIn(l: i32, x: i32, y: i32) -> vec4<f32> {
 fn gelu(x: vec4<f32>) -> vec4<f32> {
   return 0.5 * x * (1.0 + tanh(clamp(0.7978845608 * (x + 0.044715 * x * x * x), vec4<f32>(-10.0), vec4<f32>(10.0))));
 }
+// Shared-memory tiling: a workgroup of 8 x 8 threads makes a 32 x 8 output tile. For each input
+// layer it loads the tile's 34 x 10 input region once (upsampling there, when the input is smaller),
+// then every thread reads its taps from workgroup memory.
+const TW = ${8 * PX + 2};
+const TH = 10;
+var<workgroup> tile: array<vec4<f32>, ${(8 * PX + 2) * 10}>;
 @compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
   let c = cropOf(p.W, p.H);
-  let x0 = c.x + i32(id.x) * ${PX}; let y = c.y + i32(id.y); let g0 = i32(id.z) * ${G};
-  if (x0 >= c.z || y >= c.w) { return; }
+  let ox0 = c.x + i32(wid.x) * ${8 * PX}; let oy0 = c.y + i32(wid.y) * 8;
+  let lx = i32(lid.x); let ly = i32(lid.y);
+  let x0 = ox0 + lx * ${PX}; let y = oy0 + ly;
+  let inside = x0 < c.z && y < c.w;
+  let g0 = i32(wid.z) * ${G};
   let ng = min(${G}, p.groups - g0);
   var acc: array<array<vec4<f32>, ${G}>, ${PX}>;
   for (var k = 0; k < ng; k++) {
@@ -190,25 +199,31 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var q = 0; q < ${PX}; q++) { acc[q][k] = b; }
   }
   let r = p.K / 2;
-  for (var t = 0; t < p.T; t++) {
-    let yy = y + t / p.K - r;
-    if (yy < 0 || yy >= p.H) { continue; }
-    let dx = t % p.K - r;
-    for (var l = 0; l < p.L; l++) {
-      var v: array<vec4<f32>, ${PX}>;
-      for (var q = 0; q < ${PX}; q++) {
-        let xx = x0 + q + dx;
-        if (xx >= 0 && xx < p.W) { v[q] = loadIn(l, xx, yy); } else { v[q] = vec4<f32>(0.0); }
-      }
-      for (var k = 0; k < ng; k++) {
-        let wi = p.wbase + (((g0 + k) * p.L + l) * p.T + t) * 4;
-        let w0 = vec4<f32>(Wt[wi]); let w1 = vec4<f32>(Wt[wi + 1]); let w2 = vec4<f32>(Wt[wi + 2]); let w3 = vec4<f32>(Wt[wi + 3]);
-        for (var q = 0; q < ${PX}; q++) {
-          acc[q][k] += vec4<f32>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]));
+  let li = ly * 8 + lx;
+  for (var l = 0; l < p.L; l++) {
+    for (var i = li; i < TW * TH; i += 64) {
+      let gx = ox0 - 1 + i % TW; let gy = oy0 - 1 + i / TW;
+      if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H) { tile[i] = loadIn(l, gx, gy); } else { tile[i] = vec4<f32>(0.0); }
+    }
+    workgroupBarrier();
+    if (inside) {
+      for (var t = 0; t < p.T; t++) {
+        let dy = t / p.K - r; let dx = t % p.K - r;
+        let rowBase = (ly + 1 + dy) * TW + lx * ${PX} + 1 + dx;
+        var v: array<vec4<f32>, ${PX}>;
+        for (var q = 0; q < ${PX}; q++) { v[q] = tile[rowBase + q]; }
+        for (var k = 0; k < ng; k++) {
+          let wi = p.wbase + (((g0 + k) * p.L + l) * p.T + t) * 4;
+          let w0 = vec4<f32>(Wt[wi]); let w1 = vec4<f32>(Wt[wi + 1]); let w2 = vec4<f32>(Wt[wi + 2]); let w3 = vec4<f32>(Wt[wi + 3]);
+          for (var q = 0; q < ${PX}; q++) {
+            acc[q][k] += vec4<f32>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]));
+          }
         }
       }
     }
+    workgroupBarrier();
   }
+  if (!inside) { return; }
   for (var k = 0; k < ng; k++) {
     let row = (p.row0 + g0 + k) * 3;
     let sc = aff[row + 1]; let sh = aff[row + 2];

@@ -87,7 +87,8 @@ def main():
 
     g, bb = sd['dec.film.bias'].float().chunk(2)  # appearance code 0: FiLM is a fixed per-channel affine
     layers = []
-    chans = {'x': 18, 'd0': 32, 'd1': 48, 'd2': 64, 'd3': 96, 'u0': 64, 'u1': 48, 'u2': 32}
+    w = list(ck.get('widths', (32, 48, 64, 96)))
+    chans = {'x': 18, 'd0': w[0], 'd1': w[1], 'd2': w[2], 'd3': w[3], 'u0': w[2], 'u1': w[1], 'u2': w[0]}
     prev = 'x'
     for k, name in enumerate(['d0', 'd1', 'd2', 'd3']):
         src = prev if k == 0 else f'{prev}_pool'
@@ -107,7 +108,7 @@ def main():
     (out / 'shader.json').write_text(json.dumps(meta))
 
     # Reference output for one held-out frame, through the exported (baked, quantised) texture.
-    model = train.Shader(P, sd['codes.weight'].shape[0], ck['arch'])
+    model = train.Shader(P, sd['codes.weight'].shape[0], ck['arch'], widths=tuple(w))
     model.load_state_dict(sd)
     model.eval()
     meta_d, x, y, pitch = train.load(a.data[0])
