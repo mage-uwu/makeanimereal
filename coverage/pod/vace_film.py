@@ -4,7 +4,9 @@
     python3 vace_film.py --depth depth.mp4 --ref style-ref.png --out film [--steps 4] [--size 720x1280]
                          [--chunk 81] [--overlap 17] [--only 0]
 
-The film is too long for one pass (the model makes 81 frames at a time), so it is made in chunks
+With --anchors (keyframes drawn independently, every 80 frames) and --overlap 1, each chunk is
+pinned between two anchors and nothing generated is ever fed forward, so the look cannot drift;
+this is the way to run it. Without anchors, the film is made in chunks
 that overlap: each chunk's first --overlap frames are the previous chunk's finished frames, held
 fixed (black mask), and the rest are generated (white mask) from the rendered depth. With the same
 style reference on every chunk, the look carries across the joins. --seed-frames opens the film
@@ -112,6 +114,7 @@ def main():
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--only', type=int, help='make just this chunk (a test)')
     p.add_argument('--seed-frames', help='finished frames (a video) that open the film: held fixed, so this film continues that one')
+    p.add_argument('--anchors', help='a folder of finished keyframes NNNN.png: held fixed wherever they fall (use with --overlap 1)')
     p.add_argument('--render', help='the raw render of this film (a video): turns on cleaning of the carried-over frames')
     p.add_argument('--calib', default='0:80', help='finished frames a:b that set the look the cleaning holds to')
     p.add_argument('--fp8', action='store_true', help='store the transformer weights in fp8 (half the memory)')
@@ -156,6 +159,11 @@ def main():
     if a.seed_frames:
         for j, f in enumerate(iio.imread(a.seed_frames)):
             frames[j] = np.asarray(Image.fromarray(f).convert('RGB').resize((w, h), Image.LANCZOS))
+    if a.anchors:
+        for f in sorted(Path(a.anchors).glob('*.png')):
+            if int(f.stem) < n:
+                frames[int(f.stem)] = np.asarray(Image.open(f).convert('RGB').resize((w, h), Image.LANCZOS))
+        print(f'anchors at {[i for i in range(n) if frames[i] is not None]}', flush=True)
     black, white = Image.new('L', (w, h), 0), Image.new('L', (w, h), 255)
     for k, s in enumerate(starts):
         path = out / f'chunk_{k:02d}.mp4'
@@ -166,13 +174,15 @@ def main():
             continue
         if a.only is not None and k != a.only:
             continue
-        keep = sum(frames[s + j] is not None for j in range(a.chunk))
+        # Every frame of this window that is already finished (anchors, the last chunk's frames) is
+        # held fixed; the rest is generated from the rendered depth.
+        held = [frames[s + j] is not None for j in range(a.chunk)]
+        keep = sum(held)
         if render and clean is None:
             c0, c1 = map(int, a.calib.split(':'))
             clean = Cleaner(frames, render, depth, range(c0, c1 + 1))
-        held = [clean(frames[s + j], s + j) if clean else frames[s + j] for j in range(keep)]
-        video = [Image.fromarray(held[j]) if j < keep else depth[s + j] for j in range(a.chunk)]
-        mask = [black if j < keep else white for j in range(a.chunk)]
+        video = [Image.fromarray(clean(frames[s + j], s + j) if clean else frames[s + j]) if held[j] else depth[s + j] for j in range(a.chunk)]
+        mask = [black if held[j] else white for j in range(a.chunk)]
         t = time.time()
         result = pipe(
             video=video, mask=mask, reference_images=[ref], prompt_embeds=embeds,
@@ -180,8 +190,9 @@ def main():
             generator=torch.Generator('cuda').manual_seed(a.seed + k), output_type='np',
         ).frames[0]
         chunk = (np.clip(result, 0, 1) * 255).round().astype(np.uint8)
-        for j in range(keep, a.chunk):
-            frames[s + j] = chunk[j]
+        for j in range(a.chunk):
+            if not held[j]:
+                frames[s + j] = chunk[j]
         export_to_video([c / 255.0 for c in chunk], str(path), fps=16)
         print(f'chunk {k}: frames {s}-{s + a.chunk - 1}, kept {keep}, {time.time() - t:.0f}s', flush=True)
 
