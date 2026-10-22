@@ -5,7 +5,7 @@
 //   node coverage/render-orbit.mjs [--model coverage/assets/magical_girl_02.vrm] [--out out/coverage]
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
-//        [--yaw0 0] [--skip-first] [--shorts]   (continue another spiral: start at its end yaw, without repeating that frame)
+//        [--yaw0 0] [--skip-first] [--shorts] [--gbuffer]   (continue another spiral: start at its end yaw, without repeating that frame)
 //
 // The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
 // sit (pitch range / turns) apart and every frame moves the same small angle from the last.
@@ -26,6 +26,7 @@ const { values: opt } = parseArgs({
     turns: { type: 'string', default: '4' }, // negative turns go the other way round
     yaw0: { type: 'string', default: '0' },
     'skip-first': { type: 'boolean', default: false },
+    gbuffer: { type: 'boolean', default: false }, // also write normal/, uva/, uvb/ for the learned shader
     shorts: { type: 'boolean', default: false }, // navy safety shorts under the dress, for views from below
     pitch: { type: 'string', default: '-20:70' },
     size: { type: 'string', default: '720x1280' },
@@ -41,7 +42,7 @@ const fps = Number(opt.fps), n = Math.round(Number(opt.seconds) * fps), turns = 
 const skip = opt['skip-first'] ? 1 : 0, yaw0 = Number(opt.yaw0);
 const cam = i => { const t = (i + skip) / (n - 1 + skip); return { yaw: +(yaw0 + t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
 const outDir = path.resolve(opt.out);
-for (const d of ['frames', 'depth']) await fs.mkdir(path.join(outDir, d), { recursive: true });
+for (const d of ['frames', 'depth', ...(opt.gbuffer ? ['normal', 'uva', 'uvb'] : [])]) await fs.mkdir(path.join(outDir, d), { recursive: true });
 
 const server = http.createServer(async (req, res) => {
   const file = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
@@ -68,18 +69,24 @@ try {
   console.log('model', info);
   const which = opt.only ? opt.only.split(',').map(Number) : [...Array(n).keys()];
   const cameras = [];
+  let parts = null;
   for (const i of which) {
     const c = cam(i);
     const s = await page.evaluate(([y, p]) => window.shot(y, p), [c.yaw, c.pitch]);
     const name = `${String(i).padStart(4, '0')}.png`;
     await fs.writeFile(path.join(outDir, 'frames', name), Buffer.from(s.png.split(',')[1], 'base64'));
     await fs.writeFile(path.join(outDir, 'depth', name), Buffer.from(s.depth.split(',')[1], 'base64'));
+    if (opt.gbuffer) {
+      const g = await page.evaluate(() => window.gbuffer());
+      for (const k of ['normal', 'uva', 'uvb']) await fs.writeFile(path.join(outDir, k, name), Buffer.from(g[k].split(',')[1], 'base64'));
+      parts = g.parts;
+    }
     cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, position: s.position, quaternion: s.quaternion });
     if (i % 50 === 0) console.log(`frame ${i}/${n}  yaw ${c.yaw}  pitch ${c.pitch}`);
   }
   await fs.writeFile(path.join(outDir, 'cameras.json'), JSON.stringify({
     fps, frames: n, width, height, fov: Number(opt.fov), turns, pitch: [p0, p1],
-    target: info.target, radius: info.radius, background: opt.background, cameras,
+    target: info.target, radius: info.radius, background: opt.background, parts, cameras,
   }));
   if (!opt.only) {
     for (const [dir, file] of [['frames', 'orbit.mp4'], ['depth', 'depth.mp4']])

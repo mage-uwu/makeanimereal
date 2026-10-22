@@ -38,6 +38,43 @@ const depthMat = new THREE.ShaderMaterial({
   side: THREE.DoubleSide,
 });
 
+// G-buffer passes for the learned shader: view-space normal, and surface UV with a part id (which
+// material). UV goes out in two 8-bit images (high and low byte per coordinate) to keep 16 bits.
+const gbufVert = `#include <common>
+  #include <uv_pars_vertex>
+  #include <skinning_pars_vertex>
+  varying vec3 vNormal; varying vec2 vUv0;
+  void main() {
+    #include <uv_vertex>
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <defaultnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    #include <project_vertex>
+    vNormal = normalize(transformedNormal); vUv0 = uv;
+  }`;
+const normalMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert,
+  fragmentShader: `varying vec3 vNormal; varying vec2 vUv0;
+    void main() { vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0); gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }`,
+  side: THREE.DoubleSide,
+});
+const uvMat = which => new THREE.ShaderMaterial({
+  vertexShader: gbufVert,
+  fragmentShader: `uniform float part; varying vec3 vNormal; varying vec2 vUv0;
+    vec2 split(float x) { x = fract(x) * 255.0; return vec2(floor(x) / 255.0, fract(x)); }
+    void main() {
+      vec2 u = split(vUv0.x), v = split(vUv0.y);
+      gl_FragColor = ${which === 'a' ? 'vec4(u.x, u.y, v.x, 1.0)' : 'vec4(v.y, part / 255.0, 1.0, 1.0)'};
+    }`,
+  uniforms: { part: { value: 0 } },
+  side: THREE.DoubleSide,
+});
+const uvMatA = uvMat('a'), uvMatB = uvMat('b');
+const PARTS = [];
+
 // Safety shorts for the views from below: the body is drawn again in the dress's navy over the band
 // from mid-thigh to the waist. The dress covers that band from every other angle, so only views
 // from under the hem see it (clothing, not underwear).
@@ -64,6 +101,7 @@ function addShorts() {
     const shorts = new THREE.SkinnedMesh(o.geometry, mat);
     shorts.bind(o.skeleton, o.bindMatrix);
     shorts.frustumCulled = false;
+    shorts.userData.partName = 'Shorts';
     o.parent.add(shorts);
   });
 }
@@ -113,6 +151,29 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts }
 };
 
 // Yaw 0 looks at her face; pitch is degrees above the horizon.
+// The G-buffer of the current camera (call after shot()).
+window.gbuffer = () => {
+  if (!PARTS.length) vrm.scene.traverse(o => {
+    if (!o.isMesh) return;
+    const name = o.userData.partName || [].concat(o.material)[0].name.replace(' (Instance)', '');
+    if (!PARTS.includes(name)) PARTS.push(name);
+    o.userData.part = PARTS.indexOf(name);
+    o.onBeforeRender = (r, sc, cam, geo, mat) => {
+      if (mat.uniforms && mat.uniforms.part) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; }
+    };
+  });
+  const bg = scene.background, out = {};
+  scene.background = new THREE.Color(0x000000);
+  for (const [key, mat] of [['normal', normalMat], ['uva', uvMatA], ['uvb', uvMatB]]) {
+    scene.overrideMaterial = mat;
+    renderer.render(scene, camera);
+    out[key] = renderer.domElement.toDataURL('image/png');
+  }
+  scene.background = bg;
+  scene.overrideMaterial = null;
+  return { ...out, parts: PARTS };
+};
+
 window.shot = (yaw, pitch) => {
   const y = THREE.MathUtils.degToRad(yaw), p = THREE.MathUtils.degToRad(pitch);
   camera.position.set(
