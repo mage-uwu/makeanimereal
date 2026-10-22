@@ -2,7 +2,7 @@
 """Pack the restyled coverage film for the viewer: every frame keyed off its green background and
 laid into sprite sheets, with the camera each frame was taken from.
 
-    python3 coverage/pack.py <film.mp4 | folder of chunk_NN.mp4> [--cameras out/coverage/cameras.json] [--out coverage/web]
+    python3 coverage/pack.py <film> [<film> ...] [--cameras cameras.json ...] [--overlap 1] [--out coverage/web]
                              [--width 540] [--grid 4x4]
 
 Writes <out>/film/sNN.webp (grid of frames, row by row) and <out>/film.json:
@@ -68,15 +68,23 @@ def make_sheet(job):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('film')
-    p.add_argument('--cameras', default='out/coverage/cameras.json')
+    p.add_argument('film', nargs='+', help='one or more films (each a film.mp4 or a folder of chunks), packed in order')
+    p.add_argument('--cameras', action='append', help='cameras.json per film, in the same order')
+    p.add_argument('--overlap', type=int, default=1, help='chunk overlap of folder films (1 for anchored films)')
     p.add_argument('--out', default='coverage/web')
     p.add_argument('--width', type=int, default=540)
     p.add_argument('--grid', default='4x4')
     a = p.parse_args()
     cols, rows = map(int, a.grid.split('x'))
-    cams = json.loads(Path(a.cameras).read_text())
-    video = frames_of_chunks(a.film, len(cams['cameras']), 81, 17) if Path(a.film).is_dir() else frames_of(a.film)
+    cam_files = a.cameras or ['out/coverage/cameras.json']
+    videos, cam_list = [], []
+    for film, cf in zip(a.film, cam_files):
+        c = json.loads(Path(cf).read_text())
+        v = frames_of_chunks(film, len(c['cameras']), 81, a.overlap) if Path(film).is_dir() else frames_of(film)
+        videos.append(v)
+        cam_list += c['cameras'][:len(v)]
+        fps = c['fps']
+    video = np.concatenate(videos)
     n = len(video)
     h = round(a.width * video.shape[1] / video.shape[2])
     out = Path(a.out)
@@ -86,9 +94,9 @@ def main():
     with Pool() as pool:
         names = pool.map(make_sheet, jobs)
     sheets = [{'file': f'film/{p_.name}', 'v': hashlib.sha1(p_.read_bytes()).hexdigest()[:8]} for p_ in names]
-    frames = [[c['yaw'] % 360, c['pitch']] for c in cams['cameras'][:n]]
+    frames = [[c['yaw'] % 360, c['pitch']] for c in cam_list]
     (out / 'film.json').write_text(json.dumps({
-        'fps': cams['fps'], 'frame': [a.width, h], 'grid': [cols, rows], 'sheets': sheets,
+        'fps': fps, 'frame': [a.width, h], 'grid': [cols, rows], 'sheets': sheets,
         'frames': [[round(y, 3), round(p_, 3)] for y, p_ in frames],
     }))
     print(f'{n} frames in {len(sheets)} sheets -> {out}')

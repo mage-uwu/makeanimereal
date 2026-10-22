@@ -113,7 +113,7 @@ def main():
     meta_d, x, y, pitch = train.load(a.data[0])
     i = 5
     with torch.no_grad():
-        pred = model(torch.from_numpy(x[i:i + 1]), torch.from_numpy(pitch[i:i + 1]))[0]
+        pred = model(torch.from_numpy(x[i:i + 1].astype(np.float32)), torch.from_numpy(pitch[i:i + 1]))[0]
     rgba = (pred.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
     Image.fromarray(rgba, 'RGBA').save(out / 'reference.png')
     (out / 'reference.json').write_text(json.dumps({'frame': meta_d['frames'][i]}))

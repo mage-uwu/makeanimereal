@@ -135,8 +135,38 @@ async function loadModel() {
   vrm.update(0);
   for (let i = 0; i < 240; i++) vrm.update(1 / 60);
   const box = new THREE.Box3().setFromObject(vrm.scene);
+  addShorts();
   target = box.getCenter(new THREE.Vector3());
   radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
+}
+
+// Navy safety shorts under the dress, as in the coverage renders from below (coverage/orbit-page.html):
+// the body drawn again in the dress's navy over the hips and upper thighs. Colour pass only.
+const shorts = [];
+function addShorts() {
+  const hip = new THREE.Vector3(), knee = new THREE.Vector3(), legTop = new THREE.Vector3();
+  vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(hip);
+  vrm.humanoid.getNormalizedBoneNode('leftLowerLeg').getWorldPosition(knee);
+  vrm.humanoid.getNormalizedBoneNode('leftUpperLeg').getWorldPosition(legTop);
+  const bottom = legTop.y - (legTop.y - knee.y) * 0.3, top = hip.y + 0.12;
+  const meshes = [];
+  vrm.scene.traverse(o => { if (o.isSkinnedMesh && /Body_00_SKIN/.test([].concat(o.material)[0].name)) meshes.push(o); });
+  for (const o of meshes) {
+    const ids = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg'].map(n => o.skeleton.bones.indexOf(vrm.humanoid.getRawBoneNode(n)));
+    const mat = new THREE.MeshBasicMaterial({ color: 0x1c2056, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    mat.onBeforeCompile = sh => {
+      const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
+        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(transformed, 1.0)).y;\nvW = ${own};`);
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
+        .replace('void main() {', `void main() {\n  if (vW < 0.5 || vY < ${bottom.toFixed(4)} || vY > ${top.toFixed(4)}) discard;`);
+    };
+    const s = new THREE.SkinnedMesh(o.geometry, mat);
+    s.bind(o.skeleton, o.bindMatrix);
+    s.frustumCulled = false;
+    o.parent.add(s);
+    shorts.push(s);
+  }
 }
 
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
@@ -217,6 +247,7 @@ function renderGBuffer() {
   camera.lookAt(target);
   scene.background = new THREE.Color(GREEN);
   renderer.setRenderTarget(gColor); renderer.render(scene, camera);
+  for (const m of shorts) m.visible = false;
   scene.background = new THREE.Color(0x000000);
   depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
   for (const [t, m] of [[gNormal, normalMat], [gDepth, depthMat]]) {
@@ -227,6 +258,7 @@ function renderGBuffer() {
   renderer.setClearColor(0x000000, 0);
   scene.overrideMaterial = uvMat; renderer.setRenderTarget(gUv); renderer.render(scene, camera);
   scene.overrideMaterial = null;
+  for (const m of shorts) m.visible = true;
 }
 
 // ---------- the network ----------

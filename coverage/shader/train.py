@@ -41,8 +41,8 @@ def load(folder):
         mask = (uvb[..., 2] > 127).astype(np.float32)
         x = np.concatenate([color / 255.0, normal / 255.0 * 2 - 1, depth[..., :1] / 255.0, mask[..., None],
                             u[..., None], v[..., None], part[..., None]], -1).astype(np.float32)
-        xs.append(x)
-        ys.append(img('target').astype(np.float32) / 255.0)
+        xs.append(x.astype(np.float16))  # half storage: 1,440 frames fit in GPU memory
+        ys.append((img('target').astype(np.float32) / 255.0).astype(np.float16))
         pitch.append(f['pitch'])
     return meta, np.stack(xs), np.stack(ys), np.array(pitch, np.float32)
 
@@ -182,7 +182,7 @@ def main():
         idx = torch.from_numpy(np.random.choice(train_ids, a.batch)).to(dev)
         cy, cx = np.random.randint(0, H - a.crop + 1), np.random.randint(0, W - min(a.crop, W) + 1)
         cw = min(a.crop, W)
-        x, y = Xg[idx, cy:cy + a.crop, cx:cx + cw], Yg[idx, cy:cy + a.crop, cx:cx + cw].permute(0, 3, 1, 2)
+        x, y = Xg[idx, cy:cy + a.crop, cx:cx + cw].float(), Yg[idx, cy:cy + a.crop, cx:cx + cw].permute(0, 3, 1, 2).float()
         pred = model(x, Pg[idx], idx)
         loss = F.l1_loss(pred[:, 3], y[:, 3]) + F.l1_loss(pred[:, :3] * y[:, 3:4], y[:, :3] * y[:, 3:4])
         if vgg:
@@ -198,8 +198,8 @@ def main():
                 errs = []
                 for k in range(0, len(test_ids), 8):
                     ids = torch.from_numpy(test_ids[k:k + 8]).to(dev)
-                    pr = model(Xg[ids], Pg[ids])  # code zero: the run-time shader
-                    errs.append(F.l1_loss(over_white(pr), over_white(Yg[ids].permute(0, 3, 1, 2)), reduction='none').mean((1, 2, 3)))
+                    pr = model(Xg[ids].float(), Pg[ids])  # code zero: the run-time shader
+                    errs.append(F.l1_loss(over_white(pr), over_white(Yg[ids].permute(0, 3, 1, 2).float()), reduction='none').mean((1, 2, 3)))
                 err = torch.cat(errs).mean().item()
                 line = f'it {it}  loss {loss.item():.4f}  held-out L1 {err:.4f}  {time.time() - t0:.0f}s'
                 print(line, flush=True)
@@ -208,9 +208,9 @@ def main():
                 if it % 2000 == 0 or it == a.iters:
                     pick = test_ids[np.linspace(0, len(test_ids) - 1, 6).astype(int)]
                     ids = torch.from_numpy(pick).to(dev)
-                    pr = over_white(model(Xg[ids], Pg[ids]))
-                    tg = over_white(Yg[ids].permute(0, 3, 1, 2))
-                    rd = Xg[ids][..., :3].permute(0, 3, 1, 2)
+                    pr = over_white(model(Xg[ids].float(), Pg[ids]))
+                    tg = over_white(Yg[ids].permute(0, 3, 1, 2).float())
+                    rd = Xg[ids][..., :3].permute(0, 3, 1, 2).float()
                     rows = torch.cat([torch.cat([r, q, t], 2) for r, q, t in zip(rd, pr, tg)], 2)
                     Image.fromarray((rows.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)).save(out / f'preview_{it:05d}.png')
             model.train()
