@@ -12,7 +12,7 @@ import { parseArgs } from 'node:util';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const live = path.join(root, 'coverage/live');
-const { values: opt } = parseArgs({ options: { out: { type: 'string', default: '/tmp/check' }, deep: { type: 'boolean', default: false }, poses: { type: 'boolean', default: false } } });
+const { values: opt } = parseArgs({ options: { out: { type: 'string', default: '/tmp/check' }, hash: { type: 'string', default: '' }, deep: { type: 'boolean', default: false }, poses: { type: 'boolean', default: false } } });
 await fs.mkdir(opt.out, { recursive: true });
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png' };
@@ -26,7 +26,7 @@ const server = http.createServer(async (req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
-  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
+  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--disable-gpu-watchdog'],
 });
 try {
   const page = await browser.newPage({ viewport: { width: 900, height: 900 } });
@@ -38,9 +38,10 @@ try {
     route.fulfill({ path: path.join(root, 'node_modules', name, rest), contentType: 'text/javascript' });
   });
   await page.route('https://fonts.**', r => r.fulfill({ body: '', contentType: 'text/css' }));
-  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  await page.goto(`http://127.0.0.1:${server.address().port}/${opt.hash ? '#' + opt.hash : ''}`);
   await page.waitForFunction(() => window.ready || document.getElementById('status').textContent.startsWith('Could'), null, { timeout: 180000 });
   const ref = JSON.parse(await fs.readFile(path.join(live, 'reference.json'), 'utf8')).frame;
+  console.log('engine', await page.evaluate(() => window.engine));
   const t0 = Date.now();
   const url = await page.evaluate(([y, p]) => window.debugFrame(y, p), [ref.yaw, ref.pitch]);
   console.log(`frame ${ref.frame} (yaw ${ref.yaw}, pitch ${ref.pitch}) drawn in ${Date.now() - t0} ms (software GL)`);

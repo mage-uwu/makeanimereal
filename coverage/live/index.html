@@ -98,7 +98,15 @@ const CROP_PAD = 64;                // > the decoder's reach in pixels, so the c
 const status = document.getElementById('status');
 
 const canvas = document.getElementById('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'high-performance' });
+// WebGPU compute (gpu.js) where the browser has it, else the WebGL engine below. On the WebGPU path
+// three.js draws the G-buffer into a hidden canvas and the visible canvas belongs to WebGPU.
+let gpuAdapter = null;
+if (navigator.gpu && !location.hash.includes('webgl')) {
+  try { gpuAdapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch { gpuAdapter = null; }
+}
+const glCanvas = gpuAdapter ? document.createElement('canvas') : canvas;
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: !!gpuAdapter, alpha: false, preserveDrawingBuffer: !!gpuAdapter, powerPreference: 'high-performance' });
+let gpu = null;
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const gl = renderer.getContext();
@@ -236,7 +244,7 @@ function assignParts(names) {
     const name = [].concat(o.material)[0].name.replace(' (Instance)', '');
     o.userData.part = Math.max(0, names.indexOf(name));
     o.onBeforeRender = (r, s, c, g, mat) => {
-      if (mat === uvMat) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; }
+      if (mat.uniforms?.part) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; }
     };
   });
 }
@@ -263,17 +271,57 @@ function renderGBuffer() {
   renderer.setRenderTarget(null);
 }
 
+// WebGPU path: the G-buffer as five side-by-side tiles of one canvas, in the coverage renders' own
+// 8-bit encodings (coverage/orbit-page.html): colour, normal, depth, and UV split into high and low
+// bytes with the part id and coverage.
+const normalMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide,
+  fragmentShader: `varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0); gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }`,
+});
+const depthMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { near: { value: 0 }, far: { value: 1 } },
+  fragmentShader: `uniform float near, far; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { float d = 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0); gl_FragColor = vec4(vec3(d), 1.0); }`,
+});
+const uvSplit = which => new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { part: { value: 0 } },
+  fragmentShader: `uniform float part; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    vec2 split(float x) { x = fract(x) * 255.0; return vec2(floor(x) / 255.0, fract(x)); }
+    void main() {
+      vec2 u = split(vUv0.x), v = split(vUv0.y);
+      gl_FragColor = ${which === 'a' ? 'vec4(u.x, u.y, v.x, 1.0)' : 'vec4(v.y, part / 255.0, 1.0, 1.0)'};
+    }`,
+});
+const uvMatA = uvSplit('a'), uvMatB = uvSplit('b');
+const BLACK = new THREE.Color(0x000000), GREEN_C = new THREE.Color(GREEN);
+function renderGBufferTiles() {
+  placeCamera();
+  depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+  renderer.setScissorTest(true);
+  [[GREEN_C, null], [BLACK, normalMat], [BLACK, depthMat], [BLACK, uvMatA], [BLACK, uvMatB]].forEach(([bg, mat], k) => {
+    for (const m of shorts) m.visible = !mat;
+    renderer.setViewport(k * NW, 0, NW, NH); renderer.setScissor(k * NW, 0, NW, NH);
+    scene.background = bg; scene.overrideMaterial = mat;
+    renderer.render(scene, camera);
+  });
+  scene.overrideMaterial = null;
+  for (const m of shorts) m.visible = true;
+  renderer.setScissorTest(false);
+}
+
 // The character's box on screen, from its bones (hair and skirt included), in network pixels.
 const v3 = new THREE.Vector3();
 let lastCrop = null;
-function cropBox() {
+function cropBox(topDown = false) {
   let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
   for (const b of bones) {
     b.getWorldPosition(v3).project(camera);
     x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y);
   }
   // Bones sit inside the skin, cloth and hair: pad by a fixed share of the frame, then by the reach.
-  const px = x => (x * 0.5 + 0.5) * NW, py = y => (y * 0.5 + 0.5) * NH;
+  const px = x => (x * 0.5 + 0.5) * NW, py = y => (topDown ? 0.5 - y * 0.5 : y * 0.5 + 0.5) * NH;
+  if (topDown) [y0, y1] = [y1, y0];
   const m = 0.12 * NH + CROP_PAD;
   let box = [px(x0) - m, py(y0) - m, px(x1) + m, py(y1) + m];
   const now = box;
@@ -568,7 +616,8 @@ function runNet(crop) {
 
 // ---------- show ----------
 let mode = 0;
-const css = n => new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue(n).trim());
+// Stage colours as written in CSS (sRGB values, not converted: the canvas shows values as given).
+const css = n => new THREE.Color().setStyle(getComputedStyle(document.documentElement).getPropertyValue(n).trim(), THREE.LinearSRGBColorSpace);
 function show(crop) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   const size = renderer.getSize(new THREE.Vector2());
@@ -620,6 +669,17 @@ document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
 // One frame: G-buffer, network (when shown), display. GPU time comes from a timer query where the
 // browser has one; otherwise the readout shows the frame rate.
 function drawFrame() {
+  if (gpu) {
+    renderGBufferTiles();
+    const crop = cropBox(true);
+    const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
+    if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+    const top = css('--stage-top'), bottom = css('--stage-bottom');
+    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
+      noShow: location.hash.includes('noshow') });
+    gpuMs = gpu.gpuMs;
+    return crop;
+  }
   renderGBuffer();
   const crop = cropBox();
   renderer.resetState();
@@ -655,8 +715,9 @@ function frame(now) {
     vrm.update(animated ? dt : 0);
     drawFrame();
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}°`;
+    const engine = gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}` : 'WebGL';
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
-      : gpuMs != null ? `shader ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${Math.round(fps)} fps`;
+      : gpuMs != null ? `${engine} · ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${engine} · ${Math.round(fps)} fps`;
     dirty = false;
   }
   lastT = now;
@@ -677,12 +738,12 @@ function readLayer(t, layer, w, h, type = gl.FLOAT) {
   return out;
 }
 // The network's output for a camera (and pose), as a PNG data URL, row 0 at the top.
-window.debugFrame = (yaw, pitch, poseName = 'stand', t = 0) => {
+window.debugFrame = async (yaw, pitch, poseName = 'stand', t = 0) => {
   cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
   setPose(poseName, t); vrm.update(0);
   const t0 = performance.now();
   drawFrame();
-  const out = readLayer(tensors.rgba, 0, NW, NH);
+  const out = gpu ? (await gpu.readTensor('rgba', 0)).data : readLayer(tensors.rgba, 0, NW, NH);
   renderer.resetState();
   window.lastFrameMs = performance.now() - t0;
   const c = document.createElement('canvas'); c.width = NW; c.height = NH;
@@ -692,20 +753,40 @@ window.debugFrame = (yaw, pitch, poseName = 'stand', t = 0) => {
   return c.toDataURL('image/png');
 };
 // One layer of a network tensor (after debugFrame), as plain floats, row 0 at the top.
-window.debugTensor = (name, layer) => {
+window.debugTensor = async (name, layer) => {
+  if (gpu) { const r = await gpu.readTensor(name, layer); return { w: r.w, h: r.h, data: Array.from(r.data) }; }
   const t = tensors[name];
   const data = readLayer(t, layer, t.w, t.h);
   renderer.resetState();
   return { w: t.w, h: t.h, data: Array.from(data) };
 };
 
+// WebGPU path: the network, its neural texture and the device (coverage/live/gpu.js).
+async function loadGpu() {
+  const net = await (await fetch('shader.json')).json();
+  parts = net.parts;
+  const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
+  const { createGpuShader } = await import('./gpu.js');
+  gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32') });
+  if (!gpu) throw new Error('WebGPU device unavailable');
+  renderer.setPixelRatio(1);
+  renderer.setSize(NW * 5, NH, false);
+}
+
 try {
-  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
-  await Promise.all([loadModel(), loadNet()]);
+  if (gpuAdapter) {
+    try { await Promise.all([loadModel(), loadGpu()]); }
+    catch (e) { console.warn('WebGPU path failed, reload with #webgl for the WebGL engine:', e); throw e; }
+  } else {
+    if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
+    await Promise.all([loadModel(), loadNet()]);
+  }
+  window.__gpu = gpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
+  window.engine = gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
   assignParts(parts);
   status.hidden = true;
   window.ready = true;
-  requestAnimationFrame(frame);
+  if (!location.hash.includes('noloop')) requestAnimationFrame(frame);
 } catch (e) {
   status.textContent = `Could not start: ${e.message}`;
   console.error(e);
