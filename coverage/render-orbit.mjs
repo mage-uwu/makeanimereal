@@ -5,6 +5,7 @@
 //   node coverage/render-orbit.mjs [--model coverage/assets/magical_girl_02.vrm] [--out out/coverage]
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
+//        [--yaw0 0] [--skip-first]   (continue another spiral: start at its end yaw, without repeating that frame)
 //
 // The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
 // sit (pitch range / turns) apart and every frame moves the same small angle from the last.
@@ -22,7 +23,9 @@ const { values: opt } = parseArgs({
     out: { type: 'string', default: 'out/coverage' },
     seconds: { type: 'string', default: '60' },
     fps: { type: 'string', default: '16' },
-    turns: { type: 'string', default: '4' },
+    turns: { type: 'string', default: '4' }, // negative turns go the other way round
+    yaw0: { type: 'string', default: '0' },
+    'skip-first': { type: 'boolean', default: false },
     pitch: { type: 'string', default: '-20:70' },
     size: { type: 'string', default: '720x1280' },
     fov: { type: 'string', default: '30' },
@@ -34,7 +37,8 @@ const { values: opt } = parseArgs({
 const [width, height] = opt.size.split('x').map(Number);
 const [p0, p1] = opt.pitch.split(':').map(Number);
 const fps = Number(opt.fps), n = Math.round(Number(opt.seconds) * fps), turns = Number(opt.turns);
-const cam = i => { const t = i / (n - 1); return { yaw: +(t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
+const skip = opt['skip-first'] ? 1 : 0, yaw0 = Number(opt.yaw0);
+const cam = i => { const t = (i + skip) / (n - 1 + skip); return { yaw: +(yaw0 + t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
 const outDir = path.resolve(opt.out);
 for (const d of ['frames', 'depth']) await fs.mkdir(path.join(outDir, d), { recursive: true });
 

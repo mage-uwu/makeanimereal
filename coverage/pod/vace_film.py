@@ -7,7 +7,9 @@
 The film is too long for one pass (the model makes 81 frames at a time), so it is made in chunks
 that overlap: each chunk's first --overlap frames are the previous chunk's finished frames, held
 fixed (black mask), and the rest are generated (white mask) from the rendered depth. With the same
-style reference on every chunk, the look carries across the joins. Writes <out>/chunk_NN.mp4 as
+style reference on every chunk, the look carries across the joins. --seed-frames opens the film
+with frames that are already finished (another film's last frames), so a new camera path continues
+that film's look. Writes <out>/chunk_NN.mp4 as
 each chunk finishes (so a stopped run resumes where it left off) and <out>/film.mp4 at the end.
 The lightx2v step-distill LoRA lets 4 steps without classifier-free guidance stand in for 50.
 """
@@ -47,6 +49,7 @@ def main():
     p.add_argument('--shift', type=float, default=5.0)
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--only', type=int, help='make just this chunk (a test)')
+    p.add_argument('--seed-frames', help='finished frames (a video) that open the film: held fixed, so this film continues that one')
     p.add_argument('--fp8', action='store_true', help='store the transformer weights in fp8 (half the memory)')
     a = p.parse_args()
     w, h = map(int, a.size.split('x'))
@@ -84,6 +87,9 @@ def main():
     print(f'loaded in {time.time() - t0:.0f}s, {torch.cuda.memory_allocated() / 1e9:.1f} GB on GPU', flush=True)
 
     frames = [None] * n  # finished frames, uint8 arrays
+    if a.seed_frames:
+        for j, f in enumerate(iio.imread(a.seed_frames)):
+            frames[j] = np.asarray(Image.fromarray(f).convert('RGB').resize((w, h), Image.LANCZOS))
     black, white = Image.new('L', (w, h), 0), Image.new('L', (w, h), 255)
     for k, s in enumerate(starts):
         path = out / f'chunk_{k:02d}.mp4'
@@ -94,7 +100,7 @@ def main():
             continue
         if a.only is not None and k != a.only:
             continue
-        keep = sum(frames[s + j] is not None for j in range(a.chunk)) if k else 0
+        keep = sum(frames[s + j] is not None for j in range(a.chunk))
         video = [Image.fromarray(frames[s + j]) if j < keep else depth[s + j] for j in range(a.chunk)]
         mask = [black if j < keep else white for j in range(a.chunk)]
         t = time.time()
