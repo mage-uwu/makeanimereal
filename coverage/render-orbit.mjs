@@ -6,6 +6,8 @@
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
 //        [--yaw0 0] [--skip-first] [--shorts] [--gbuffer]   (continue another spiral: start at its end yaw, without repeating that frame)
+//        [--poses poses.json]   (instead of the spiral: [{clip, t, yaw, pitch}, ...] per frame, posed with the
+//                                mocap clips in coverage/live/motions.json; clip 'stand' is the plain stand)
 //
 // The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
 // sit (pitch range / turns) apart and every frame moves the same small angle from the last.
@@ -34,13 +36,17 @@ const { values: opt } = parseArgs({
     background: { type: 'string', default: '#00b140' },
     'arm-drop': { type: 'string', default: '68' },
     only: { type: 'string' },
+    poses: { type: 'string' },
   },
 });
 const [width, height] = opt.size.split('x').map(Number);
 const [p0, p1] = opt.pitch.split(':').map(Number);
-const fps = Number(opt.fps), n = Math.round(Number(opt.seconds) * fps), turns = Number(opt.turns);
+const fps = Number(opt.fps), turns = Number(opt.turns);
 const skip = opt['skip-first'] ? 1 : 0, yaw0 = Number(opt.yaw0);
-const cam = i => { const t = (i + skip) / (n - 1 + skip); return { yaw: +(yaw0 + t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
+const poses = opt.poses ? JSON.parse(await fs.readFile(opt.poses, 'utf8')) : null;
+const n = poses ? poses.length : Math.round(Number(opt.seconds) * fps);
+const cam = i => poses ? { yaw: poses[i].yaw, pitch: poses[i].pitch } : spiral(i);
+const spiral = i => { const t = (i + skip) / (n - 1 + skip); return { yaw: +(yaw0 + t * turns * 360).toFixed(4), pitch: +(p0 + t * (p1 - p0)).toFixed(4) }; };
 const outDir = path.resolve(opt.out);
 for (const d of ['frames', 'depth', ...(opt.gbuffer ? ['normal', 'uva', 'uvb'] : [])]) await fs.mkdir(path.join(outDir, d), { recursive: true });
 
@@ -65,6 +71,7 @@ try {
   const info = await page.evaluate(a => window.setup(a), {
     model: `/${path.relative(root, path.resolve(opt.model))}`, width, height,
     fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']), shorts: opt.shorts,
+    motions: poses ? '/coverage/live/motions.json' : null,
   });
   console.log('model', info);
   const which = opt.only ? opt.only.split(',').map(Number) : [...Array(n).keys()];
@@ -72,6 +79,7 @@ try {
   let parts = null;
   for (const i of which) {
     const c = cam(i);
+    if (poses) await page.evaluate(([clip, t]) => window.pose(clip, t), [poses[i].clip, poses[i].t]);
     const s = await page.evaluate(([y, p]) => window.shot(y, p), [c.yaw, c.pitch]);
     const name = `${String(i).padStart(4, '0')}.png`;
     await fs.writeFile(path.join(outDir, 'frames', name), Buffer.from(s.png.split(',')[1], 'base64'));
@@ -81,14 +89,14 @@ try {
       for (const k of ['normal', 'uva', 'uvb']) await fs.writeFile(path.join(outDir, k, name), Buffer.from(g[k].split(',')[1], 'base64'));
       parts = g.parts;
     }
-    cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, position: s.position, quaternion: s.quaternion });
+    cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, ...(poses ? { clip: poses[i].clip, t: poses[i].t } : {}), position: s.position, quaternion: s.quaternion });
     if (i % 50 === 0) console.log(`frame ${i}/${n}  yaw ${c.yaw}  pitch ${c.pitch}`);
   }
   await fs.writeFile(path.join(outDir, 'cameras.json'), JSON.stringify({
     fps, frames: n, width, height, fov: Number(opt.fov), turns, pitch: [p0, p1],
     target: info.target, radius: info.radius, background: opt.background, parts, cameras,
   }));
-  if (!opt.only) {
+  if (!opt.only && !poses) {
     for (const [dir, file] of [['frames', 'orbit.mp4'], ['depth', 'depth.mp4']])
       spawnSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(fps), '-i', path.join(outDir, dir, '%04d.png'),
         '-c:v', 'libx264', '-crf', '14', '-pix_fmt', 'yuv420p', path.join(outDir, file)], { stdio: 'inherit' });

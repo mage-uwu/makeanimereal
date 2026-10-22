@@ -5,8 +5,8 @@ learned shader.
     python3 coverage/shader/build_dataset.py --gbuffer out/coverage-gb --film out/coverage-film_a \\
         --out out/shader-data/w1 [--size 360x640] [--overlap 1]
 
---film is a folder of chunk_NN.mp4 from coverage/pod/vace_film.py (used as far as it goes) or a
-film.mp4. Writes per frame NNNN_{color,normal,depth,uva,uvb,target}.png at --size (UV and part are
+--film is a folder of chunk_NN.mp4 from coverage/pod/vace_film.py (used as far as it goes), a
+film.mp4, or a folder of single drawn frames NNNN.png (coverage/anchors.py --every 1, for posed renders). Writes per frame NNNN_{color,normal,depth,uva,uvb,target}.png at --size (UV and part are
 resized nearest, so they stay exact) and meta.json (frame ids, camera pitch, part names).
 """
 import argparse
@@ -48,13 +48,17 @@ def main():
             remap[i] = canon.index(name)
         parts = canon
     n = len(cams['cameras'])
-    film = pack.frames_of_chunks(a.film, n, 81, a.overlap) if Path(a.film).is_dir() else pack.frames_of(a.film)
+    fd = Path(a.film)
+    if fd.is_dir() and any(fd.glob('[0-9]*.png')):
+        film = (np.asarray(Image.open(fd / f'{i:04d}.png').convert('RGB')) if (fd / f'{i:04d}.png').exists() else None for i in range(n))
+    else:
+        film = pack.frames_of_chunks(a.film, n, 81, a.overlap) if fd.is_dir() else pack.frames_of(a.film)
     done = []
     for i, f in enumerate(film):
         name = f'{i:04d}'
         if not (gb / 'uvb' / f'{name}.png').exists():
             break
-        if i % a.every:
+        if i % a.every or f is None:
             continue
         Image.fromarray(pack.key_green(f), 'RGBA').resize((w, h), Image.LANCZOS).save(out / f'{name}_target.png')
         for kind, resample in [('frames', Image.BILINEAR), ('normal', Image.BILINEAR), ('depth', Image.BILINEAR),

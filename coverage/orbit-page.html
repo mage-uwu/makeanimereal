@@ -18,8 +18,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { createMotion } from '/coverage/live/motion.js';
 
-let renderer, scene, camera, vrm, target, radius;
+let renderer, scene, camera, vrm, target, radius, motion, standPose;
 // Linear depth across the character, inverted so nearer is brighter (the video model's convention).
 const depthMat = new THREE.ShaderMaterial({
   vertexShader: `#include <common>
@@ -94,7 +95,7 @@ function addShorts() {
     mat.onBeforeCompile = sh => {
       const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
       sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
-        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(transformed, 1.0)).y;\nvW = ${own};`);
+        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(position, 1.0)).y;\nvW = ${own};`);
       sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>\nvarying float vY;\nvarying float vW;`)
         .replace('void main() {', `void main() {\n  if (vW < 0.5 || vY < ${bottom.toFixed(4)} || vY > ${top.toFixed(4)}) discard;`);
     };
@@ -106,7 +107,7 @@ function addShorts() {
   });
 }
 
-window.setup = async ({ model, width, height, fov, background, armDrop, shorts }) => {
+window.setup = async ({ model, width, height, fov, background, armDrop, shorts, motions }) => {
   renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(1);
   renderer.setSize(width, height);
@@ -127,14 +128,19 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts }
   VRMUtils.rotateVRM0(vrm);
   vrm.scene.traverse(o => { o.frustumCulled = false; });
   scene.add(vrm.scene);
+  if (motions) motion = createMotion(THREE, vrm, await (await fetch(motions)).json());
 
   // Arms down from the T-pose into a relaxed stand; the rest of the body stays as modelled.
   const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
   const drop = THREE.MathUtils.degToRad(armDrop);
-  bone('leftUpperArm').rotation.z = -drop;
-  bone('rightUpperArm').rotation.z = drop;
-  bone('leftLowerArm').rotation.z = -0.15;
-  bone('rightLowerArm').rotation.z = 0.15;
+  standPose = () => {
+    vrm.humanoid.resetNormalizedPose();
+    bone('leftUpperArm').rotation.z = -drop;
+    bone('rightUpperArm').rotation.z = drop;
+    bone('leftLowerArm').rotation.z = -0.15;
+    bone('rightLowerArm').rotation.z = 0.15;
+  };
+  standPose();
   vrm.update(0);
   // Let the spring bones (hair, skirt) settle under gravity before the camera moves.
   for (let i = 0; i < 240; i++) vrm.update(1 / 60);
@@ -148,6 +154,13 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts }
   // gets shorter on screen, and her width is well inside the portrait frame.
   radius = size.y * 0.58 / Math.tan(THREE.MathUtils.degToRad(fov) / 2);
   return { size: size.toArray(), target: target.toArray(), radius };
+};
+
+// Pose her at time t of a mocap clip (coverage/live/motions.json), or back in the stand ('stand').
+// The hair and skirt springs run through the second before t, so they hang as they would mid-motion.
+window.pose = (clip, t) => {
+  if (clip === 'stand' || !motion) { standPose(); vrm.update(0); return; }
+  for (let k = 60; k >= 0; k--) { motion.apply(clip, Math.max(0, t - k / 60)); vrm.update(1 / 60); }
 };
 
 // Yaw 0 looks at her face; pitch is degrees above the horizon.
