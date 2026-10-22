@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,17 @@ def key_green(rgb):
     return np.dstack([out.clip(0, 255).astype(np.uint8), np.asarray(a)])
 
 
+def make_sheet(job):
+    frames, w, h, cols, rows, path = job
+    sheet = Image.new('RGBA', (w * cols, h * rows), (0, 0, 0, 0))
+    for j, f in enumerate(frames):
+        cut = Image.fromarray(key_green(f), 'RGBA').resize((w, h), Image.LANCZOS)
+        sheet.paste(cut, ((j % cols) * w, (j // cols) * h))
+    sheet.save(path, 'WEBP', quality=82, method=6)
+    print(path.name, flush=True)
+    return path
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('film')
@@ -69,16 +81,11 @@ def main():
     h = round(a.width * video.shape[1] / video.shape[2])
     out = Path(a.out)
     (out / 'film').mkdir(parents=True, exist_ok=True)
-    sheets = []
-    for s in range(0, n, cols * rows):
-        sheet = Image.new('RGBA', (a.width * cols, h * rows), (0, 0, 0, 0))
-        for j, f in enumerate(video[s:s + cols * rows]):
-            cut = Image.fromarray(key_green(f), 'RGBA').resize((a.width, h), Image.LANCZOS)
-            sheet.paste(cut, ((j % cols) * a.width, (j // cols) * h))
-        name = f'film/s{s // (cols * rows):02d}.webp'
-        sheet.save(out / name, 'WEBP', quality=82, method=6)
-        sheets.append({'file': name, 'v': hashlib.sha1((out / name).read_bytes()).hexdigest()[:8]})
-        print(name, flush=True)
+    jobs = [(video[s:s + cols * rows], a.width, h, cols, rows, out / f'film/s{s // (cols * rows):02d}.webp')
+            for s in range(0, n, cols * rows)]
+    with Pool() as pool:
+        names = pool.map(make_sheet, jobs)
+    sheets = [{'file': f'film/{p_.name}', 'v': hashlib.sha1(p_.read_bytes()).hexdigest()[:8]} for p_ in names]
     frames = [[c['yaw'] % 360, c['pitch']] for c in cams['cameras'][:n]]
     (out / 'film.json').write_text(json.dumps({
         'fps': cams['fps'], 'frame': [a.width, h], 'grid': [cols, rows], 'sheets': sheets,
