@@ -1,0 +1,548 @@
+<meta charset="utf-8">
+<title>Magical Girl Live</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Shippori+Mincho:wght@600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: one full-height stage with the live drawing; a control strip at the foot (view mode, pose, readouts). */
+:root {
+  --stage-top: #eef0fb; --stage-bottom: #d9dcf2;
+  --ink: #1d2150; --muted: #5d6293; --gold: #a57a1f; --chip: rgba(255,255,255,.72); --line: rgba(29,33,80,.16);
+  --display: 'Shippori Mincho', 'Hiragino Mincho ProN', Georgia, serif;
+  --body: 'Zen Kaku Gothic New', 'Hiragino Sans', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --stage-top: #0e1030; --stage-bottom: #1d2052;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16); color-scheme: dark } }
+:root[data-theme="dark"] {
+  --stage-top: #0e1030; --stage-bottom: #1d2052;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16); color-scheme: dark }
+html, body { height: 100%; }
+body { background: var(--stage-bottom); color: var(--ink); font-family: var(--body); overflow: hidden; }
+.app { height: 100%; display: grid; grid-template-rows: auto 1fr auto; background: linear-gradient(var(--stage-top), var(--stage-bottom)); }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding-block: 14px 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { margin: 0; font-family: var(--display); font-size: clamp(1.25rem, 3.5vw, 1.7rem); text-wrap: balance; }
+.hint { color: var(--muted); font-size: .85rem; }
+#stage { position: relative; min-height: 0; touch-action: none; cursor: grab; }
+#stage:active { cursor: grabbing; }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#status { position: absolute; inset: auto 0 12px; text-align: center; color: var(--muted); font-size: .8rem; font-family: var(--mono); }
+footer { display: flex; align-items: center; gap: 12px 18px; flex-wrap: wrap; padding-block: 10px 14px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.label { font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+button { font: inherit; font-size: .85rem; color: var(--ink); background: var(--chip); border: 1px solid var(--line);
+  border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.readout { font-family: var(--mono); font-size: .8rem; font-variant-numeric: tabular-nums; display: grid; gap: 2px; margin-left: auto; min-width: 12em; }
+@media (max-width: 560px) { .readout { margin-left: 0; } }
+</style>
+
+<div class="app">
+  <header>
+    <h1>Magical Girl Live</h1>
+    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit.</span>
+  </header>
+  <div id="stage" tabindex="0" aria-label="Live character view; drag to orbit">
+    <canvas id="view"></canvas>
+    <div id="status">loading model and shader…</div>
+  </div>
+  <footer>
+    <div class="group" role="group" aria-label="View">
+      <span class="label">View</span>
+      <button id="m-shader" aria-pressed="true">Learned shader</button>
+      <button id="m-raw" aria-pressed="false">Raw 3D</button>
+    </div>
+    <div class="group" role="group" aria-label="Pose">
+      <span class="label">Pose</span>
+      <button data-pose="stand" aria-pressed="true">Stand</button>
+      <button data-pose="wave" aria-pressed="false">Wave</button>
+      <button data-pose="look" aria-pressed="false">Look around</button>
+      <button data-pose="sway" aria-pressed="false">Idle sway</button>
+    </div>
+    <div class="readout" aria-live="polite">
+      <span id="r-angle">yaw 0° · pitch 0°</span>
+      <span id="r-time">shader –</span>
+    </div>
+  </footer>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+} }
+</script>
+<script type="module">
+// Live learned shader. Every frame: render the base model's G-buffer from the current camera
+// (colour as MToon draws it, view-space normal, depth, surface UV with a part id), pack it into the
+// network's input (sampling the neural texture per part), then run the decoder's convolutions as
+// fragment-shader passes over half-float array textures, exactly as coverage/shader/train.py
+// defines them, and show the drawing. The camera and lights match the coverage renders the shader
+// learned from (coverage/orbit-page.html).
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const GW = 720, GH = 1280;          // G-buffer, as the film was rendered
+const NW = 360, NH = 640;           // network, as it was trained
+const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const status = document.getElementById('status');
+
+const canvas = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.autoClear = true;
+
+// ---------- the model, posed and lit as in the coverage renders ----------
+const scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 3, 2);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(FOV, GW / GH, 0.01, 100);
+let vrm, target, radius, parts = [];
+const rest = {};
+
+// The model ships as bytes packed into an opaque RGB PNG (coverage/live/slim_vrm.py): 3 bytes a
+// pixel, after a 4-byte little-endian length.
+async function unpackPng(url) {
+  const blob = await (await fetch(url)).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const c = new OffscreenCanvas(bmp.width, bmp.height), ctx = c.getContext('2d');
+  ctx.drawImage(bmp, 0, 0);
+  const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+  const rgb = new Uint8Array(bmp.width * bmp.height * 3);
+  for (let i = 0, j = 0; i < px.length; i += 4) { rgb[j++] = px[i]; rgb[j++] = px[i + 1]; rgb[j++] = px[i + 2]; }
+  const n = rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (rgb[3] << 24);
+  return rgb.buffer.slice(4, 4 + n);
+}
+
+async function loadModel() {
+  const loader = new GLTFLoader();
+  loader.register(p => new VRMLoaderPlugin(p));
+  const gltf = await loader.parseAsync(await unpackPng('model.vrm.png'), '');
+  vrm = gltf.userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  scene.add(vrm.scene);
+  setPose('stand', 0);
+  vrm.update(0);
+  for (let i = 0; i < 240; i++) vrm.update(1 / 60);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  target = box.getCenter(new THREE.Vector3());
+  radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
+}
+
+const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
+let pose = 'stand';
+function setPose(name, t) {
+  const d = THREE.MathUtils.degToRad;
+  const set = (n, x, y, z) => { const b = bone(n); if (b) b.rotation.set(x, y, z); };
+  // The training pose: arms relaxed down from the T-pose.
+  set('leftUpperArm', 0, 0, -d(ARM_DROP)); set('rightUpperArm', 0, 0, d(ARM_DROP));
+  set('leftLowerArm', 0, 0, -0.15); set('rightLowerArm', 0, 0, 0.15);
+  set('head', 0, 0, 0); set('neck', 0, 0, 0); set('spine', 0, 0, 0); set('hips', 0, 0, 0);
+  if (name === 'wave') {
+    set('rightUpperArm', 0, 0, d(-60));
+    set('rightLowerArm', 0, d(10), d(-60 + Math.sin(t * 6) * 18));
+    set('head', 0, 0, d(-6));
+  } else if (name === 'look') {
+    set('neck', d(Math.sin(t * 0.9) * 8), d(Math.sin(t * 0.7) * 30), 0);
+    set('head', d(Math.sin(t * 1.1) * 6), d(Math.sin(t * 0.7) * 15), d(Math.sin(t * 0.5) * 8));
+  } else if (name === 'sway') {
+    set('hips', 0, d(Math.sin(t * 0.8) * 6), d(Math.sin(t * 1.6) * 2));
+    set('spine', d(Math.sin(t * 1.6) * 2), 0, d(Math.sin(t * 0.8) * -3));
+    set('leftUpperArm', d(Math.sin(t * 1.6) * 6), 0, -d(ARM_DROP - 4 + Math.sin(t * 0.8) * 4));
+    set('rightUpperArm', d(-Math.sin(t * 1.6) * 6), 0, d(ARM_DROP - 4 - Math.sin(t * 0.8) * 4));
+    set('head', 0, d(Math.sin(t * 0.8) * -8), d(Math.sin(t * 1.6) * 3));
+  }
+}
+
+// ---------- G-buffer passes ----------
+const gbufVert = `#include <common>
+  #include <uv_pars_vertex>
+  #include <skinning_pars_vertex>
+  varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+  void main() {
+    #include <uv_vertex>
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <defaultnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    #include <project_vertex>
+    vNormal = normalize(transformedNormal); vUv0 = uv; vDepth = -mvPosition.z;
+  }`;
+const normalMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide,
+  fragmentShader: `varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0); gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }`,
+});
+const depthMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { near: { value: 0 }, far: { value: 1 } },
+  fragmentShader: `uniform float near, far; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { float d = 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0); gl_FragColor = vec4(vec3(d), 1.0); }`,
+});
+const uvMat = new THREE.ShaderMaterial({
+  vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { part: { value: 0 } },
+  fragmentShader: `uniform float part; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { gl_FragColor = vec4(fract(vUv0), part, 1.0); }`,
+});
+const rt = (type, samples = 0) => new THREE.WebGLRenderTarget(GW, GH, { type, samples, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true });
+const gColor = rt(THREE.HalfFloatType, 4), gNormal = rt(THREE.HalfFloatType, 4), gDepth = rt(THREE.HalfFloatType, 4);
+const gUv = rt(THREE.FloatType);
+gUv.texture.minFilter = gUv.texture.magFilter = THREE.NearestFilter;
+
+function assignParts(names) {
+  vrm.scene.traverse(o => {
+    if (!o.isMesh) return;
+    const name = [].concat(o.material)[0].name.replace(' (Instance)', '');
+    o.userData.part = Math.max(0, names.indexOf(name));
+    o.onBeforeRender = (r, s, c, g, mat) => {
+      if (mat === uvMat) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; }
+    };
+  });
+}
+
+function renderGBuffer() {
+  const y = THREE.MathUtils.degToRad(cam.yaw), p = THREE.MathUtils.degToRad(cam.pitch);
+  camera.position.set(target.x + radius * Math.cos(p) * Math.sin(y), target.y + radius * Math.sin(p), target.z + radius * Math.cos(p) * Math.cos(y));
+  camera.lookAt(target);
+  scene.background = new THREE.Color(GREEN);
+  renderer.setRenderTarget(gColor); renderer.render(scene, camera);
+  scene.background = new THREE.Color(0x000000);
+  depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+  for (const [t, m] of [[gNormal, normalMat], [gDepth, depthMat]]) {
+    scene.overrideMaterial = m; renderer.setRenderTarget(t); renderer.render(scene, camera);
+  }
+  // The UV pass carries coverage in alpha, so it clears to transparent.
+  scene.background = null;
+  renderer.setClearColor(0x000000, 0);
+  scene.overrideMaterial = uvMat; renderer.setRenderTarget(gUv); renderer.render(scene, camera);
+  scene.overrideMaterial = null;
+}
+
+// ---------- the network ----------
+const quadScene = new THREE.Scene(), quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+quadScene.add(quad);
+function pass(material, target, layer = 0) {
+  quad.material = material;
+  renderer.setRenderTarget(target, layer);
+  renderer.render(quadScene, quadCam);
+}
+const tensor = (w, h, layers) => {
+  const t = new THREE.WebGLArrayRenderTarget(w, h, layers, { depthBuffer: false });
+  // The array target makes its own texture and ignores the type option: set it on the texture, or
+  // the tensors are 8-bit and clamp every negative activation to 0.
+  t.texture.type = THREE.HalfFloatType;
+  t.texture.minFilter = t.texture.magFilter = THREE.LinearFilter;
+  t.texture.generateMipmaps = false;
+  return t;
+};
+const VERT = `out vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+const glsl = (frag, uniforms) => new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, vertexShader: VERT, fragmentShader: frag, uniforms, depthTest: false, depthWrite: false });
+
+let net, X, tensors = {}, featTex = [], weights, packMat, convMat, poolMat, showMat;
+
+function halfToFloat(h) {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+async function loadNet() {
+  net = await (await fetch('shader.json')).json();
+  parts = net.parts;
+  const texLoader = new THREE.TextureLoader();
+  featTex = await Promise.all([0, 1, 2].map(k => texLoader.loadAsync(`feat${k}.png`)));
+  for (const t of featTex) {
+    t.flipY = false; t.colorSpace = THREE.NoColorSpace; t.generateMipmaps = false;
+    t.minFilter = t.magFilter = THREE.LinearFilter; t.needsUpdate = true;
+  }
+  const size = { x: [NW, NH] };
+  const sizeOf = name => {
+    const base = name.replace(/_mid$/, '');
+    const div = { x: 1, d0: 1, d1: 2, d2: 4, d3: 8, u0: 4, u1: 2, u2: 1, rgba: 1 }[base];
+    return [NW / div, NH / div];
+  };
+  const chans = { ...net.channels, rgba: 4 };
+  for (const l of net.layers) chans[l.out] = l.cout;
+  const layersOf = name => Math.ceil((chans[name.replace(/_pool$/, '')] ?? chans[name]) / 4);
+  X = tensor(NW, NH, 5);
+  tensors.x = X;
+  for (const l of net.layers) { const [w, h] = sizeOf(l.out); tensors[l.out] = tensor(w, h, Math.ceil(l.cout / 4)); }
+  for (const [pool, src] of Object.entries(net.pools)) {
+    const [w, h] = sizeOf(src); tensors[pool] = tensor(w / 2, h / 2, layersOf(src));
+  }
+  // Weights: per layer, per output group of 4, per input layer, per tap, a 4x4 block (4 texels).
+  const blocks = [];
+  let total = 0;
+  for (const l of net.layers) {
+    const raw = new Uint16Array(Uint8Array.from(atob(l.w), c => c.charCodeAt(0)).buffer);
+    const T = l.k * l.k, outGroups = Math.ceil(l.cout / 4);
+    const ins = l.inputs.map(n => ({ n, c: chans[n.replace(/_pool$/, '')] ?? chans[n] }));
+    const L = ins.reduce((s, i) => s + Math.ceil(i.c / 4), 0);
+    l.L = L; l.T = T; l.base = total; l.groups = outGroups;
+    l.la = Math.ceil(ins[0].c / 4); l.lb = ins[1] ? Math.ceil(ins[1].c / 4) : 0;
+    const block = new Float32Array(outGroups * L * T * 16);
+    let cOffset = 0, layerOffset = 0;
+    for (const inp of ins) {
+      for (let c = 0; c < inp.c; c++) {
+        const layer = layerOffset + (c >> 2), comp = c & 3, tc = cOffset + c;
+        for (let o = 0; o < l.cout; o++) for (let t = 0; t < T; t++) {
+          const w = halfToFloat(raw[((o * l.cin + tc) * T) + t]);
+          const og = o >> 2, j = o & 3;
+          block[(((og * L + layer) * T + t) * 4 + j) * 4 + comp] = w;
+        }
+      }
+      cOffset += inp.c; layerOffset += Math.ceil(inp.c / 4);
+    }
+    blocks.push(block);
+    total += block.length / 4;
+  }
+  const WIDTH = 4096, height = Math.ceil(total / WIDTH);
+  const data = new Float32Array(WIDTH * height * 4);
+  let off = 0;
+  for (const b of blocks) { data.set(b, off); off += b.length; }
+  weights = new THREE.DataTexture(data, WIDTH, height, THREE.RGBAFormat, THREE.FloatType);
+  weights.needsUpdate = true;
+
+  packMat = glsl(`precision highp float; precision highp sampler2DArray;
+    uniform sampler2D color, normalT, depthT, uvT, f0, f1, f2;
+    uniform int layer; uniform float sinP, cosP; uniform vec4 lo0, lo1, hi0, hi1; uniform vec2 tiles; uniform float tile;
+    in vec2 vUv; out vec4 o;
+    vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+    void main() {
+      ivec2 px = ivec2(gl_FragCoord.xy);
+      vec4 uvp = texelFetch(uvT, ivec2(px.x * 2 + 1, px.y * 2), 0);
+      float mask = uvp.a > 0.5 ? 1.0 : 0.0;
+      if (layer < 2) {
+        vec3 c = toSrgb(texture(color, vUv).rgb);
+        vec3 n = texture(normalT, vUv).rgb * 2.0 - 1.0;
+        float d = texture(depthT, vUv).r;
+        o = layer == 0 ? vec4(c, n.x) : vec4(n.y, n.z, d, mask);
+        return;
+      }
+      if (layer == 4) { o = vec4(sinP, cosP, 0.0, 0.0); return; }
+      float part = floor(uvp.b + 0.5);
+      vec2 cell = vec2(mod(part, tiles.x), floor(part / tiles.x));
+      vec2 inTile = clamp(uvp.rg, 0.5 / tile, 1.0 - 0.5 / tile);
+      vec2 a = (cell + inTile) / tiles;
+      vec3 s0 = texture(f0, a).rgb, s1 = texture(f1, a).rgb, s2 = texture(f2, a).rgb;
+      vec4 q0 = vec4(s0, s1.r), q1 = vec4(s1.gb, s2.rg);
+      o = layer == 2 ? (lo0 + q0 * (hi0 - lo0)) * mask : (lo1 + q1 * (hi1 - lo1)) * mask;
+    }`, {
+    color: { value: gColor.texture }, normalT: { value: gNormal.texture }, depthT: { value: gDepth.texture }, uvT: { value: gUv.texture },
+    f0: { value: featTex[0] }, f1: { value: featTex[1] }, f2: { value: featTex[2] }, layer: { value: 0 },
+    sinP: { value: 0 }, cosP: { value: 1 }, tiles: { value: new THREE.Vector2(net.cols, net.rows) }, tile: { value: net.tile },
+    lo0: { value: new THREE.Vector4(...net.feat_lo.slice(0, 4)) }, lo1: { value: new THREE.Vector4(...net.feat_lo.slice(4, 8)) },
+    hi0: { value: new THREE.Vector4(...net.feat_hi.slice(0, 4)) }, hi1: { value: new THREE.Vector4(...net.feat_hi.slice(4, 8)) },
+  });
+
+  convMat = glsl(`precision highp float; precision highp sampler2DArray;
+    uniform sampler2DArray A, B; uniform highp sampler2D W;
+    uniform int la, lb, L, T, K, base, og, act; uniform vec2 outSize; uniform vec4 bias, scale, shift;
+    out vec4 o;
+    vec4 w(int i) { return texelFetch(W, ivec2(i % 4096, i / 4096), 0); }
+    // tanh's argument is clamped: GLSL tanh overflows (inf / inf) for large inputs, and it is ±1 there anyway.
+    float gelu(float x) { return 0.5 * x * (1.0 + tanh(clamp(0.7978845608 * (x + 0.044715 * x * x * x), -10.0, 10.0))); }
+    void main() {
+      vec4 acc = bias;
+      int r = K / 2;
+      for (int t = 0; t < T; t++) {
+        vec2 q = gl_FragCoord.xy + vec2(float(t % K - r), -float(t / K - r));
+        if (q.x < 0.0 || q.y < 0.0 || q.x > outSize.x || q.y > outSize.y) continue;
+        vec2 uv = q / outSize;
+        for (int l = 0; l < L; l++) {
+          vec4 v = l < la ? texture(A, vec3(uv, float(l))) : texture(B, vec3(uv, float(l - la)));
+          int i = base + ((og * L + l) * T + t) * 4;
+          acc += vec4(dot(w(i), v), dot(w(i + 1), v), dot(w(i + 2), v), dot(w(i + 3), v));
+        }
+      }
+      if (act == 1) acc = vec4(gelu(acc.x), gelu(acc.y), gelu(acc.z), gelu(acc.w));
+      if (act == 2) acc = 1.0 / (1.0 + exp(-acc));
+      o = acc * scale + shift;
+    }`, {
+    A: { value: null }, B: { value: null }, W: { value: weights }, la: { value: 0 }, lb: { value: 0 }, L: { value: 0 }, T: { value: 9 },
+    K: { value: 3 }, base: { value: 0 }, og: { value: 0 }, act: { value: 1 }, outSize: { value: new THREE.Vector2() },
+    bias: { value: new THREE.Vector4() }, scale: { value: new THREE.Vector4(1, 1, 1, 1) }, shift: { value: new THREE.Vector4() },
+  });
+
+  poolMat = glsl(`precision highp float; precision highp sampler2DArray;
+    uniform sampler2DArray S; uniform int layer; out vec4 o;
+    void main() {
+      ivec2 p = ivec2(gl_FragCoord.xy) * 2;
+      o = 0.25 * (texelFetch(S, ivec3(p, layer), 0) + texelFetch(S, ivec3(p + ivec2(1, 0), layer), 0)
+        + texelFetch(S, ivec3(p + ivec2(0, 1), layer), 0) + texelFetch(S, ivec3(p + ivec2(1, 1), layer), 0));
+    }`, { S: { value: null }, layer: { value: 0 } });
+
+  showMat = glsl(`precision highp float; precision highp sampler2DArray;
+    uniform sampler2DArray R; uniform sampler2D raw; uniform int mode; uniform vec3 top, bottom; uniform vec4 box;
+    in vec2 vUv; out vec4 o;
+    vec3 toSrgb(vec3 c) { c = max(c, 0.0); return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+    vec3 toLin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+    void main() {
+      vec3 bg = mix(bottom, top, vUv.y);
+      vec2 p = (vUv - box.xy) / box.zw;
+      if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = vec4(toLin(bg), 1.0); return; }
+      if (mode == 1) {
+        vec3 c = toSrgb(texture(raw, p).rgb);
+        float green = step(0.25, c.g - max(c.r, c.b));
+        o = vec4(toLin(mix(c, bg, green)), 1.0);
+        return;
+      }
+      vec4 d = texture(R, vec3(p, 0.0));
+      o = vec4(toLin(mix(bg, d.rgb, d.a)), 1.0);
+    }`, { R: { value: null }, raw: { value: gColor.texture }, mode: { value: 0 },
+    top: { value: new THREE.Color() }, bottom: { value: new THREE.Color() }, box: { value: new THREE.Vector4() } });
+  showMat.uniforms.R.value = tensors.rgba.texture;
+}
+
+function runNet() {
+  const pr = THREE.MathUtils.degToRad(cam.pitch);
+  packMat.uniforms.sinP.value = Math.sin(pr); packMat.uniforms.cosP.value = Math.cos(pr);
+  for (let k = 0; k < 5; k++) { packMat.uniforms.layer.value = k; pass(packMat, X, k); }
+  const u = convMat.uniforms;
+  for (const l of net.layers) {
+    const out = tensors[l.out];
+    const A = tensors[l.inputs[0]], B = l.inputs[1] ? tensors[l.inputs[1]] : A;
+    u.A.value = A.texture; u.B.value = B.texture; u.la.value = l.la; u.lb.value = l.lb; u.L.value = l.L;
+    u.T.value = l.T; u.K.value = l.k; u.base.value = l.base; u.outSize.value.set(out.width, out.height);
+    u.act.value = l.act === 'gelu' ? 1 : 2;
+    for (let g = 0; g < l.groups; g++) {
+      u.og.value = g;
+      const b = [0, 1, 2, 3].map(j => l.b[g * 4 + j] ?? 0);
+      u.bias.value.set(...b);
+      if (l.affine) {
+        u.scale.value.set(...[0, 1, 2, 3].map(j => l.affine[0][g * 4 + j] ?? 1));
+        u.shift.value.set(...[0, 1, 2, 3].map(j => l.affine[1][g * 4 + j] ?? 0));
+      } else { u.scale.value.set(1, 1, 1, 1); u.shift.value.set(0, 0, 0, 0); }
+      pass(convMat, out, g);
+    }
+    const pooled = Object.entries(net.pools).find(([, src]) => src === l.out);
+    if (pooled) {
+      const dst = tensors[pooled[0]];
+      poolMat.uniforms.S.value = out.texture;
+      for (let k = 0; k < dst.depth; k++) { poolMat.uniforms.layer.value = k; pass(poolMat, dst, k); }
+    }
+  }
+}
+
+// ---------- show ----------
+let mode = 0;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function show() {
+  renderer.setRenderTarget(null);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const size = renderer.getSize(new THREE.Vector2());
+  if (size.x !== w || size.y !== h) renderer.setSize(w, h, false);
+  const s = Math.min(w / NW, h / NH), bw = NW * s / w, bh = NH * s / h;
+  showMat.uniforms.box.value.set((1 - bw) / 2, (1 - bh) / 2, bw, bh);
+  showMat.uniforms.mode.value = mode;
+  showMat.uniforms.top.value.set(css('--stage-top'));
+  showMat.uniforms.bottom.value.set(css('--stage-bottom'));
+  quad.material = showMat;
+  renderer.render(quadScene, quadCam);
+}
+
+// ---------- camera and loop ----------
+const cam = { yaw: 0, pitch: 5 }, vel = { yaw: 0, pitch: 0 };
+let dragging = false, last = null, dirty = true, poseStart = performance.now();
+const stage = document.getElementById('stage');
+stage.addEventListener('pointerdown', e => { dragging = true; last = [e.clientX, e.clientY]; stage.setPointerCapture(e.pointerId); });
+stage.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - last[0], dy = e.clientY - last[1]; last = [e.clientX, e.clientY];
+  vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true;
+});
+['pointerup', 'pointercancel'].forEach(n => stage.addEventListener(n, () => { dragging = false; }));
+stage.addEventListener('keydown', e => {
+  const s = { ArrowLeft: [6, 0], ArrowRight: [-6, 0], ArrowUp: [0, 5], ArrowDown: [0, -5] }[e.key];
+  if (s) { e.preventDefault(); cam.yaw += s[0]; cam.pitch += s[1]; dirty = true; }
+});
+addEventListener('resize', () => { dirty = true; });
+
+function setPressed(sel, el) { document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', b === el)); }
+document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
+document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
+document.querySelectorAll('[data-pose]').forEach(b => b.onclick = () => {
+  pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
+});
+
+let lastT = performance.now(), avg = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (!dragging && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) {
+    cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true;
+  }
+  cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
+  const animated = pose !== 'stand';
+  if (animated || dirty) {
+    setPose(pose, (now - poseStart) / 1000);
+    vrm.update(animated ? dt : 0);
+    const t0 = performance.now();
+    renderGBuffer();
+    if (mode === 0) runNet();
+    show();
+    avg = avg ? avg * 0.9 + (performance.now() - t0) * 0.1 : performance.now() - t0;
+    document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}°`;
+    document.getElementById('r-time').textContent = mode === 0 ? `shader ${avg.toFixed(0)} ms / frame` : 'raw render';
+    dirty = false;
+  }
+  requestAnimationFrame(frame);
+}
+
+// For checks: the network's output for a given camera, as a PNG data URL (360 x 640).
+window.debugFrame = (yaw, pitch, poseName = 'stand', t = 0) => {
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName;
+  setPose(poseName, t); vrm.update(0);
+  renderGBuffer(); runNet();
+  const read = new THREE.WebGLRenderTarget(NW, NH, { type: THREE.UnsignedByteType });
+  const copy = glsl(`precision highp float; precision highp sampler2DArray; uniform sampler2DArray R; in vec2 vUv; out vec4 o;
+    void main() { o = texture(R, vec3(vUv, 0.0)); }`, { R: { value: tensors.rgba.texture } });
+  pass(copy, read);
+  const px = new Uint8Array(NW * NH * 4);
+  renderer.readRenderTargetPixels(read, 0, 0, NW, NH, px);
+  const c = document.createElement('canvas'); c.width = NW; c.height = NH;
+  const id = c.getContext('2d').createImageData(NW, NH);
+  for (let y = 0; y < NH; y++) id.data.set(px.subarray((NH - 1 - y) * NW * 4, (NH - y) * NW * 4), y * NW * 4);
+  c.getContext('2d').putImageData(id, 0, 0);
+  return c.toDataURL('image/png');
+};
+
+// For checks: one layer of a network tensor (after debugFrame), as plain floats, row 0 at the top.
+window.debugTensor = (name, layer) => {
+  const t = tensors[name], w = t.width, h = t.height;
+  const read = new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType });
+  const copy = glsl(`precision highp float; precision highp sampler2DArray; uniform sampler2DArray R; uniform int layer; out vec4 o;
+    void main() { o = texelFetch(R, ivec3(ivec2(gl_FragCoord.xy), layer), 0); }`, { R: { value: t.texture }, layer: { value: layer } });
+  pass(copy, read);
+  const px = new Float32Array(w * h * 4);
+  renderer.readRenderTargetPixels(read, 0, 0, w, h, px);
+  const out = new Float32Array(w * h * 4);
+  for (let y = 0; y < h; y++) out.set(px.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+  return { w, h, data: Array.from(out) };
+};
+
+try {
+  const gl = renderer.getContext();
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
+  await Promise.all([loadModel(), loadNet()]);
+  assignParts(parts);
+  status.hidden = true;
+  window.ready = true;
+  requestAnimationFrame(frame);
+} catch (e) {
+  status.textContent = `Could not start: ${e.message}`;
+  console.error(e);
+}
+</script>
