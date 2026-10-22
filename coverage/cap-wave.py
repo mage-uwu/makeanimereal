@@ -7,7 +7,8 @@ missed (the top of the head), opening with the film's own finished frames so its
 
 --seed a:b picks the film frames that open the wave, in that order (b < a runs them backwards).
 Writes, into the cap dir:
-seed.mp4 (those styled frames) and wave-depth.mp4 (their depth, then the cap path's own depth).
+seed.mp4 (those styled frames), wave-depth.mp4 and wave-render.mp4 (the seed frames' depth and raw
+render, then the cap path's own; vace_film.py --render cleans against the render).
 """
 import argparse
 import importlib.util
@@ -51,7 +52,9 @@ def main():
     encode([film[i] for i in seed], cap / 'seed.mp4')
     depth = [Path(a.wave) / 'depth' / f'{i:04d}.png' for i in seed] + sorted((cap / 'depth').glob('*.png'))
     encode(depth, cap / 'wave-depth.mp4')
-    print(f'{cap}: {len(seed)} seed frames + {len(depth) - len(seed)} new -> seed.mp4, wave-depth.mp4')
+    render = [Path(a.wave) / 'frames' / f'{i:04d}.png' for i in seed] + sorted((cap / 'frames').glob('*.png'))
+    encode(render, cap / 'wave-render.mp4')
+    print(f'{cap}: {len(seed)} seed frames + {len(depth) - len(seed)} new -> seed.mp4, wave-depth.mp4, wave-render.mp4')
 
 
 if __name__ == '__main__':

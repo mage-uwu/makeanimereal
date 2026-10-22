@@ -18,6 +18,7 @@ import gc
 import time
 from pathlib import Path
 
+import cv2
 import imageio.v3 as iio
 import numpy as np
 import torch
@@ -37,6 +38,67 @@ PROMPT = (
 )
 
 
+class Cleaner:
+    """Stops drift in the frames a chunk carries over from the last one. Chained chunks feed their
+    own output forward, so small errors in colour and background grow from chunk to chunk. Before a
+    frame is carried, its background (outside the rendered silhouette) goes back to the clean green
+    of the calibration frames, and each part of her (found by clustering the raw render's colours:
+    dress, sash, skin, hair...) goes back to the colour that part had in the calibration frames.
+    The correction is a smooth per-pixel offset, so the drawing's own lines and shading stay."""
+
+    K = 12
+
+    def __init__(self, frames, render, depth, calib):
+        self.render, self.depth = render, depth
+        px_r, px_s, bg = [], [], []
+        for i in calib:
+            m = self.mask(i, 0)
+            px_r.append(self.lab(render[i])[m][::7])
+            px_s.append(self.lab(frames[i])[m][::7])
+            bg.append(frames[i][~self.mask(i, 25)])
+        px_r, px_s = np.concatenate(px_r), np.concatenate(px_s)
+        crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
+        _, labels, self.centers = cv2.kmeans(px_r, self.K, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+        labels = labels.ravel()
+        self.want = np.stack([np.median(px_s[labels == k], 0) for k in range(self.K)])
+        self.bg = np.median(np.concatenate(bg), 0).astype(np.uint8)
+        print(f'cleaning: {self.K} parts, background {self.bg}', flush=True)
+
+    @staticmethod
+    def lab(rgb):
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    def mask(self, i, grow=9):
+        m = (np.asarray(self.depth[i])[..., 0] > 6).astype(np.uint8)
+        return cv2.dilate(m, np.ones((2 * grow + 1, 2 * grow + 1), np.uint8)) > 0 if grow else m > 0
+
+    def __call__(self, frame, i):
+        m0, m = self.mask(i, 0), self.mask(i)
+        lr, ls = self.lab(self.render[i]), self.lab(frame)
+        part = np.argmin(((lr[m0][:, None, :] - self.centers[None]) ** 2).sum(-1), 1)
+        # Per part: how far this frame's colour has wandered from the calibrated colour.
+        offset = np.zeros_like(ls)
+        weight = np.zeros(ls.shape[:2], np.float32)
+        cur = ls[m0]
+        for k in range(self.K):
+            sel = part == k
+            if sel.sum() < 50:
+                continue
+            d = self.want[k] - np.median(cur[sel], 0)
+            idx = np.nonzero(m0)
+            offset[idx[0][sel], idx[1][sel]] = d
+            weight[idx[0][sel], idx[1][sel]] = 1
+        blur = lambda x: cv2.GaussianBlur(x, (0, 0), 6)
+        wsm = blur(weight)[..., None]
+        offset = blur(offset) / np.maximum(wsm, 1e-3)
+        ls = ls + offset * np.clip(wsm * 2, 0, 1)
+        out = cv2.cvtColor(ls.clip(0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+        # A touch of softening, so the model's sharpening can't compound through the chain either.
+        out = cv2.GaussianBlur(out, (0, 0), 0.6)
+        soft = cv2.GaussianBlur(m.astype(np.float32), (7, 7), 0)[..., None]
+        return (out * soft + self.bg * (1 - soft)).astype(np.uint8)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--depth', required=True)
@@ -50,6 +112,8 @@ def main():
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--only', type=int, help='make just this chunk (a test)')
     p.add_argument('--seed-frames', help='finished frames (a video) that open the film: held fixed, so this film continues that one')
+    p.add_argument('--render', help='the raw render of this film (a video): turns on cleaning of the carried-over frames')
+    p.add_argument('--calib', default='0:80', help='finished frames a:b that set the look the cleaning holds to')
     p.add_argument('--fp8', action='store_true', help='store the transformer weights in fp8 (half the memory)')
     a = p.parse_args()
     w, h = map(int, a.size.split('x'))
@@ -86,6 +150,8 @@ def main():
         torch.cuda.empty_cache()
     print(f'loaded in {time.time() - t0:.0f}s, {torch.cuda.memory_allocated() / 1e9:.1f} GB on GPU', flush=True)
 
+    render = [np.asarray(Image.fromarray(f).convert('RGB').resize((w, h), Image.BICUBIC)) for f in iio.imread(a.render)] if a.render else None
+    clean = None
     frames = [None] * n  # finished frames, uint8 arrays
     if a.seed_frames:
         for j, f in enumerate(iio.imread(a.seed_frames)):
@@ -101,7 +167,11 @@ def main():
         if a.only is not None and k != a.only:
             continue
         keep = sum(frames[s + j] is not None for j in range(a.chunk))
-        video = [Image.fromarray(frames[s + j]) if j < keep else depth[s + j] for j in range(a.chunk)]
+        if render and clean is None:
+            c0, c1 = map(int, a.calib.split(':'))
+            clean = Cleaner(frames, render, depth, range(c0, c1 + 1))
+        held = [clean(frames[s + j], s + j) if clean else frames[s + j] for j in range(keep)]
+        video = [Image.fromarray(held[j]) if j < keep else depth[s + j] for j in range(a.chunk)]
         mask = [black if j < keep else white for j in range(a.chunk)]
         t = time.time()
         result = pipe(
