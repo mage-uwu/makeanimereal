@@ -285,7 +285,7 @@ const net = document.createElement('canvas');
 net.width = NW; net.height = NH;
 const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
-let fps = 0, lastShown = 0, raw = false, lines = 'toon';   // line art: 'toon' (toon.js), 'neural' (the ink branch), 'off'
+let fps = 0, lastShown = 0, raw = false, lines = 'off';   // line art (both off for now): 'toon' (toon.js), 'neural' (the ink branch), 'off'
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
 // frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
@@ -571,10 +571,7 @@ try {
     parts = shader.parts;
   }
   assignParts(parts);
-  if (gls) {   // GPU engine: line art over the drawing, toon contours to start with
-    toon = createToon({ THREE, renderer, root: vrm.scene, extra: shorts });
-    document.getElementById('m-lines').hidden = false;
-  }
+  // Line art (toon contours, the ink branch) is off for now: the chip stays hidden and toon.js unused.
   for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
     const b = document.createElement('button');
     b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');
