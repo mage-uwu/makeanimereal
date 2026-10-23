@@ -343,6 +343,11 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
   const qBuf = timestamps ? buf(16, GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC) : null;
   const qRead = timestamps ? buf(16, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST) : null;
   let qBusy = false, gpuMs = null;
+  // Frames in flight: the page starts a frame only while fewer than MAX_IN_FLIGHT are unfinished, so
+  // work can't queue up behind a GPU that takes longer than the display interval (without this the
+  // latency, then the frame rate, snowballs). Two lets the CPU prepare one frame while the GPU draws one.
+  const MAX_IN_FLIGHT = 2;
+  let inFlight = 0;
 
   // One frame: copy the G-buffer canvas in, run the network on the crop, draw.
   // lighting (models with light channels): 9 floats, the light's view-space direction, key colour x strength
@@ -371,13 +376,15 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
       pass.end();
       if (query && !qBusy) { enc.resolveQuerySet(query, 0, 2, qBuf, 0); enc.copyBufferToBuffer(qBuf, 0, qRead, 0, 16); }
     }
-    if (noShow) { device.queue.submit([enc.finish()]); return; }  // checks: headless browsers can't present
+    const done = () => { inFlight++; device.queue.onSubmittedWorkDone().then(() => { inFlight--; }); };
+    if (noShow) { device.queue.submit([enc.finish()]); done(); return; }  // checks: headless browsers can't present
     const W = canvas.width, H = canvas.height;
     const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
     device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
     const rp = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
     rp.setPipeline(showPipe); rp.setBindGroup(0, showGroup); rp.draw(3); rp.end();
     device.queue.submit([enc.finish()]);
+    done();
     if (query && !qBusy && mode === 0) {
       qBusy = true;
       qRead.mapAsync(GPUMapMode.READ).then(() => {
@@ -422,7 +429,7 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     return { w: W, h: H, data: px };
   }
 
-  return { frame, readTensor, readShow, light: LIT, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
+  return { frame, readTensor, readShow, light: LIT, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 
 function halfToFloat(h) {
