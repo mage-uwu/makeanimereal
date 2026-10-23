@@ -44,7 +44,7 @@ button { flex: 0 0 auto; font: inherit; font-size: .85rem; color: var(--ink); ba
 button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
 button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .say { display: flex; gap: 6px; padding: 0 max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); }
-.say[hidden] { display: none; }
+.say[hidden], button[hidden] { display: none; }
 .say input { flex: 1; min-width: 0; font: inherit; font-size: 16px; color: var(--ink); background: var(--chip); border: 1px solid var(--line);
   border-radius: 999px; padding: 7px 14px; -webkit-user-select: text; user-select: text; }
 .say input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
@@ -72,6 +72,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="v-speak" aria-pressed="false" title="Type a line for her to say">Speak</button>
       <span class="sep"></span>
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
+      <button id="m-lines" aria-pressed="true" hidden title="The ink branch: black line art on her contours">Lines</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
       <button id="e-cpu" aria-pressed="false" title="The network in WebAssembly workers">CPU</button>
@@ -283,7 +284,7 @@ const net = document.createElement('canvas');
 net.width = NW; net.height = NH;
 const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
-let fps = 0, lastShown = 0, raw = false;
+let fps = 0, lastShown = 0, raw = false, lines = true;
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
 // frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
@@ -295,7 +296,7 @@ function frameBox() {
   return { W, H, box: [(W - w) / 2 + zoom.tx * dpr, (H - h) / 2 + zoom.ty * dpr, w, h] };
 }
 const rgbOf = n => { const c = new THREE.Color().setStyle(css(n), THREE.LinearSRGBColorSpace); return [c.r, c.g, c.b]; };
-function glView(extra = {}) { return { ...frameBox(), top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ...extra }; }
+function glView(extra = {}) { return { ...frameBox(), top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines, ...extra }; }
 function paint() {
   if (ENGINE === 'gpu') { if (gls) gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView({ showOnly: true }) }); return; }
   const { W, H, box } = frameBox();
@@ -482,6 +483,7 @@ let pose = 'stand', poseStart = performance.now(), dtLast = 0, lastT = performan
 const animated = () => pose !== 'stand';
 const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
 const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
+document.getElementById('m-lines').onclick = e => { lines = !lines; e.currentTarget.setAttribute('aria-pressed', String(lines)); dirty = true; };
 document.getElementById('m-raw').onclick = e => { raw = !raw; e.currentTarget.setAttribute('aria-pressed', String(raw)); dirty = true; };
 document.getElementById('v-follow').onclick = e => {
   face.follow = !face.follow; if (!face.follow) face.ndc = null;
@@ -558,6 +560,7 @@ try {
     parts = shader.parts;
   }
   assignParts(parts);
+  if (gls?.ink) document.getElementById('m-lines').hidden = false;   // the GPU engine can show the drawing without its ink
   for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
     const b = document.createElement('button');
     b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');

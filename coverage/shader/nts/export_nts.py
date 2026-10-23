@@ -9,10 +9,11 @@ into an image, for the web), fine0..2.png (the fine texture,
 and gates are derived here exactly as shader_nts.c's requantize() does (tss_ternary, rows64_pack,
 tc_pack), in float32, so the browser runs what was trained.
 
-net.bin, little-endian: 'NTSV', int32 NB, parts, DIL[NB]; float32 We[64 x 18], be[64]; per block
+net.bin, little-endian: 'NTSV', int32 NB, parts, DIL[NB] (or 'NTS2', NB, parts, NBC, DIL[NB] for a model
+with an ink branch: the colour head reads block NBC's output, the ink head the last block's); float32 We[64 x 18], be[64]; per block
 int8 stencil codes[13 x 64], float32 gate[64], b1[64], b2[64], s1[64], s2[64], int8 c1[64 x 64],
 c2[64 x 64] (row = output); float32 Wh[4 x 64], bh[4]; float32 lo[2][8], step[2][8] (fine, coarse);
-uint8 coarse texture [parts][64][64][8].
+uint8 coarse texture [parts][64][64][8]. NTS2 adds float32 Wl[64], bl after bh: black line art's opacity.
 """
 import argparse
 import json
@@ -31,13 +32,16 @@ ap.add_argument('--parts', required=True, help="a dataset's meta.json (its part 
 a = ap.parse_args()
 
 raw = Path(a.model).read_bytes()
-assert raw[:4] == b'NTSW'
+assert raw[:4] in (b'NTSW', b'NTSL')
 NB, dw, P, kt = struct.unpack_from('<4i', raw, 4)
 assert (dw, kt) == (DW, KT)
 DIL = struct.unpack_from(f'<{MAXB}i', raw, 20)[:NB]
 off = 20 + 4 * MAXB
+NBC = NB   # NTSL (shader_nts.c --lines): the colour head reads block NBC; blocks NBC.. feed the ink head
+if raw[:4] == b'NTSL':
+    NBC = struct.unpack_from('<i', raw, off)[0]; off += 4
 tc_size = (KT + TCG + 1) * DW
-n_dense = DW * CIN + DW + NB * (tc_size + 2 * DW) + 4 * DW + 4
+n_dense = DW * CIN + DW + NB * (tc_size + 2 * DW) + 4 * DW + 4 + (DW + 4 if NBC < NB else 0)
 f32 = lambda n: np.frombuffer(raw, np.float32, n, off)
 dense = f32(n_dense); off += 4 * n_dense
 W = []
@@ -71,7 +75,7 @@ def ternary(w):
 o = 0
 We = dense[o:o + DW * CIN]; o += DW * CIN
 be = dense[o:o + DW]; o += DW
-out = bytearray(b'NTSV' + struct.pack(f'<2i{NB}i', NB, P, *DIL))
+out = bytearray(b'NTSV' + struct.pack(f'<2i{NB}i', NB, P, *DIL) if NBC == NB else b'NTS2' + struct.pack(f'<3i{NB}i', NB, P, NBC, *DIL))
 out += We.tobytes() + be.tobytes()
 for b in range(NB):
     tc = dense[o:o + tc_size]; o += tc_size
@@ -84,8 +88,10 @@ for b in range(NB):
     out += q.tobytes() + gate.tobytes() + b1.tobytes() + b2.tobytes() + s1.tobytes() + s2.tobytes() + c1.tobytes() + c2.tobytes()
 Wh = dense[o:o + 4 * DW]; o += 4 * DW
 bh = dense[o:o + 4]; o += 4
-assert o == n_dense
 out += Wh.tobytes() + bh.tobytes()
+if NBC < NB:   # the ink head: Wl[64], bl
+    out += dense[o:o + DW].tobytes() + dense[o + DW:o + DW + 1].tobytes(); o += DW + 4
+assert o == n_dense
 
 # 8 bits per channel between each level's channel min and max (shader_nts.c --tex8 measures the same).
 lo = np.zeros((2, FCH), np.float32)
@@ -119,5 +125,5 @@ for k in range(3):
     Image.fromarray(img).save(dst / f'fine{k}.png', optimize=True)
 parts = json.loads(Path(a.parts).read_text())['parts']
 assert len(parts) == P
-(dst / 'meta.json').write_text(json.dumps({'parts': parts, 'blocks': NB, 'dilations': list(DIL), 'width': DW, 'tile': FINE, 'cols': cols, 'rows': rows}))
+(dst / 'meta.json').write_text(json.dumps({'parts': parts, 'blocks': NB, 'colourBlocks': NBC, 'dilations': list(DIL), 'width': DW, 'tile': FINE, 'cols': cols, 'rows': rows}))
 print(f'{NB} blocks, {P} parts -> {dst}: net.bin {len(out) / 1e6:.2f} MB + fine textures')

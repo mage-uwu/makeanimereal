@@ -10,6 +10,9 @@
 //     uniform buffer, integer sums), GELU, quant8 again -> 64 int8 codes packed 4 to a uint, + scale
 //   block passes B0, B1: FFN2 on those codes for 32 channels each, plus the residual (the stencil
 //     output again: it's channel-local, so 8 layers cost little and no tensor holds it)
+// A net with an ink branch (NTS2) takes its colour head after block NBC - 1; the branch's blocks then
+// run on and the ink head writes black line art's opacity to its own texture, laid over the colour in
+// the display pass (shader_nts.c --lines, trained on the film's strokes along her geometry's edges).
 // Activations are float16 textures, 64 channels as 16 RGBA layers; arithmetic is float32. A token
 // whose receptive field holds only background has a per-block constant (computed here in JS from
 // the weights, per frame since the camera pitch is an input) and isn't drawn.
@@ -42,18 +45,21 @@ function parseNet(buf) {
   const i32 = () => { const v = dv.getInt32(o, true); o += 4; return v; };
   const f32 = n => { const a = new Float32Array(buf.slice(o, o + 4 * n)); o += 4 * n; return a; };
   const i8 = n => { const a = new Int8Array(buf.slice(o, o + n)); o += n; return a; };
-  if (new TextDecoder().decode(new Uint8Array(buf, 0, 4)) !== 'NTSV') throw new Error('net: not NTSV');
-  const NB = i32(), P = i32(), DIL = Array.from({ length: NB }, i32);
+  // NTSV: colour only. NTS2: an ink branch too; the colour head reads block NBC's output, the ink head
+  // (black line art's opacity) the last block's.
+  const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
+  if (magic !== 'NTSV' && magic !== 'NTS2') throw new Error('net: not NTSV or NTS2');
+  const NB = i32(), P = i32(), NBC = magic === 'NTS2' ? i32() : NB, DIL = Array.from({ length: NB }, i32);
   const We = f32(DW * CIN), be = f32(DW), blocks = [];
   for (let b = 0; b < NB; b++) blocks.push({ q: i8((KT + 4) * DW), gate: f32(DW), b1: f32(DW), b2: f32(DW), s1: f32(DW), s2: f32(DW), c1: i8(DW * DW), c2: i8(DW * DW) });
-  const Wh = f32(4 * DW), bh = f32(4), lo = f32(2 * FCH), st = f32(2 * FCH);
+  const Wh = f32(4 * DW), bh = f32(4), Wl = NBC < NB ? f32(DW) : null, bl = NBC < NB ? f32(1)[0] : 0, lo = f32(2 * FCH), st = f32(2 * FCH);
   const coarse = new Uint8Array(buf.slice(o, o + P * COARSE * COARSE * FCH));
-  return { NB, P, DIL, We, be, blocks, Wh, bh, lo, st, coarse };
+  return { NB, NBC, P, DIL, We, be, blocks, Wh, bh, Wl, bl, lo, st, coarse };
 }
 
 // The background's value after each block, in JS: infer.c's token() with every neighbour the same.
 function backgroundStates(net, input) {
-  const { NB, We, be, blocks, Wh, bh } = net, f = Math.fround;
+  const { NB, NBC, We, be, blocks, Wh, bh, Wl, bl } = net, f = Math.fround;
   const roundEven = x => { const r = Math.round(x); return Math.abs(x - Math.trunc(x)) === 0.5 && r % 2 !== 0 ? r - 1 : r; };
   const quant = v => {
     let mx = 0; for (const x of v) mx = Math.max(mx, Math.abs(x)); mx = Math.max(mx, 1e-5);
@@ -81,8 +87,11 @@ function backgroundStates(net, input) {
     x = Array.from({ length: DW }, (_, r) => { let a = 0; for (let i = 0; i < DW; i++) a += q2.c[i] * k.c2[r * DW + i]; return a * k.s2[r] * q2.xs + k.b2[r] + t[r]; });
     states.push(x);
   }
-  const out = [0, 1, 2, 3].map(c => { let z = bh[c]; for (let i = 0; i < DW; i++) z += Wh[c * DW + i] * x[i]; return 1 / (1 + Math.exp(-z)); });
-  return { states, out };
+  const sig = z => 1 / (1 + Math.exp(-z));
+  const out = [0, 1, 2, 3].map(c => { let z = bh[c]; for (let i = 0; i < DW; i++) z += Wh[c * DW + i] * states[NBC][i]; return sig(z); });
+  let ink = 0;
+  if (Wl) { let z = bl; for (let i = 0; i < DW; i++) z += Wl[i] * x[i]; const t = Math.min(1, Math.max(0, (sig(z) - 0.4) / 0.3)); ink = t * t * (3 - 2 * t); }
+  return { states, out, ink };
 }
 
 const HEAD = `#version 300 es
@@ -255,9 +264,23 @@ void main() {
   }
   o = vec4(q.rgb * q.a, q.a);   // premultiplied, for filtering when it's magnified
 }`;
+// The ink head: black line art's opacity, kept apart from the colour so the two filter separately.
+const INK_PASS = HEAD + `out vec4 o;
+uniform sampler2DArray X; uniform vec4 Wl[16]; uniform float bl, kbg;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float k = kbg;
+  if (distAt(p) <= ${MARGIN}) {
+    vec4 s = vec4(0.0);
+    for (int L = 0; L < 16; L++) s = Wl[L] * texelFetch(X, ivec3(p, L), 0) + s;
+    k = 1.0 / (1.0 + exp(-(bl + ((s.x + s.y) + (s.z + s.w)))));
+    k = smoothstep(0.4, 0.7, k);   // drawn crisp (infer.c ink)
+  }
+  o = vec4(k);
+}`;
 const SHOW = `#version 300 es
 precision highp float;
-uniform sampler2D R, T0; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw;
+uniform sampler2D R, K, T0; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw, ink;
 out vec4 o;
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
@@ -268,6 +291,8 @@ void main() {
   vec2 uv = vec2(p.x, 1.0 - p.y);
   if (raw == 1) { vec3 c = toSrgb(texture(T0, uv).rgb); o = vec4(mix(c, bg, step(0.25, c.g - max(c.r, c.b))), 1.0); return; }
   vec4 d = texture(R, uv);
+  float k = ink == 1 ? texture(K, uv).r : 0.0;   // ink over the colour: alpha a + k (1 - a), colour scaled by (1 - k)
+  d = vec4(d.rgb * (1.0 - k), d.a + k * (1.0 - d.a));
   o = vec4(bg * (1.0 - d.a) + d.rgb, 1.0);
 }`;
 
@@ -281,7 +306,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   const [meta, netImg, ...fineImgs] = await Promise.all([fetch(base + 'meta.json').then(r => r.json()), loadImage(base + 'net.png'),
     ...[0, 1, 2].map(k => loadImage(`${base}fine${k}.png`))]);
   const net = parseNet(unpackNet(netImg));
-  const { NB, P, DIL } = net;
+  const { NB, NBC, P, DIL } = net;
 
   // ---- programs ----
   function program(fs) {
@@ -299,7 +324,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     for (const b of ['Blk', 'Wt', 'Emb']) { const i = gl.getUniformBlockIndex(p, b); if (i !== gl.INVALID_INDEX) { const point = { Blk: 0, Wt: 1, Emb: 2 }[b]; gl.uniformBlockBinding(p, i, point); blocks[b] = point; } }
     return { p, u, blocks };
   }
-  const prog = { A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), show: program(SHOW) };
+  const prog = { A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), ink: program(INK_PASS), show: program(SHOW) };
 
   // ---- textures ----
   function tex2d(w, h, internal, format, type, data = null, filter = gl.NEAREST) {
@@ -325,7 +350,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   const coarse = cdata.map(d => tex2d(cw, COARSE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, d));
   const X = array(16, gl.RGBA16F), Y = array(16, gl.RGBA16F), Cq = array(5, gl.RGBA32UI);
   const diffT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), hT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), distT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE);
-  const outT = tex2d(NW, NH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR);
+  const outT = tex2d(NW, NH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR), inkT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE, null, gl.LINEAR);
   function fbo(target, first = 0, m = 1) {
     const key = `${first}:${m}`;
     if (target.fbos?.has(key)) return target.fbos.get(key);
@@ -377,7 +402,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
 
   const vao = gl.createVertexArray();
   const bindTex = (unit, target, t, u, loc) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(target, t); gl.uniform1i(loc, unit); };
-  let lastPitch = null, pbg = [0, 0, 0, 0];
+  let lastPitch = null, pbg = [0, 0, 0, 0], kbg = 0;
   let crop = [0, 0, NW, NH];
 
   // three.js draws the tiles; call before frame(). cropTD: [x0, y0, x1, y1] network pixels, top-down.
@@ -393,6 +418,10 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     scene.overrideMaterial = null; renderer.setRenderTarget(null);
   }
 
+  function clear(t) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(t));
+    gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.enable(gl.SCISSOR_TEST);
+  }
   function pass(pr, target, first, m, setup) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbos ? fbo(target, first, m) : fbo2d(target));
     gl.useProgram(pr.p);
@@ -402,7 +431,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   }
 
   // The network on the crop, then the display pass. view: { W, H, box: [x, y, w, h] in canvas pixels,
-  // top: [r, g, b], bottom: [r, g, b], raw, showOnly (the last drawing again, e.g. zoomed) }.
+  // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), showOnly (the last drawing again, e.g. zoomed) }.
   function frame({ pitch, view }) {
     renderer.resetState();
     gl.bindVertexArray(vao);
@@ -413,10 +442,10 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     if (!view.raw && !view.showOnly) {
       if (pitch !== lastPitch) {   // the background's states: the green screen's inputs at this pitch
         const bgIn = [0, 177 / 255, 64 / 255, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Math.fround(sinp), Math.fround(cosp)];
-        const { states, out } = backgroundStates(net, bgIn);
+        const { states, out, ink } = backgroundStates(net, bgIn);
         for (let b = 0; b < NB; b++) blkData.set(states[b], b * BLK / 4 + bgOff);
         gl.bindBuffer(gl.UNIFORM_BUFFER, blkBuf); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, blkData);
-        pbg = out; lastPitch = pitch;
+        pbg = out; kbg = ink; lastPitch = pitch;
       }
       const T = tiles.map(glTex);
       const bindTiles = u => T.forEach((t, k) => bindTex(k, gl.TEXTURE_2D, t, null, u[`T${k}`]));
@@ -443,12 +472,18 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
         for (let h = 0; h < 16 / M; h++) pass(prog.B, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
         [x, y] = [y, x];
+        if (b === NBC - 1) {   // the colour, before the ink branch's blocks (if any) go on
+          clear(outT);
+          pass(prog.head, outT, 0, 1, u => {
+            bindTex(0, gl.TEXTURE_2D_ARRAY, x.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
+            gl.uniform4fv(u.Wh, WhT); gl.uniform4fv(u.bh, net.bh); gl.uniform4fv(u.pbg, pbg);
+          });
+        }
       }
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(outT));
-      gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.enable(gl.SCISSOR_TEST);
-      pass(prog.head, outT, 0, 1, u => {
+      clear(inkT);
+      if (net.Wl) pass(prog.ink, inkT, 0, 1, u => {
         bindTex(0, gl.TEXTURE_2D_ARRAY, x.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
-        gl.uniform4fv(u.Wh, WhT); gl.uniform4fv(u.bh, net.bh); gl.uniform4fv(u.pbg, pbg);
+        gl.uniform4fv(u.Wl, net.Wl); gl.uniform1f(u.bl, net.bl); gl.uniform1f(u.kbg, kbg);
       });
     }
     // display
@@ -456,20 +491,26 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, view.W, view.H);
     const s = prog.show; gl.useProgram(s.p);
-    bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, glTex(tiles[0]), null, s.u.T0);
+    bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, glTex(tiles[0]), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
-    gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0);
+    gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
     renderer.resetState();
   }
-  // For checks: the drawing (premultiplied RGBA bytes, rows bottom-up) and the five tiles.
+  // For checks: the drawing with its ink (premultiplied RGBA bytes, rows bottom-up) and the five tiles.
   function read() {
-    const px = new Uint8Array(NW * NH * 4);
+    const px = new Uint8Array(NW * NH * 4), ink = new Uint8Array(NW * NH * 4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(outT)); gl.readPixels(0, 0, NW, NH, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(inkT)); gl.readPixels(0, 0, NW, NH, gl.RGBA, gl.UNSIGNED_BYTE, ink);
+    for (let i = 0; i < px.length; i += 4) {
+      const k = ink[i] / 255;
+      for (let c = 0; c < 3; c++) px[i + c] = Math.round(px[i + c] * (1 - k));
+      px[i + 3] = Math.round(px[i + 3] + k * (255 - px[i + 3]));
+    }
     const t = tiles.map(rt => { const b = new Uint8Array(NW * NH * 4); renderer.readRenderTargetPixels(rt, 0, 0, NW, NH, b); return b; });
     renderer.resetState();
     return { px, tiles: t };
   }
-  return { renderTiles, frame, read, parts: meta.parts, blocks: NB };
+  return { renderTiles, frame, read, parts: meta.parts, blocks: NB, ink: !!net.Wl };
 }

@@ -48,8 +48,8 @@ typedef struct {
     float gate[DW], b1[DW], b2[DW], s1[DW], s2[DW];
     v128_t w1[32 * 16], w2[32 * 16];  /* [input group][4 outputs]: 4 outputs x 2 inputs as i16 (relaxed: x 4 inputs as i8) */
 } Block;
-static int NB, P, DIL[MAXB];
-static float We[DW * CIN], WeT[CIN * DW], be[DW], Wh[4 * DW], bh[4], lo[2][FCH], st[2][FCH];
+static int NB, NBC, P, DIL[MAXB];   /* NBC: the block the colour head reads (NB without an ink branch) */
+static float We[DW * CIN], WeT[CIN * DW], be[DW], Wh[4 * DW], bh[4], Wl[DW], bl, lo[2][FCH], st[2][FCH];
 static Block *blk;
 static const uint8_t *coarse, *fine;
 
@@ -94,9 +94,10 @@ static void pack_rows(const int8_t *c, v128_t *w) {
 /* net: export_nts.py's net.bin, which must stay alive (the coarse texture is read in place). */
 EXPORT int nts_load(const uint8_t *net, int len) {
     const uint8_t *p = net;
-    if (len < 12 || p[0] != 'N' || p[1] != 'T' || p[2] != 'S' || p[3] != 'V') return 0;
-    int hd[2]; copy(hd, p + 4, 8); NB = hd[0]; P = hd[1]; p += 12;
-    if (NB < 1 || NB > MAXB) return 0;
+    /* NTSV: colour only; NTS2: also NBC, and the ink head after the colour head */
+    if (len < 12 || p[0] != 'N' || p[1] != 'T' || p[2] != 'S' || (p[3] != 'V' && p[3] != '2')) return 0;
+    int lines = p[3] == '2', hd[3]; copy(hd, p + 4, lines ? 12 : 8); NB = hd[0]; P = hd[1]; NBC = lines ? hd[2] : NB; p += lines ? 16 : 12;
+    if (NB < 1 || NB > MAXB || NBC < 1 || NBC > NB) return 0;
     copy(DIL, p, 4 * NB); p += 4 * NB;
     copy(We, p, sizeof We); p += sizeof We;
     copy(be, p, sizeof be); p += sizeof be;
@@ -116,6 +117,7 @@ EXPORT int nts_load(const uint8_t *net, int len) {
     }
     copy(Wh, p, sizeof Wh); p += sizeof Wh;
     copy(bh, p, sizeof bh); p += sizeof bh;
+    if (NBC < NB) { copy(Wl, p, sizeof Wl); p += sizeof Wl; copy(&bl, p, 4); p += 4; }
     copy(lo, p, sizeof lo); p += sizeof lo;
     copy(st, p, sizeof st); p += sizeof st;
     coarse = p; p += (size_t)P * COARSE * COARSE * FCH;
@@ -309,6 +311,14 @@ static void embed(const float *f, float *x) {
         wasm_v128_store(x + j, wasm_f32x4_add(wasm_v128_load(be + j), s));
     }
 }
+static float ink(const float *v) {   /* the ink head: opacity of black line art */
+    v128_t s = wasm_f32x4_splat(0);
+    for (int i = 0; i < DW; i += 4) s = madd(wasm_v128_load(Wl + i), wasm_v128_load(v + i), s);
+    float z = bl + (wasm_f32x4_extract_lane(s, 0) + wasm_f32x4_extract_lane(s, 1)) + (wasm_f32x4_extract_lane(s, 2) + wasm_f32x4_extract_lane(s, 3));
+    /* drawn crisp: a smoothstep from 0.4 to 0.7 (shader_nts.c ink_style) */
+    float k = 1 / (1 + exp1(-z)), t = (k - .4f) / .3f; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return t * t * (3 - 2 * t);
+}
 static void head(const float *v, float *p) {
     for (int k = 0; k < 4; k++) {
         v128_t s = wasm_f32x4_splat(0);
@@ -329,7 +339,7 @@ static void head(const float *v, float *p) {
 static float bg[MAXB + 1][DW] __attribute__((aligned(16)));
 
 /* in: a w x h region's inputs (nts_prepare). Writes straight RGBA for rows [r0, r1) to out (bytes) or
- * outf (floats). xa, xb: w x h x 64 floats each; dist: w x h bytes. sparse = 0: every token, with zero
+ * outf (floats): the colour head on block NBC's output, then (with an ink branch) black ink over it. xa, xb: w x h x 64 floats each; dist: w x h bytes. sparse = 0: every token, with zero
  * padding outside the region, exactly shader_nts.c's forward() on the region. */
 static void run(const float *in, int w, int h, int r0, int r1, float *xa, float *xb, uint8_t *dist, int sparse, uint8_t *out, float *outf) {
     int S[MAXB + 1], RF[MAXB], need[MAXB]; S[NB] = 0;
@@ -383,15 +393,31 @@ static void run(const float *in, int w, int h, int r0, int r1, float *xa, float 
             token(blk + b, src, ACTIVE(r, c, prev) ? AT(x, r, c) : bg[b], AT(y, r, c));
         }
         float *t = x; x = y; y = t;
+        if (b == NBC - 1) {   /* the colour, before the ink branch's blocks overwrite this buffer */
+            float pbg[4]; head(bg[NBC], pbg);
+            for (int r = r0; r < r1; r++) for (int c = 0; c < w; c++) {
+                float p[4];
+                if (ACTIVE(r, c, MARGIN)) head(AT(x, r, c), p); else for (int k = 0; k < 4; k++) p[k] = pbg[k];
+                uint32_t o = ((uint32_t)(r - r0) * w + c) * 4;
+                for (int k = 0; k < 4; k++) {
+                    if (outf) outf[o + k] = p[k];
+                    else { float v = p[k] * 255 + .5f; out[o + k] = v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
+                }
+            }
+        }
     }
-    float pbg[4]; head(bg[NB], pbg);
-    for (int r = r0; r < r1; r++) for (int c = 0; c < w; c++) {
-        float p[4];
-        if (ACTIVE(r, c, MARGIN)) head(AT(x, r, c), p); else for (int k = 0; k < 4; k++) p[k] = pbg[k];
-        uint32_t o = ((uint32_t)(r - r0) * w + c) * 4;
-        for (int k = 0; k < 4; k++) {
-            if (outf) outf[o + k] = p[k];
-            else { float v = p[k] * 255 + .5f; out[o + k] = v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
+    if (NBC < NB) {   /* black line art over the colour: alpha a + k (1 - a), colour scaled by (1 - k) */
+        float kbg = ink(bg[NB]);
+        for (int r = r0; r < r1; r++) for (int c = 0; c < w; c++) {
+            float k = ACTIVE(r, c, MARGIN) ? ink(AT(x, r, c)) : kbg, p[4];
+            uint32_t o = ((uint32_t)(r - r0) * w + c) * 4;
+            for (int i = 0; i < 4; i++) p[i] = outf ? outf[o + i] : out[o + i] / 255.f;
+            float a = p[3] + k * (1 - p[3]), f = a > 0 ? p[3] * (1 - k) / a : 0;
+            p[0] *= f; p[1] *= f; p[2] *= f; p[3] = a;
+            for (int i = 0; i < 4; i++) {
+                if (outf) outf[o + i] = p[i];
+                else { float v = p[i] * 255 + .5f; out[o + i] = v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
+            }
         }
     }
     #undef LO

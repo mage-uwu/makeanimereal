@@ -33,14 +33,21 @@
 #define MAXB 16
 
 static int NB = 8;
-static const int DIL[MAXB] = {1, 2, 4, 8, 16, 1, 2, 4, 8, 16, 32, 1, 2, 4, 8, 16};
+static int DIL[MAXB] = {1, 2, 4, 8, 16, 1, 2, 4, 8, 16, 32, 1, 2, 4, 8, 16};
+/* --lines K: an ink branch. The first NBC blocks and the colour head are a trained model, frozen (the
+ * colour head reads block NBC's output, so colours can't change); K more blocks continue from there
+ * into a 1-channel head: the opacity of black line art drawn over the colour. 0: no branch. */
+static int NBC = 0;
+/* How the viewers draw the ink head's opacity: a smoothstep from 0.4 to 0.7, so confident strokes go
+ * solid black and the haze of unsure ones (an average over where a stroke might fall) goes away. */
+static float ink_style(float k) { float t = fminf(1, fmaxf(0, (k - .4f) / .3f)); return t * t * (3 - 2 * t); }
 static int check_mode = 0;
 
 typedef struct { int N, H, W, P; float *pitch; uint8_t *px; } Data;
 
 /* ---------------- parameters ---------------- */
 static int P_PARTS = 18;
-static size_t o_We, o_be, o_tc[MAXB], o_b1[MAXB], o_b2[MAXB], o_Wh, o_bh, n_dense;
+static size_t o_We, o_be, o_tc[MAXB], o_b1[MAXB], o_b2[MAXB], o_Wh, o_bh, o_Wl, o_bl, n_dense;
 static float *dense, *dm, *dv;                 /* Adam: embedding, stencils, biases, head */
 static float *W1[MAXB], *W2[MAXB];             /* Muon masters (ternary FFN) */
 static float *Q1[MAXB], *Q2[MAXB];             /* their ternary values */
@@ -171,6 +178,7 @@ static void layout(void) {
     o_We = o; o += (size_t)DW * CIN; o_be = o; o += DW;
     for (int b = 0; b < NB; b++) { o_tc[b] = o; o += tc_size(DW, KT); o_b1[b] = o; o += DW; o_b2[b] = o; o += DW; }
     o_Wh = o; o += 4 * DW; o_bh = o; o += 4;
+    if (NBC) { o_Wl = o; o += DW; o_bl = o; o += 4; }
     n_dense = o;
     n_tex = (size_t)P_PARTS * (FINE * FINE + COARSE * COARSE) * FCH;
 }
@@ -215,6 +223,7 @@ static void net_init(void) {
         for (int i = 0; i < DW * DW; i++) { W1[b][i] = (float)(randn() / sqrt(DW)); W2[b][i] = (float)(randn() * 0.02); }
     }
     for (int i = 0; i < 4 * DW; i++) dense[o_Wh + i] = (float)(randn() * 0.02);
+    if (NBC) { for (int i = 0; i < DW; i++) dense[o_Wl + i] = (float)(randn() * 0.02); dense[o_bl] = -4; }   /* little ink to start */
     for (int p = 0; p < P_PARTS; p++) {
         for (size_t i = 0; i < (size_t)FINE * FINE * FCH; i++) tex[tex_fine_off(p) + i] = (float)(randn() * 0.01);
         for (size_t i = 0; i < (size_t)COARSE * COARSE * FCH; i++) tex[tex_coarse_off(p) + i] = (float)(randn() * 0.1);
@@ -291,7 +300,7 @@ typedef struct {
     TCWork *tw[MAXB];
     float *xq1[MAXB], *xs1[MAXB], *dg[MAXB], *g[MAXB], *xs2[MAXB];
     int8_t *c1[MAXB], *c2[MAXB];
-    float *z, *p;
+    float *z, *p, *zl, *pl;   /* colour head logits / RGBA; ink head (line mode) */
     float *dx, *dxt, *din;
     float *ta, *tb;  /* TT-token scratch: pre-GELU / FFN out forward, dgv / dh backward */
 } WS;
@@ -312,7 +321,7 @@ static WS *ws_new(int L, int keep) {
         w->g[b] = own ? calloc(LD, 4) : w->g[0]; w->xs2[b] = own ? calloc(L, 4) : w->xs2[0];
         w->c1[b] = own ? calloc(LD, 1) : w->c1[0]; w->c2[b] = own ? calloc(LD, 1) : w->c2[0];
     }
-    w->z = calloc((size_t)L * 4, 4); w->p = calloc((size_t)L * 4, 4);
+    w->z = calloc((size_t)L * 4, 4); w->p = calloc((size_t)L * 4, 4); w->zl = calloc(L, 4); w->pl = calloc(L, 4);
     w->ta = calloc(TT * DW, 4); w->tb = calloc(TT * DW, 4);
     if (keep) { w->dx = calloc(LD, 4); w->dxt = calloc(LD, 4); w->din = calloc((size_t)L * CIN, 4); }
     return w;
@@ -325,7 +334,8 @@ static double tst[12]; static int prof_on = 0;  /* only training steps count, no
 #define TS(k, stmt) do { double _t = (profile && prof_on && omp_get_thread_num() == 0) ? wall() : 0; stmt; if (profile && prof_on && omp_get_thread_num() == 0) tst[k] += wall() - _t; } while (0)
 static int engine_rows = 0;  /* --engine-rows: the engine's qrows_dot8_batch instead of rows64_dot8 */
 static void ffn_rows(const float *Q, Plane *pl, const Rows64 *R, const float *xin, float *xq, int8_t *code, float *xs, float *out, int L) {
-    if (check_mode) { qrows_dot8_batch(NULL, pl, Q, 0, xin, NULL, NULL, out, L, DW, DW, DW); if (xq != xin) memcpy(xq, xin, sizeof(float) * L * DW); return; }
+    /* check mode: the continuous path (no codes); the engine still reads a scale per token */
+    if (check_mode) { for (int t = 0; t < L; t++) xs[t] = 1; qrows_dot8_batch(NULL, pl, Q, 0, xin, code, xs, out, L, DW, DW, DW); if (xq != xin) memcpy(xq, xin, sizeof(float) * L * DW); return; }
     for (int t = 0; t < L; t++) quant8_64(xin + (size_t)t * DW, xq + (size_t)t * DW, code + (size_t)t * DW, xs + t);
     if (engine_rows) qrows_dot8_batch(&codes, pl, Q, 0, xin, code, xs, out, L, DW, DW, DW);
     else rows64_dot8(R, code, xs, out, L);
@@ -367,9 +377,14 @@ static void forward(WS *w, const uint8_t *src, int Wf, int h, int wd, float pitc
         }
     }
     const float *Wh = dense + o_Wh, *bh = dense + o_bh;
+    const float *xc = w->x[NBC ? NBC : NB];   /* the colour head: after block NBC in line mode */
     for (int t = 0; t < L; t++) for (int c = 0; c < 4; c++) {
-        float z = bh[c] + dotr(Wh + c * DW, w->x[NB] + (size_t)t * DW, DW);
+        float z = bh[c] + dotr(Wh + c * DW, xc + (size_t)t * DW, DW);
         w->z[t * 4 + c] = z; w->p[t * 4 + c] = 1 / (1 + expf(-z));
+    }
+    if (NBC) for (int t = 0; t < L; t++) {
+        float z = dense[o_bl] + dotr(dense + o_Wl, w->x[NB] + (size_t)t * DW, DW);
+        w->zl[t] = z; w->pl[t] = 1 / (1 + expf(-z));
     }
 }
 
@@ -391,20 +406,36 @@ static double loss_grad(WS *w, const uint8_t *src, int Wf, int h, int wd, int gr
     return la / L + lc / (3.0 * L);
 }
 
+/* Line mode: weighted cross-entropy of the ink against the target's red byte (lines are sparse, so ink
+ * counts 1 + 6 x as much); returns the mean |ink - target| and leaves d/dz in w->zl. */
+static double line_grad(WS *w, const uint8_t *src, int Wf, int h, int wd, int grad) {
+    int L = h * wd; double err = 0;
+    for (int r = 0; r < h; r++) for (int c = 0; c < wd; c++) {
+        int t = r * wd + c; float k = src[((size_t)r * Wf + c) * 17 + 13] / 255.f, p = w->pl[t];
+        err += fabsf(p - k);
+        if (grad) w->zl[t] = (1 + 6 * k) * (p - k) / L;
+    }
+    return err / L;
+}
+
 static void backward(WS *w, int th, int h, int wd, int *const *nb) {
     int L = h * wd; size_t LD = (size_t)L * DW;
     float *gdt = gd_t[th];
     /* head */
     float *Gh = gdt + o_Wh, *Gbh = gdt + o_bh; const float *Wh = dense + o_Wh;
     memset(w->dx, 0, LD * 4);
-    for (int t = 0; t < L; t++) {
+    if (NBC) for (int t = 0; t < L; t++) {   /* line mode: the ink head only, then the branch's blocks */
+        float dz = w->zl[t]; if (dz == 0) continue;
+        gdt[o_bl] += dz; axpy(gdt + o_Wl, dz, w->x[NB] + (size_t)t * DW, DW); axpy(w->dx + (size_t)t * DW, dz, dense + o_Wl, DW);
+    }
+    else for (int t = 0; t < L; t++) {
         const float *x = w->x[NB] + (size_t)t * DW; float *dx = w->dx + (size_t)t * DW;
         for (int c = 0; c < 4; c++) {
             float dz = w->z[t * 4 + c]; if (dz == 0) continue;
             Gbh[c] += dz; axpy(Gh + c * DW, dz, x, DW); axpy(dx, dz, Wh + c * DW, DW);
         }
     }
-    for (int b = NB - 1; b >= 0; b--) {
+    for (int b = NB - 1; b >= NBC; b--) {
         TCWork *tw = w->tw[b];
         /* x[b+1] = tw.out + Q2 g + b2, g = gelu(Q1 xq1 + b1) */
         float *Gb2 = gdt + o_b2[b], *Gb1 = gdt + o_b1[b];
@@ -424,6 +455,7 @@ static void backward(WS *w, int th, int h, int wd, int *const *nb) {
         /* stencil mixer: dx := d/d x[b] */
         TS(9, tc_backward(dense + o_tc[b], gdt + o_tc[b], TCC[b], w->x[b], w->dxt, w->dx, L, nb[b], tw));
     }
+    if (NBC) return;   /* the frozen trunk takes no gradient */
     /* embedding and texture */
     float *GWe = gdt + o_We, *Gbe = gdt + o_be; const float *We = dense + o_We;
     double _t10 = (profile && prof_on && omp_get_thread_num() == 0) ? wall() : 0;
@@ -472,7 +504,7 @@ static double train_step(const Data *d, const int *train_ids, int ntrain, int B,
             int cy = (int)(urand(&s) * (d->H - ch + 1)), cx = (int)(urand(&s) * (d->W - cw + 1));
             const uint8_t *src = frame_px(d, fi) + ((size_t)cy * d->W + cx) * 17;
             forward(wss[th], src, d->W, ch, cw, d->pitch[fi], nb);
-            loss += loss_grad(wss[th], src, d->W, ch, cw, 1);
+            loss += NBC ? line_grad(wss[th], src, d->W, ch, cw, 1) : loss_grad(wss[th], src, d->W, ch, cw, 1);
             backward(wss[th], th, ch, cw, nb);
         }
 #pragma omp single
@@ -496,11 +528,18 @@ static double train_step(const Data *d, const int *train_ids, int ntrain, int B,
 #pragma omp single
         { scale = (real)1 / B; double norm = sqrt(nrm) * scale; if (h->clip > 0 && norm > h->clip) scale *= h->clip / (norm + 1e-6); }
 #pragma omp for schedule(static)
-        for (size_t off = 0; off < n_dense; off += 1024) { size_t n = n_dense - off < 1024 ? n_dense - off : 1024; adam(dense + off, gd + off, dm + off, dv + off, n, h, scale, c1, c2); }
+        for (size_t off = 0; off < n_dense; off += 1024) {
+            size_t n = n_dense - off < 1024 ? n_dense - off : 1024;
+            if (!NBC) { adam(dense + off, gd + off, dm + off, dv + off, n, h, scale, c1, c2); continue; }
+            /* line mode: only the branch's blocks and the ink head move (Adam's decay would shift the rest) */
+            for (size_t i = off; i < off + n; i++)
+                if ((i >= o_tc[NBC] && i < o_Wh) || i >= o_Wl) adam(dense + i, gd + i, dm + i, dv + i, 1, h, scale, c1, c2);
+                else gd[i] = 0;
+        }
 #pragma omp single
         tp[4] = wall();
 #pragma omp for schedule(static)
-        for (int j = 0; j < 4 * NB; j++) {
+        for (int j = 4 * NBC; j < 4 * NB; j++) {
             int b = j / 4, m = (j / 2) % 2, half = j % 2;
             float *p = (m ? W2[b] : W1[b]) + half * 32 * DW, *g = (m ? gW2[b] : gW1[b]) + half * 32 * DW, *mo = (m ? M2[b] : M1[b]) + half * 32 * DW;
             MuonJob job = {.p = p, .g = g, .m = mo, .q = NULL, .hit = NULL, .model = NULL, .field = 0, .rows = 32, .d = DW, .row = 0, .v = NULL};
@@ -527,6 +566,7 @@ static double evaluate(const Data *d, const int *ids, int n, WS **ews, int *cons
         WS *w = ews[omp_get_thread_num()]; const uint8_t *src = frame_px(d, ids[i]);
         forward(w, src, d->W, d->H, d->W, d->pitch[ids[i]], nbf);
         double e = 0; int L = d->H * d->W;
+        if (NBC) { err += line_grad(w, src, d->W, d->H, d->W, 0); continue; }
         for (int t = 0; t < L; t++) {
             const uint8_t *q = src + (size_t)t * 17 + 13; float a = w->p[t * 4 + 3], ta = q[3] / 255.f;
             for (int k = 0; k < 3; k++) e += fabsf((w->p[t * 4 + k] * a + 1 - a) - (q[k] / 255.f * ta + 1 - ta));
@@ -546,6 +586,15 @@ static void preview(const Data *d, const int *ids, int n, WS *w, int *const *nbf
             for (int x = 0; x < d->W; x++) {
                 const uint8_t *q = src + ((size_t)y * d->W + x) * 17; const float *p = w->p + ((size_t)y * d->W + x) * 4;
                 float ta = q[16] / 255.f;
+                if (NBC) {   /* line mode: the drawing with its ink (as drawn), the ink, the target ink */
+                    float k = w->pl[(size_t)y * d->W + x], kt = q[13] / 255.f, ks = ink_style(k);
+                    for (int c = 0; c < 3; c++) {
+                        row[x * 3 + c] = (unsigned char)fminf(255, fmaxf(0, 255 * ((p[c] * p[3] + 1 - p[3]) * (1 - ks))));
+                        row[(d->W + x) * 3 + c] = (unsigned char)(255 * (1 - k));
+                        row[(2 * d->W + x) * 3 + c] = (unsigned char)(255 * (1 - kt));
+                    }
+                    continue;
+                }
                 for (int k = 0; k < 3; k++) {
                     row[(x) * 3 + k] = q[k];
                     row[(d->W + x) * 3 + k] = (unsigned char)fminf(255, fmaxf(0, 255 * (p[k] * p[3] + 1 - p[3])));
@@ -560,18 +609,26 @@ static void preview(const Data *d, const int *ids, int n, WS *w, int *const *nbf
 
 static int save_net(const char *path) {
     FILE *f = fopen(path, "wb"); if (!f) return 0;
-    int hd[4] = {NB, DW, P_PARTS, KT}; fwrite("NTSW", 1, 4, f); fwrite(hd, 4, 4, f); fwrite(DIL, 4, MAXB, f);
+    int hd[4] = {NB, DW, P_PARTS, KT}; fwrite(NBC ? "NTSL" : "NTSW", 1, 4, f); fwrite(hd, 4, 4, f); fwrite(DIL, 4, MAXB, f);
+    if (NBC) fwrite(&NBC, 4, 1, f);   /* NTSL: the colour head reads block NBC; the ink head (o_Wl) is in dense */
     fwrite(dense, 4, n_dense, f);
     for (int b = 0; b < NB; b++) { fwrite(W1[b], 4, DW * DW, f); fwrite(W2[b], 4, DW * DW, f); }
     fwrite(tex, 4, n_tex, f); fclose(f); return 1;
 }
 
 static int load_net(const char *path) {
-    FILE *f = fopen(path, "rb"); char mg[4]; int hd[4], dil[MAXB];
-    if (!f || fread(mg, 1, 4, f) != 4 || memcmp(mg, "NTSW", 4) || fread(hd, 4, 4, f) != 4 || fread(dil, 4, MAXB, f) != MAXB) return 0;
-    if (hd[0] != NB || hd[1] != DW || hd[2] != P_PARTS || hd[3] != KT || memcmp(dil, DIL, sizeof dil)) { fprintf(stderr, "%s: other shape\n", path); return 0; }
-    int ok = fread(dense, 4, n_dense, f) == n_dense;
-    for (int b = 0; b < NB; b++) ok = ok && fread(W1[b], 4, DW * DW, f) == DW * DW && fread(W2[b], 4, DW * DW, f) == DW * DW;
+    FILE *f = fopen(path, "rb"); char mg[4]; int hd[4], dil[MAXB], nbc = 0;
+    if (!f || fread(mg, 1, 4, f) != 4 || (memcmp(mg, "NTSW", 4) && memcmp(mg, "NTSL", 4)) || fread(hd, 4, 4, f) != 4 || fread(dil, 4, MAXB, f) != MAXB) return 0;
+    if (!memcmp(mg, "NTSL", 4) && fread(&nbc, 4, 1, f) != 1) return 0;
+    /* line mode from a plain model: it becomes the frozen trunk (its blocks, then its colour head) */
+    int base = NBC && !nbc && hd[0] == NBC, nb = base ? NBC : NB;
+    if (hd[0] != nb || nbc != (base ? 0 : NBC) || hd[1] != DW || hd[2] != P_PARTS || hd[3] != KT || memcmp(dil, DIL, sizeof(int) * nb)) { fprintf(stderr, "%s: other shape\n", path); return 0; }
+    int ok;
+    if (base) {
+        size_t pre = o_tc[NBC];   /* the embedding and the trunk's blocks: the same offsets in both layouts */
+        ok = fread(dense, 4, pre, f) == pre && fread(dense + o_Wh, 4, 4 * DW + 4, f) == 4 * DW + 4;
+    } else ok = fread(dense, 4, n_dense, f) == n_dense;
+    for (int b = 0; b < nb; b++) ok = ok && fread(W1[b], 4, DW * DW, f) == DW * DW && fread(W2[b], 4, DW * DW, f) == DW * DW;
     ok = ok && fread(tex, 4, n_tex, f) == n_tex;
     fclose(f); requantize(); return ok;
 }
@@ -646,7 +703,7 @@ static int run_check(void) {
 
 int main(int argc, char **argv) {
     const char *data = NULL, *save = "model.ntsw", *prev = "preview.ppm", *load = NULL, *ref = NULL;
-    int tex8 = 0, eval_all = 0;
+    int tex8 = 0, eval_all = 0, lines = 0;
     int iters = 12000, B = 0, crop = 96, threads = 0, eval_every = 500, check = 0;
     double lr = 0.003, lr_tex = 0.01, seconds = 0;
     for (int i = 1; i < argc; i++) {
@@ -661,6 +718,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--crop")) { crop = atoi(v); i++; }
         else if (!strcmp(a, "--threads")) { threads = atoi(v); i++; }
         else if (!strcmp(a, "--blocks")) { NB = atoi(v); i++; }
+        else if (!strcmp(a, "--lines")) { lines = atoi(v); i++; }   /* an ink branch of K blocks on the (frozen) model --load gives */
         else if (!strcmp(a, "--lr")) { lr = atof(v); i++; }
         else if (!strcmp(a, "--lr-tex")) { lr_tex = atof(v); i++; }
         else if (!strcmp(a, "--eval-every")) { eval_every = atoi(v); i++; }
@@ -673,6 +731,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unknown %s\n", a); return 2; }
     }
     if (check) return run_check();
+    if (lines) { NBC = NB; for (int k = 0; k < lines; k++) DIL[NB + k] = k % 2 ? 2 : 1; NB += lines; }   /* fine branch: dilations 1, 2, ... */
     if (!data || NB < 1 || NB > MAXB) { fprintf(stderr, "need --data (blocks 1..%d)\n", MAXB); return 2; }
     if (!threads) threads = omp_get_max_threads();
     if (!B) B = threads;
@@ -705,6 +764,10 @@ int main(int argc, char **argv) {
         int fi = held[0]; forward(ews[0], frame_px(&d, fi), d.W, d.H, d.W, d.pitch[fi], nbf);
         FILE *f = fopen(ref, "wb"); int hw[2] = {d.H, d.W};
         fwrite("NTSR", 1, 4, f); fwrite(hw, 4, 2, f); fwrite(d.pitch + fi, 4, 1, f);
+        if (NBC) for (size_t t = 0; t < (size_t)d.H * d.W; t++) {   /* line mode: the ink over the colour, as the viewers draw it */
+            float *q = ews[0]->p + t * 4, k = ink_style(ews[0]->pl[t]), al = q[3] + k * (1 - q[3]), fa = al > 0 ? q[3] * (1 - k) / al : 0;
+            q[0] *= fa; q[1] *= fa; q[2] *= fa; q[3] = al;
+        }
         fwrite(frame_px(&d, fi), 17, (size_t)d.H * d.W, f); fwrite(ews[0]->p, 4, (size_t)d.H * d.W * 4, f); fclose(f);
         printf("reference frame %d -> %s\n", fi, ref);
     }
