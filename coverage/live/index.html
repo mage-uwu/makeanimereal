@@ -78,6 +78,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="d-full" aria-pressed="false">Full</button>
       <button id="d-smooth" aria-pressed="false" title="Sharp, fine-tuned against flicker">Smooth</button>
       <button id="d-crisp" aria-pressed="true" title="Smooth, with its linework crisped">Crisp</button>
+      <button id="d-cpu" aria-pressed="false" title="The nanotss shader, trained on the CPU, run on the CPU (WebAssembly)">CPU</button>
     </div>
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
@@ -121,9 +122,13 @@ const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils
 // frames, against flicker and for crisp linework), 'smooth' (the same before the linework pass),
 // 'sharp' (half-resolution decoder plus a full-resolution head, posed frames only), 'fast' (channels
 // 16/32/48/64 at 360 x 640; the WebGL engine's default) and 'full' (32/48/64/96, about 4x the work).
-const ASKED = ['full', 'fast', 'smooth', 'sharp'].find(d => location.hash.includes(d)) || 'crisp';
+// 'cpu': the nanotss shader (coverage/shader/nts: ternary stencil and FFN blocks, trained on the CPU
+// with the nanotss engine) run on the CPU in WebAssembly workers (nts.js), whatever the GPU.
+const DETAILS = ['fast', 'sharp', 'full', 'smooth', 'crisp', 'cpu'];
+const ASKED = ['full', 'fast', 'smooth', 'sharp', 'cpu'].find(d => location.hash.includes(d)) || 'crisp';
 let DETAIL = ASKED;
-const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/' })[DETAIL];
+const CPU = DETAIL === 'cpu';
+const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/', cpu: 'nts/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
 const CROP_PAD = 32;  // past her silhouette: the drawing inside matches computing the whole frame (debugReach, #nocrop)
 const status = document.getElementById('status');
@@ -135,11 +140,11 @@ let gpuAdapter = null;
 if (navigator.gpu && !location.hash.includes('webgl')) {
   try { gpuAdapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch { gpuAdapter = null; }
 }
-const glCanvas = gpuAdapter ? document.createElement('canvas') : canvas;
+const glCanvas = gpuAdapter || CPU ? document.createElement('canvas') : canvas;
 // The WebGPU path's G-buffer canvas is never shown and is copied right after it's drawn, so it keeps no
 // preserved buffer; #noaa drops its multisampling (the shaders trained on multisampled renders).
-const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: !!gpuAdapter && !location.hash.includes('noaa'), alpha: false, powerPreference: 'high-performance' });
-let gpu = null;
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: (!!gpuAdapter || CPU) && !location.hash.includes('noaa'), alpha: false, powerPreference: 'high-performance' });
+let gpu = null, cpu = null;
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const gl = renderer.getContext();
@@ -734,6 +739,7 @@ function applyZoom() {
   // WebGPU: the display pass magnifies (a CSS scale on the canvas made the compositor handle a layer
   // several times the screen, and the frame rate collapsed); WebGL: the canvas is scaled.
   if (gpu) { viewCanvas.style.transform = ''; if (!gpu.busy) gpu.redraw(gpuView()); else dirty = true; }
+  else if (cpu) paintCpu();
   else viewCanvas.style.transform = z === 1 ? '' : `translate(${view.tx}px, ${view.ty}px) scale(${z})`;
   document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
 }
@@ -766,13 +772,13 @@ document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-sh
 document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
 // Switching shaders reloads the page with the other model.
 function showDetail() {
-  for (const d of ['fast', 'sharp', 'full', 'smooth', 'crisp']) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
+  for (const d of DETAILS) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
   for (const d of ['sharp', 'smooth', 'crisp']) document.getElementById(`d-${d}`).disabled = !gpuAdapter;
   for (const b of document.querySelectorAll('[data-light]')) b.disabled = !gpu?.light;
 }
-for (const d of ['fast', 'sharp', 'full', 'smooth', 'crisp']) document.getElementById(`d-${d}`).onclick = () => {
+for (const d of DETAILS) document.getElementById(`d-${d}`).onclick = () => {
   if (d === DETAIL) return;
-  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full', 'smooth', 'crisp', 'sharp'].includes(t)), ...(d === 'crisp' ? [] : [d])].join('-');
+  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !DETAILS.includes(t)), ...(d === 'crisp' ? [] : [d])].join('-');
   location.reload();
 };
 // Lighting: the network draws her under the scene's light (shaders trained with light channels,
@@ -822,6 +828,7 @@ document.querySelectorAll('[data-pose]').forEach(wirePose);
 // One frame: G-buffer, network (when shown), display. GPU time comes from a timer query where the
 // browser has one; otherwise the readout shows the frame rate.
 function drawFrame() {
+  if (cpu) return drawCpu();
   if (gpu) {
     placeCamera();
     const crop = mode === 1 ? [0, 0, NW, NH] : cropBox(true);
@@ -844,6 +851,58 @@ function drawFrame() {
   renderer.resetState();
   return crop;
 }
+// CPU mode: the tiles are read back from the G-buffer canvas; the network's drawing (NW x NH, straight
+// alpha) lands in netCanvas and is painted over the stage gradient with the view's zoom and shift.
+const netCanvas = document.createElement('canvas');
+netCanvas.width = NW; netCanvas.height = NH;
+const netCtx = netCanvas.getContext('2d');
+let ctx2d = null;
+function drawCpu() {
+  placeCamera();
+  const crop = mode === 1 ? [0, 0, NW, NH] : cropBox(true);
+  renderGBufferTiles(crop);
+  const [x0, y0, x1, y1] = crop, w = x1 - x0, h = y1 - y0, n = w * h * 4;
+  const tiles = new Uint8Array(5 * n);
+  for (let t = 0; t < 5; t++) gl.readPixels(t * GBW + x0, GBH - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tiles.subarray(t * n, (t + 1) * n));
+  if (mode === 1) {   // the raw render: the colour tile with the green keyed out
+    const img = new Uint8ClampedArray(n);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const s = ((h - 1 - y) * w + x) * 4, d = (y * w + x) * 4, [r, g, b] = [tiles[s], tiles[s + 1], tiles[s + 2]];
+      img[d] = r; img[d + 1] = g; img[d + 2] = b; img[d + 3] = g - Math.max(r, b) > 64 ? 0 : 255;
+    }
+    putCpu(img, crop);
+    return crop;
+  }
+  cpu.frame({ tiles, w, h, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(rgba => putCpu(rgba, crop));
+  return crop;
+}
+function putCpu(rgba, crop) {
+  netCtx.clearRect(0, 0, NW, NH);
+  netCtx.putImageData(new ImageData(rgba, crop[2] - crop[0], crop[3] - crop[1]), crop[0], crop[1]);
+  paintCpu();
+}
+function paintCpu() {
+  const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  viewCanvas.style.transform = '';
+  const hex = c => `rgb(${Math.round(c.r * 255)}, ${Math.round(c.g * 255)}, ${Math.round(c.b * 255)})`;
+  const grad = ctx2d.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, hex(css('--stage-top'))); grad.addColorStop(1, hex(css('--stage-bottom')));
+  ctx2d.fillStyle = grad; ctx2d.fillRect(0, 0, W, H);
+  const [z, vx, vy] = gpuView(), s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
+  ctx2d.imageSmoothingEnabled = true;
+  ctx2d.drawImage(netCanvas, (vx + z * (1 - bw) / 2) * W, (vy + z * (1 - bh) / 2) * H, z * bw * W, z * bh * H);
+}
+async function loadCpu() {
+  const { createCpuShader } = await import('./nts.js');
+  const threads = +(location.hash.match(/threads(\d+)/)?.[1] || 0) || undefined;
+  cpu = await createCpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
+  parts = cpu.parts;
+  ctx2d = canvas.getContext('2d');
+  renderer.setPixelRatio(1);
+  renderer.setSize(NW * 5, NH, false);
+}
+
 function readTimer() {
   if (!timer?.q) return;
   if (gl.getQueryParameter(timer.q, gl.QUERY_RESULT_AVAILABLE) && !gl.getParameter(timer.ext.GPU_DISJOINT_EXT)) {
@@ -874,7 +933,7 @@ function frame(now) {
   }
   if (stats) { stats.ticks++; if (now - stats.t0 > 10000) logStats(now); }
   // The GPU is still on earlier frames: let it catch up (the next tick draws the pose of its own time).
-  if (gpu?.busy) { if (stats) stats.skipped++; requestAnimationFrame(frame); return; }
+  if (gpu?.busy || cpu?.busy) { if (stats) stats.skipped++; requestAnimationFrame(frame); return; }
   const dt = Math.min(0.05, (now - lastT) / 1000);
   if (!dragging && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) {
     cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true;
@@ -891,8 +950,10 @@ function frame(now) {
     window.framesDrawn = (window.framesDrawn || 0) + 1;
     if (stats) { stats.drawn++; if (gpuMs != null) stats.gpu.push(gpuMs); }
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
-    const engine = `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}${gpu.math === 'f16' ? ' maths' : ''}` : 'WebGL'} · ${DETAIL}`;
+    const engine = cpu ? `CPU WebAssembly ${cpu.relaxed ? '8-bit' : '16-bit'} dots × ${cpu.threads} · nanotss`
+      : `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}${gpu.math === 'f16' ? ' maths' : ''}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
+      : cpu?.ms != null ? `${engine} · ${cpu.ms.toFixed(0)} ms · ${Math.round(fps)} fps`
       : gpuMs != null ? `${engine} · ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${engine} · ${Math.round(fps)} fps`;
     dirty = false;
   }
@@ -928,6 +989,18 @@ window.debugFrame = async (yaw, pitch, poseName = 'stand', t = 0) => {
   for (let i = 0; i < out.length; i++) id.data[i] = Math.round(Math.min(1, Math.max(0, out[i])) * 255);
   c.getContext('2d').putImageData(id, 0, 0);
   return c.toDataURL('image/png');
+};
+// CPU mode: the G-buffer tiles (five RGBA planes, rows bottom-up) and the network's straight RGBA for
+// one view of the whole frame, base64; with #tight they line up with a training frame's pixels.
+window.debugCpu = async (yaw, pitch, poseName = 'stand', t = 0) => {
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
+  setPose(poseName, t); vrm.update(0); placeCamera();
+  const crop = [0, 0, NW, NH], n = NW * NH * 4, tiles = new Uint8Array(5 * n);
+  renderGBufferTiles(crop);
+  for (let k = 0; k < 5; k++) gl.readPixels(k * GBW, 0, NW, NH, gl.RGBA, gl.UNSIGNED_BYTE, tiles.subarray(k * n, (k + 1) * n));
+  const rgba = await cpu.frame({ tiles, w: NW, h: NH, pitch: THREE.MathUtils.degToRad(cam.pitch) });
+  const b64 = a => { let s = ''; for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode(...a.subarray(i, i + 0x8000)); return btoa(s); };
+  return { w: NW, h: NH, tiles: b64(tiles), rgba: b64(new Uint8Array(rgba.buffer)) };
 };
 // Per-stage timings of n animated frames at a fixed dt (profiling): ms per stage per frame.
 window.debugProfile = async (poseName, n, dt = 1 / 60, net = true) => {
@@ -1060,7 +1133,8 @@ async function loadGpu() {
 }
 
 try {
-  if (gpuAdapter) {
+  if (CPU) await Promise.all([loadModel(), loadCpu(), loadMotions()]);
+  else if (gpuAdapter) {
     try { await Promise.all([loadModel(), loadGpu(), loadMotions()]); }
     catch (e) { console.warn('WebGPU path failed, reload with #webgl for the WebGL engine:', e); throw e; }
   } else {
@@ -1068,8 +1142,8 @@ try {
     await Promise.all([loadModel(), loadNet(), loadMotions()]);
   }
   if (gpu) await checkMath();
-  window.__gpu = gpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
-  window.engine = gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
+  window.__gpu = gpu; window.__cpu = cpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
+  window.engine = cpu ? 'cpu' : gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
   showDetail();
   assignParts(parts);
   status.hidden = true;

@@ -566,6 +566,25 @@ static int save_net(const char *path) {
     fwrite(tex, 4, n_tex, f); fclose(f); return 1;
 }
 
+static int load_net(const char *path) {
+    FILE *f = fopen(path, "rb"); char mg[4]; int hd[4], dil[MAXB];
+    if (!f || fread(mg, 1, 4, f) != 4 || memcmp(mg, "NTSW", 4) || fread(hd, 4, 4, f) != 4 || fread(dil, 4, MAXB, f) != MAXB) return 0;
+    if (hd[0] != NB || hd[1] != DW || hd[2] != P_PARTS || hd[3] != KT || memcmp(dil, DIL, sizeof dil)) { fprintf(stderr, "%s: other shape\n", path); return 0; }
+    int ok = fread(dense, 4, n_dense, f) == n_dense;
+    for (int b = 0; b < NB; b++) ok = ok && fread(W1[b], 4, DW * DW, f) == DW * DW && fread(W2[b], 4, DW * DW, f) == DW * DW;
+    ok = ok && fread(tex, 4, n_tex, f) == n_tex;
+    fclose(f); requantize(); return ok;
+}
+/* The texture as the viewer gets it (export_nts.py): 8 bits per channel between each level's channel min and max. */
+static void tex_to_8bit(void) {
+    for (int lev = 0; lev < 2; lev++) for (int c = 0; c < FCH; c++) {
+        size_t S = lev ? COARSE : FINE, n = S * S; float lo = INFINITY, hi = -INFINITY;
+        for (int p = 0; p < P_PARTS; p++) { const float *t = tex + (lev ? tex_coarse_off(p) : tex_fine_off(p)); for (size_t i = 0; i < n; i++) { lo = fminf(lo, t[i * FCH + c]); hi = fmaxf(hi, t[i * FCH + c]); } }
+        float st = (hi - lo) / 255; if (st <= 0) st = 1;
+        for (int p = 0; p < P_PARTS; p++) { float *t = tex + (lev ? tex_coarse_off(p) : tex_fine_off(p)); for (size_t i = 0; i < n; i++) t[i * FCH + c] = lo + nearbyintf((t[i * FCH + c] - lo) / st) * st; }
+    }
+}
+
 /* ---------------- gradient check (continuous weights, as nanotss --check) ---------------- */
 static int run_check(void) {
     check_mode = 1; continuous_check = 1; tc_continuous = 1; NB = 3; P_PARTS = 2;
@@ -626,7 +645,8 @@ static int run_check(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *data = NULL, *save = "model.ntsw", *prev = "preview.ppm";
+    const char *data = NULL, *save = "model.ntsw", *prev = "preview.ppm", *load = NULL, *ref = NULL;
+    int tex8 = 0, eval_all = 0;
     int iters = 12000, B = 0, crop = 96, threads = 0, eval_every = 500, check = 0;
     double lr = 0.003, lr_tex = 0.01, seconds = 0;
     for (int i = 1; i < argc; i++) {
@@ -646,6 +666,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--eval-every")) { eval_every = atoi(v); i++; }
         else if (!strcmp(a, "--profile")) profile = 1;
         else if (!strcmp(a, "--engine-rows")) engine_rows = 1;
+        else if (!strcmp(a, "--load")) { load = v; i++; }        /* start from a saved model */
+        else if (!strcmp(a, "--tex8")) tex8 = 1;                  /* the viewer's 8-bit texture */
+        else if (!strcmp(a, "--eval-all")) eval_all = 1;          /* every frame is held out (a pack_data.py --held file), all evaluated */
+        else if (!strcmp(a, "--ref")) { ref = v; i++; }           /* first held-out frame's input and output, for infer.c */
         else { fprintf(stderr, "unknown %s\n", a); return 2; }
     }
     if (check) return run_check();
@@ -654,9 +678,11 @@ int main(int argc, char **argv) {
     if (!B) B = threads;
     Data d = load_data(data); P_PARTS = d.P;
     int *train_ids = malloc(4 * d.N), *held = malloc(4 * d.N), ntr = 0, nh = 0;
-    for (int i = 0; i < d.N; i++) { if (i % 10 == 5) held[nh++] = i; else train_ids[ntr++] = i; }
-    int neval = 0; int *eval_ids = malloc(4 * nh); for (int i = 0; i < nh; i += 4) eval_ids[neval++] = held[i];
+    for (int i = 0; i < d.N; i++) { if (i % 10 == 5 || eval_all) held[nh++] = i; else train_ids[ntr++] = i; }
+    int neval = 0; int *eval_ids = malloc(4 * nh); for (int i = 0; i < nh; i += eval_all ? 1 : 4) eval_ids[neval++] = held[i];
     net_alloc(threads); net_init();
+    if (load && !load_net(load)) { fprintf(stderr, "could not load %s\n", load); return 1; }
+    if (tex8) tex_to_8bit();
     int ch = crop < d.H ? crop : d.H, cw = crop < d.W ? crop : d.W;
     int *nb[MAXB], *nbf[MAXB];
     for (int b = 0; b < NB; b++) { nb[b] = neighbours(ch, cw, DIL[b]); nbf[b] = neighbours(d.H, d.W, DIL[b]); }
@@ -675,6 +701,14 @@ int main(int argc, char **argv) {
     Hyper h = {.lr = lr, .beta1 = .9, .beta2 = .98, .eps = 1e-8, .weight_decay = .01, .clip = 1};
     Hyper ht = {.lr = lr_tex, .beta1 = .9, .beta2 = .98, .eps = 1e-8, .weight_decay = 0, .clip = 1};
     double t0 = wall(), ema = 0;
+    if (ref) {   /* 'NTSR', H, W, pitch, the 17-byte pixels, then the straight RGBA output (float32) */
+        int fi = held[0]; forward(ews[0], frame_px(&d, fi), d.W, d.H, d.W, d.pitch[fi], nbf);
+        FILE *f = fopen(ref, "wb"); int hw[2] = {d.H, d.W};
+        fwrite("NTSR", 1, 4, f); fwrite(hw, 4, 2, f); fwrite(d.pitch + fi, 4, 1, f);
+        fwrite(frame_px(&d, fi), 17, (size_t)d.H * d.W, f); fwrite(ews[0]->p, 4, (size_t)d.H * d.W * 4, f); fclose(f);
+        printf("reference frame %d -> %s\n", fi, ref);
+    }
+    if (iters == 0) { printf("held-out L1 %.4f over %d frames\n", evaluate(&d, eval_ids, neval, ews, nbf), neval); return 0; }
     for (int it = 1; it <= iters; it++) {
         double el = wall() - t0, prog = seconds > 0 ? fmin(1, el / seconds) : (double)it / iters;
         double sched = fmin(1, it / 300.0) * (.1 + .9 * .5 * (1 + cos(M_PI * prog)));
