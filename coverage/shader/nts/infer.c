@@ -284,35 +284,27 @@ static void run(const float *in, int w, int h, int r0, int r1, float *xa, float 
     #define HI(s) (r1 + (s) < h ? r1 + (s) : h)
     #define AT(a, r, c) ((a) + ((uint32_t)(r) * w + (c)) * DW)
     /* Chebyshev distance (capped at 255) to the nearest pixel whose inputs aren't the background's,
-     * which is pixel (0, 0): the region always starts outside her. */
+     * which is pixel (0, 0): the region always starts outside her. Two raster passes over the 8
+     * neighbours give the chessboard distance exactly. */
     const float *bgin = in;
     if (sparse) {
-        for (int r = 0; r < h; r++) {   /* along the row, then the window of rows */
-            int last = -100000;
-            uint8_t *d = dist + (uint32_t)r * w;
-            for (int c = 0; c < w; c++) {
-                const float *f = in + ((uint32_t)r * w + c) * CIN; int same = 1;
-                for (int i = 0; i < 16; i++) same &= f[i] == bgin[i];
-                if (!same) last = c;
-                d[c] = c - last > 255 ? 255 : c - last;
-            }
-            last = 100000;
-            for (int c = w - 1; c >= 0; c--) { if (d[c] == 0) last = c; if (last - c < d[c]) d[c] = last - c; }
+        for (int r = 0; r < h; r++) for (int c = 0; c < w; c++) {
+            const float *f = in + ((uint32_t)r * w + c) * CIN; int same = 1;
+            for (int i = 0; i < 16; i++) same &= f[i] == bgin[i];
+            dist[(uint32_t)r * w + c] = same ? 255 : 0;
         }
-        /* vertical pass in place would read updated rows: go through xb as scratch (it's free now) */
-        uint8_t *row = (uint8_t *)xb;
-        for (int c = 0; c < w; c++) {
-            for (int r = 0; r < h; r++) row[r] = dist[(uint32_t)r * w + c];
-            for (int r = 0; r < h; r++) {
-                int best = 255;
-                for (int k = -32; k <= 32; k++) {
-                    int rr = r + k; if (rr < 0 || rr >= h) continue;
-                    int a = k < 0 ? -k : k, v = row[rr] > a ? row[rr] : a;
-                    if (v < best) best = v;
-                }
-                dist[(uint32_t)r * w + c] = (uint8_t)best;
-            }
+        #define D(r, c) dist[(uint32_t)(r) * w + (c)]
+        #define RELAX(r, c, rr, cc) do { int v_ = D(rr, cc) + 1; if (v_ < D(r, c)) D(r, c) = (uint8_t)v_; } while (0)
+        for (int r = 0; r < h; r++) for (int c = 0; c < w; c++) {
+            if (c) RELAX(r, c, r, c - 1);
+            if (r) { RELAX(r, c, r - 1, c); if (c) RELAX(r, c, r - 1, c - 1); if (c + 1 < w) RELAX(r, c, r - 1, c + 1); }
         }
+        for (int r = h - 1; r >= 0; r--) for (int c = w - 1; c >= 0; c--) {
+            if (c + 1 < w) RELAX(r, c, r, c + 1);
+            if (r + 1 < h) { RELAX(r, c, r + 1, c); if (c + 1 < w) RELAX(r, c, r + 1, c + 1); if (c) RELAX(r, c, r + 1, c - 1); }
+        }
+        #undef RELAX
+        #undef D
         /* the background's value after each block */
         embed(bgin, bg[0]);
         for (int b = 0; b < NB; b++) { const float *src[KT]; for (int q = 0; q < KT; q++) src[q] = bg[b]; token(blk + b, src, bg[b], bg[b + 1]); }

@@ -18,9 +18,11 @@ function run({ input, rgba, w, h, r0, r1 }) {
     buf = { in: k.nts_alloc(cap * 72), xa: k.nts_alloc(cap * 256), xb: k.nts_alloc(cap * 256), dist: k.nts_alloc(cap), out: k.nts_alloc(cap * 4) };
   }
   new Float32Array(k.memory.buffer, buf.in, n * 18).set(new Float32Array(input, 0, n * 18));
+  const t0 = performance.now();
   k.nts_run(buf.in, w, h, r0, r1, buf.xa, buf.xb, buf.dist, buf.out);
+  const ms = performance.now() - t0;
   // the caller's buffers go back to it, the output in its own (grown if it was too small)
   if (rgba.byteLength < m) rgba = new ArrayBuffer(Math.ceil(m * 1.3));
   new Uint8Array(rgba, 0, m).set(new Uint8Array(k.memory.buffer, buf.out, m));
-  postMessage({ rgba, input }, [rgba, input]);
+  postMessage({ rgba, input, ms }, [rgba, input]);
 }

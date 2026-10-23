@@ -35,7 +35,8 @@ const tPrep = performance.now() - t0;
 const bands = +bandsArg, reach = k.nts_reach();
 const xa = k.nts_alloc(W * H * 64 * 4), xb = k.nts_alloc(W * H * 64 * 4), dist = k.nts_alloc(W * H), outp = k.nts_alloc(W * H * 16);
 console.log(`${W}x${H}, ${bands} bands, reach ${reach}, prepare ${tPrep.toFixed(0)} ms`);
-for (const sparse of [0, 1]) for (let rep = 0; rep < 2; rep++) {   // the second time: optimised code
+const REPS = +(process.env.REPS || 1);
+for (const sparse of [0, 1]) for (let rep = 0, best = Infinity; rep <= REPS; rep++) {   // after the first: optimised code; the best time
   const got = new Float32Array(H * W * 4);
   t0 = performance.now();
   for (let i = 0; i < bands; i++) {
@@ -44,8 +45,8 @@ for (const sparse of [0, 1]) for (let rep = 0; rep < 2; rep++) {   // the second
     k.nts_run_f(inp + a * W * 18 * 4, W, b - a, r0 - a, r1 - a, xa, xb, dist, sparse, outp);
     got.set(new Float32Array(k.memory.buffer, outp, (r1 - r0) * W * 4), r0 * W * 4);
   }
-  const tRun = performance.now() - t0;
-  if (!rep) continue;
+  const tRun = best = rep ? Math.min(best, performance.now() - t0) : Infinity;
+  if (rep < REPS) continue;
   // as it's seen: composited over white (the held-out metric's way)
   let worst = 0, sum = 0, off = 0;
   for (let i = 0; i < got.length; i += 4) for (let c = 0; c < 3; c++) {

@@ -63,6 +63,29 @@ export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
   const bufs = workers.map(() => ({ input: new ArrayBuffer(0), rgba: new ArrayBuffer(0) }));
   let out = new Uint8ClampedArray(0);
   let busy = false, ms = null;
+  // Band cuts as fractions of the crop's height. Background skipping makes a band's cost follow how
+  // much of her it holds, so equal heights leave workers idle while one finishes (1.5x slower on a
+  // standing frame). The first split puts equal shares of her pixels in each band; after that each
+  // frame's band times move the cuts toward equal time (half-way, to stay steady).
+  let cuts = null;
+  function firstCuts(all, w, h) {
+    const cum = new Float64Array(h + 1);
+    for (let r = 0; r < h; r++) { let m = w * 0.02; for (let c = 0; c < w; c++) m += all[(r * w + c) * 18 + 7]; cum[r + 1] = cum[r] + m; }
+    return Array.from({ length: n + 1 }, (_, i) => { let r = 0; while (r < h && cum[r + 1] < cum[h] * i / n) r++; return i === n ? 1 : r / h; });
+  }
+  function adjust(times) {
+    // cost spread evenly over each band's rows, then cut at equal shares of the total
+    const total = times.reduce((a, b) => a + b, 0); if (!(total > 0)) return;
+    const next = [0]; let band = 0, acc = 0;
+    for (let i = 1; i < n; i++) {
+      const goal = total * i / n;
+      while (band < n - 1 && acc + times[band] < goal) acc += times[band++];
+      const f = times[band] > 0 ? (goal - acc) / times[band] : 0;
+      next.push(cuts[band] + f * (cuts[band + 1] - cuts[band]));
+    }
+    next.push(1);
+    cuts = cuts.map((c, i) => (c + next[i]) / 2);
+  }
   // tiles: the five G-buffer tiles (colour, normal, depth, uv-a, uv-b), each w x h RGBA, rows
   // bottom-up as readPixels gives them. Resolves to straight RGBA, w x h, rows top-down (valid until
   // the next frame).
@@ -73,9 +96,11 @@ export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
     k.nts_prepare(tilesP, w, h, Math.sin(pitch), Math.cos(pitch), inP);
     const all = new Float32Array(k.memory.buffer, inP, w * h * 18);
     if (out.length < w * h * 4) out = new Uint8ClampedArray(Math.ceil(w * h * 4 * 1.3));
-    // Bands of equal height; each worker gets its band's inputs plus the reach above and below.
+    if (!cuts) cuts = firstCuts(all, w, h);
+    const times = new Array(n).fill(0), rows = cuts.map(c => Math.round(c * h));
+    // Each worker gets its band's inputs plus the reach above and below.
     await Promise.all(workers.map((wk, i) => new Promise(resolve => {
-      const r0 = Math.round(h * i / n), r1 = Math.round(h * (i + 1) / n);
+      const r0 = rows[i], r1 = rows[i + 1];
       if (r1 <= r0) { resolve(); return; }
       const a = Math.max(0, r0 - reach), b = Math.min(h, r1 + reach), len = (b - a) * w * 18, B = bufs[i];
       if (B.input.byteLength < len * 4) B.input = new ArrayBuffer(Math.ceil(len * 4 * 1.3));
@@ -84,13 +109,14 @@ export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
         const d = e.data;
         if (d.error) console.error('[cpu worker]', d.error);
         else out.set(new Uint8Array(d.rgba, 0, (r1 - r0) * w * 4), r0 * w * 4);
-        if (d.input) { B.input = d.input; B.rgba = d.rgba; }
+        if (d.input) { B.input = d.input; B.rgba = d.rgba; times[i] = d.ms; }
         resolve();
       };
       wk.postMessage({ input: B.input, rgba: B.rgba, w, h: b - a, r0: r0 - a, r1: r1 - a }, [B.input, B.rgba]);
     })));
+    adjust(times);
     const dt = performance.now() - t0;
-    if (globalThis.cpuLog) console.log(`[cpu] ${w}x${h} in ${dt.toFixed(0)} ms`);
+    if (globalThis.cpuLog) console.log(`[cpu] ${w}x${h} in ${dt.toFixed(0)} ms, bands ${times.map(t => t.toFixed(0)).join('/')} ms`);
     ms = ms == null ? dt : ms * 0.8 + dt * 0.2;
     busy = false;
     return out.subarray(0, w * h * 4);
