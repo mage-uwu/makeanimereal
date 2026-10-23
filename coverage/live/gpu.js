@@ -401,7 +401,22 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
   // lighting (models with light channels): 9 floats, the light's view-space direction, key colour x strength
   // and ambient colour x strength relative to the films' light (train_light.py light_params).
   // rect: the part of each G-buffer tile to copy in ([x, y, w, h], top-down); the whole tile by default.
-  function frame({ source, crop, rect = null, pitch, mode, top, bottom, lighting = null, limit = Infinity, noCopy = false, noShow = false }) {
+  // view: [zoom, x, y], the drawing magnified about the canvas's top-left and moved by (x, y) canvas
+  // widths/heights; the display pass does it, so zoom costs nothing and redraw() can redo just that.
+  let lastShow = null;
+  function show({ crop, mode, top, bottom, view = [1, 0, 0] }, enc = null) {
+    lastShow = { crop, mode, top, bottom, view };
+    const own = !enc; if (own) enc = device.createCommandEncoder();
+    const W = canvas.width, H = canvas.height;
+    const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H, [z, vx, vy] = view;
+    device.queue.writeBuffer(showBuf, 0, new Float32Array([vx + z * (1 - bw) / 2, vy + z * (1 - bh) / 2, z * bw, z * bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
+    const rp = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
+    rp.setPipeline(showPipe); rp.setBindGroup(0, showGroup); rp.draw(3); rp.end();
+    if (own) device.queue.submit([enc.finish()]);
+  }
+  // The last frame again under a new view (zoom, pan, resize): the display pass only.
+  function redraw(view) { if (lastShow) show({ ...lastShow, view }); }
+  function frame({ source, crop, rect = null, pitch, mode, top, bottom, view, lighting = null, limit = Infinity, noCopy = false, noShow = false }) {
     if (!noCopy) {
       if (!rect) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [GW * TILES, GH]);
       else for (let k = 0; k < TILES; k++) {
@@ -452,11 +467,7 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     };
     const done = () => { inFlight++; device.queue.onSubmittedWorkDone().then(() => { inFlight--; }); };
     if (noShow) { device.queue.submit([enc.finish()]); done(); readProf(); return; }  // checks: headless browsers can't present
-    const W = canvas.width, H = canvas.height;
-    const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
-    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
-    const rp = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
-    rp.setPipeline(showPipe); rp.setBindGroup(0, showGroup); rp.draw(3); rp.end();
+    show({ crop, mode, top, bottom, view }, enc);
     device.queue.submit([enc.finish()]);
     done();
     readProf();
@@ -487,10 +498,10 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
 
   // The display pass drawn offscreen and read back (checks: headless browsers can't present), after a
   // frame(): W must be a multiple of 64. Returns RGBA bytes.
-  async function readShow({ crop, mode = 0, top = [1, 1, 1], bottom = [1, 1, 1], W = 512, H = 910 }) {
+  async function readShow({ crop, mode = 0, top = [1, 1, 1], bottom = [1, 1, 1], W = 512, H = 910, view = [1, 0, 0] }) {
     const tex = device.createTexture({ size: [W, H], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-    const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
-    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
+    const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H, [z, vx, vy] = view;
+    device.queue.writeBuffer(showBuf, 0, new Float32Array([vx + z * (1 - bw) / 2, vy + z * (1 - bh) / 2, z * bw, z * bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
     const read = buf(W * H * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
     const enc = device.createCommandEncoder();
     const rp = enc.beginRenderPass({ colorAttachments: [{ view: tex.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
@@ -514,7 +525,7 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     return rows.sort((a, b) => b.ms - a.ms);
   }
 
-  return { frame, readTensor, readShow, layerTimes, light: LIT, mathModes,
+  return { frame, redraw, readTensor, readShow, layerTimes, light: LIT, mathModes,
     get math() { return mathMode; }, set math(m) { if (convPipes[m]) mathMode = m; }, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 

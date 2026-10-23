@@ -114,7 +114,7 @@ import { createMotion } from './motion.js';
 // view grows with the frame. The network only runs inside the crop box around her, so standing costs
 // what it did. #tight keeps the training frame (the checks compare against it).
 const TRAIN_W = 360, TRAIN_H = 640;
-const [NW, NH] = location.hash.includes('tight') ? [TRAIN_W, TRAIN_H] : [576, 800];
+const [NW, NH] = location.hash.includes('tight') ? [TRAIN_W, TRAIN_H] : [720, 800];
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 // Trained shaders: 'crisp' (the default where WebGPU runs it: the sharp shader fine-tuned on posed
@@ -731,8 +731,16 @@ function applyZoom() {
   // Zoomed in, the drawing always covers the stage; zoomed out, it stays centred.
   view.tx = z <= 1 ? r.width * (1 - z) / 2 : Math.min(0, Math.max(r.width * (1 - z), view.tx));
   view.ty = z <= 1 ? r.height * (1 - z) / 2 : Math.min(0, Math.max(r.height * (1 - z), view.ty));
-  viewCanvas.style.transform = z === 1 ? '' : `translate(${view.tx}px, ${view.ty}px) scale(${z})`;
+  // WebGPU: the display pass magnifies (a CSS scale on the canvas made the compositor handle a layer
+  // several times the screen, and the frame rate collapsed); WebGL: the canvas is scaled.
+  if (gpu) { viewCanvas.style.transform = ''; if (!gpu.busy) gpu.redraw(gpuView()); else dirty = true; }
+  else viewCanvas.style.transform = z === 1 ? '' : `translate(${view.tx}px, ${view.ty}px) scale(${z})`;
   document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
+}
+// The view for the WebGPU display pass: zoom, and the shift as a share of the stage.
+function gpuView() {
+  const r = stage.getBoundingClientRect();
+  return [view.zoom, view.tx / Math.max(1, r.width), view.ty / Math.max(1, r.height)];
 }
 // sx, sy: the point to keep fixed, in stage pixels.
 function zoomAt(sx, sy, factor) {
@@ -821,7 +829,7 @@ function drawFrame() {
     const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
     if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
     const top = css('--stage-top'), bottom = css('--stage-bottom');
-    gpu.frame({ source: glCanvas, crop, rect: location.hash.includes("wholecopy") ? null : gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
+    gpu.frame({ source: glCanvas, crop, view: gpuView(), rect: gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
       noShow: location.hash.includes('noshow') });
     gpuMs = gpu.gpuMs;
     return crop;
@@ -930,7 +938,7 @@ window.debugProfile = async (poseName, n, dt = 1 / 60, net = true) => {
     const t2 = performance.now(); const crop = cropBox(true);
     const t3 = performance.now(); renderGBufferTiles(crop);
     const t4 = performance.now();
-    gpu.frame({ source: glCanvas, crop, rect: location.hash.includes("wholecopy") ? null : gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [1, 1, 1], bottom: [1, 1, 1], noShow: true });
+    gpu.frame({ source: glCanvas, crop, rect: gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [1, 1, 1], bottom: [1, 1, 1], noShow: true });
     const t5 = performance.now(); await gpu.device.queue.onSubmittedWorkDone();
     const t6 = performance.now();
     rows.push([t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, (crop[2] - crop[0]) * (crop[3] - crop[1])]);
@@ -986,11 +994,11 @@ window.debugSoak = (poseName, n, every = 250) => {
   return out;
 };
 // The displayed frame (WebGPU engine, with the toon light if one is set), as a PNG data URL.
-window.debugShow = async (yaw, pitch, poseName = 'stand', t = 0) => {
+window.debugShow = async (yaw, pitch, poseName = 'stand', t = 0, zoomView = [1, 0, 0]) => {
   cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
   setPose(poseName, t); vrm.update(0);
   const crop = drawFrame();
-  const r = await gpu.readShow({ crop });
+  const r = await gpu.readShow({ crop, view: zoomView });
   const c = document.createElement('canvas'); c.width = r.w; c.height = r.h;
   const id = c.getContext('2d').createImageData(r.w, r.h); id.data.set(r.data);
   c.getContext('2d').putImageData(id, 0, 0);
