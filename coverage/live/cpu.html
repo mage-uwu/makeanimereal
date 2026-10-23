@@ -354,7 +354,7 @@ function loop(now) {
     const t1 = performance.now();
     fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
     readout.textContent = raw ? 'raw render'
-      : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD lookup tables × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
+      : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
   }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
 }
 

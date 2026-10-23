@@ -3,8 +3,10 @@
  *
  *   clang --target=wasm32 -O3 -msimd128 -mbulk-memory -nostdlib -Wl,--no-entry -Wl,--export-dynamic \
  *         -Wl,--initial-memory=33554432 -o ../../live/nts/infer.wasm infer.c
- *   (the same with -mrelaxed-simd -o ../../live/nts/infer-relaxed.wasm: relaxed swizzle; -DNO_LUT for the
- *   dot-product kernel, 8-bit dots with relaxed SIMD)
+ *   (the same with -mrelaxed-simd -o infer-relaxed.wasm: relaxed swizzle; and both again with -DNO_LUT,
+ *   -o infer-dot.wasm and infer-relaxed-dot.wasm: the dot-product kernel, 8-bit dots with relaxed SIMD.
+ *   nts.js times both kernels on the device and keeps the faster: on x86 the lookup tables win by a
+ *   little, while an ARM core whose browser turns the relaxed dot into sdot may favour the dots.)
  *
  * It computes what shader_nts.c's forward() computes, from export_nts.py's net.bin: the input decode
  * and neural texture, the embedding, per block the engine's ternary stencil mixer (tc_one) and the
@@ -396,6 +398,14 @@ static void run(const float *in, int w, int h, int r0, int r1, float *xa, float 
     #undef HI
     #undef AT
     #undef ACTIVE
+}
+/* For picking a kernel on the device (nts.js): n tokens through the blocks, on a made-up input. */
+EXPORT float nts_bench(int n) {
+    static float x[DW] __attribute__((aligned(16))), y[DW] __attribute__((aligned(16)));
+    for (int i = 0; i < DW; i++) x[i] = (float)((i * 37) % 23 - 11) * 0.13f;
+    const float *src[KT]; for (int q = 0; q < KT; q++) src[q] = x;
+    for (int i = 0; i < n; i++) { token(blk + i % NB, src, x, y); x[i % DW] += y[i % DW] * 1e-3f; }
+    return y[0];
 }
 EXPORT void nts_run(const float *in, int w, int h, int r0, int r1, float *xa, float *xb, uint8_t *dist, uint8_t *out) { run(in, w, h, r0, r1, xa, xb, dist, 1, out, 0); }
 /* For checks: the output as floats (w x (r1 - r0) x 4), background skipping or not. */

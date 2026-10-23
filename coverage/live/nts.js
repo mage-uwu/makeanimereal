@@ -2,7 +2,7 @@
 // WebAssembly. The main thread turns the G-buffer tiles into the network's inputs (decode and the
 // neural texture, infer.c nts_prepare); Web Workers each run the network on a band of rows
 // (nts-worker.js), the band plus the network's reach on both sides, so the bands join seamlessly.
-// infer-relaxed.wasm (8-bit dot products) where the browser has relaxed SIMD, else infer.wasm.
+// Relaxed SIMD builds where the browser has them; of the two kernels, the one faster on this device.
 
 // net.png: export_nts.py's net.bin packed 3 bytes a pixel into an opaque RGB PNG after a 4-byte length.
 async function unpackPng(blob) {
@@ -17,11 +17,24 @@ async function unpackPng(blob) {
 
 export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
   const get = async f => { const r = await fetch(base + f); if (!r.ok) throw new Error(`${base}${f}: ${r.status}`); return r; };
-  let module = null, relaxed = true;
-  try { module = await WebAssembly.compile(await (await get('infer-relaxed.wasm')).arrayBuffer()); }
-  catch { relaxed = false; module = await WebAssembly.compile(await (await get('infer.wasm')).arrayBuffer()); }
+  // Two kernels per SIMD level (infer.c): lookup tables (infer*.wasm) and dot products (infer*-dot.wasm),
+  // the same sums. Which is faster depends on the CPU and on how the browser lowers WebAssembly (an
+  // ARM browser that turns relaxed dots into sdot favours the dots; x86 favours the tables), so both
+  // are timed here on a made-up token stream and the faster runs the frames.
+  let relaxed = true, mods;
+  try { mods = await Promise.all(['infer-relaxed.wasm', 'infer-relaxed-dot.wasm'].map(async f => WebAssembly.compile(await (await get(f)).arrayBuffer()))); }
+  catch { relaxed = false; mods = await Promise.all(['infer.wasm', 'infer-dot.wasm'].map(async f => WebAssembly.compile(await (await get(f)).arrayBuffer()))); }
   const [meta, net] = await Promise.all([get('meta.json').then(r => r.json()), get('net.png').then(r => r.blob()).then(unpackPng)]);
-
+  const bench = [];
+  for (const m of mods) {
+    const e = (await WebAssembly.instantiate(m)).exports, p = e.nts_alloc(net.byteLength);
+    new Uint8Array(e.memory.buffer).set(new Uint8Array(net), p);
+    if (!e.nts_load(p, net.byteLength)) throw new Error('nts/net.png did not load');
+    let best = Infinity;
+    for (let r = 0; r < 6; r++) { const t = performance.now(); e.nts_bench(4000); best = Math.min(best, performance.now() - t); }   // ~5 ms a round; later rounds run optimised code
+    bench.push(best);
+  }
+  const pick = bench[1] < bench[0] ? 1 : 0, module = mods[pick], kernel = pick ? 'dot products' : 'lookup tables';
   // The main thread's instance: inputs and the neural texture.
   const k = (await WebAssembly.instantiate(module)).exports;
   const put = bytes => { const p = k.nts_alloc(bytes.byteLength); new Uint8Array(k.memory.buffer).set(new Uint8Array(bytes), p); return p; };
@@ -123,5 +136,5 @@ export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
   }
   // For checks: the fine texture as decoded here, sampled every 4099th byte.
   const fineSample = () => Array.from({ length: 2048 }, (_, i) => new Uint8Array(k.memory.buffer, fineP, P * T * T * 8)[i * 4099]);
-  return { frame, fineSample, parts: meta.parts, threads: n, relaxed, get busy() { return busy; }, get ms() { return ms; } };
+  return { frame, fineSample, parts: meta.parts, threads: n, relaxed, kernel, bench, get busy() { return busy; }, get ms() { return ms; } };
 }
