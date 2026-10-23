@@ -18,7 +18,9 @@ export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = f
   const timestamps = adapter.features.has('timestamp-query');
   const device = await adapter.requestDevice({
     requiredFeatures: [...(f16 ? ['shader-f16'] : []), ...(timestamps ? ['timestamp-query'] : [])],
-    requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(8, adapter.limits.maxStorageBuffersPerShaderStage) },
+    // Large frames make full-resolution tensors over the default 128 MB binding: ask for what the adapter has.
+    requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(8, adapter.limits.maxStorageBuffersPerShaderStage),
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize },
   });
   device.lost.then(info => console.error('WebGPU device lost:', info.reason, info.message));
   device.addEventListener('uncapturederror', e => console.error('WebGPU error:', e.error.message));
@@ -40,8 +42,10 @@ export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = f
   const tensor = (w, h, layers) => ({ w, h, layers, buf: buf(w * h * layers * bytes, STORE) });
   // Sizes come from shader.json where it has them; a sharp model also has a full-resolution input
   // (xf) and draws at full resolution.
-  const dimsOf = name => net.dims?.[name] ?? [NW / div[name.replace(/_mid$/, '')], NH / div[name.replace(/_mid$/, '')]];
-  const [GW, GH] = net.sharp ? net.full : [NW, NH];  // the G-buffer's size
+  // shader.json's sizes are for its training frame (net.size); the page's frame may be larger.
+  const [sx, sy] = net.size ? [NW / net.size[0], NH / net.size[1]] : [1, 1];
+  const dimsOf = name => net.dims?.[name] ? [net.dims[name][0] * sx, net.dims[name][1] * sy] : [NW / div[name.replace(/_mid$/, '')], NH / div[name.replace(/_mid$/, '')]];
+  const [GW, GH] = net.sharp ? [net.full[0] * sx, net.full[1] * sy] : [NW, NH];  // the G-buffer's size
   const LIT = net.light || 0;  // light channels after the 18 inputs (train_light.py)
   const XL = Math.ceil((18 + LIT) / 4);
   T.x = tensor(NW, NH, XL);

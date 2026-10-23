@@ -109,8 +109,14 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createMotion } from './motion.js';
 
-const NW = 360, NH = 640;           // network and G-buffer, as the shader was trained
+// The network's frame. The shaders trained on 360 x 640 frames; the viewer's is larger at the same
+// scale (pixels per metre), so outstretched arms and raised hands stay in it: the camera's field of
+// view grows with the frame. The network only runs inside the crop box around her, so standing costs
+// what it did. #tight keeps the training frame (the checks compare against it).
+const TRAIN_W = 360, TRAIN_H = 640;
+const [NW, NH] = location.hash.includes('tight') ? [TRAIN_W, TRAIN_H] : [576, 800];
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 // Trained shaders: 'crisp' (the default where WebGPU runs it: the sharp shader fine-tuned on posed
 // frames, against flicker and for crisp linework), 'smooth' (the same before the linework pass),
 // 'sharp' (half-resolution decoder plus a full-resolution head, posed frames only), 'fast' (channels
@@ -148,7 +154,7 @@ window.debugLight = ({ dir = [1, 3, 2], color = 0xffffff, intensity = 2.2, amb =
   sun.position.set(...dir); sun.color.setHex(color); sun.intensity = intensity;
   ambient.intensity = amb; ambient.color.setHex(ambColor);
 };
-const camera = new THREE.PerspectiveCamera(FOV, NW / NH, 0.01, 100);
+const camera = new THREE.PerspectiveCamera(VIEW_FOV, NW / NH, 0.01, 100);
 let vrm, target, radius, parts = [], bones = [];
 
 // The model ships as bytes packed into an opaque RGB PNG (coverage/live/slim_vrm.py): 3 bytes a
@@ -357,7 +363,7 @@ function cropBox(topDown = false) {
   // Bones sit inside the skin, cloth and hair: pad by a fixed share of the frame, then by the reach.
   const px = x => (x * 0.5 + 0.5) * NW, py = y => (topDown ? 0.5 - y * 0.5 : y * 0.5 + 0.5) * NH;
   if (topDown) [y0, y1] = [y1, y0];
-  const m = 0.12 * NH + CROP_PAD;
+  const m = 0.12 * TRAIN_H + CROP_PAD;
   let box = [px(x0) - m, py(y0) - m, px(x1) + m, py(y1) + m];
   const now = box;
   if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
@@ -926,7 +932,7 @@ window.debugTensor = async (name, layer) => {
 // WebGPU path: the network, its neural texture and the device (coverage/live/gpu.js).
 async function loadGpu() {
   const net = await (await fetch(`${modelDir()}shader.json`)).json();
-  if (net.sharp) [GBW, GBH] = net.full;
+  if (net.sharp) [GBW, GBH] = [net.full[0] * NW / TRAIN_W, net.full[1] * NH / TRAIN_H];
   parts = net.parts;
   const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${modelDir()}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
