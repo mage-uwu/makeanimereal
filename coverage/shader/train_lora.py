@@ -13,6 +13,13 @@ texture train, the original weights stay frozen. Batches mix posed frames with t
 (--data, in the base's training order so its appearance codes still apply), so what it already drew
 well stays put. The adapters are merged into the weights at the end: the saved checkpoint has the
 base's exact layout and export.py takes it unchanged.
+
+--equi adds a shift-consistency loss against flicker: the browser runs the decoder at half
+resolution inside a box that follows the bones, so as she moves her features slide across the 2 x 2
+pooling grids, and a shader that draws a feature differently at different grid phases shimmers.
+Each step also draws a crop shifted by 1 to --shift pixels and asks that drawing-then-shifting
+equal shifting-then-drawing (away from the crops' edges). The log reports that shift error on
+held-out frames, the number this loss pulls down.
 """
 import argparse
 import math
@@ -86,6 +93,9 @@ def main():
     ap.add_argument('--posed-share', type=float, default=0.5, help='fraction of each batch from --posed')
     ap.add_argument('--crop', default='512x384')
     ap.add_argument('--vgg', type=float, default=0.1)
+    ap.add_argument('--equi', type=float, default=0.0, help='weight of the shift-consistency loss')
+    ap.add_argument('--shift', type=int, default=15, help='largest shift for --equi, pixels')
+    ap.add_argument('--tex-lr', type=float, default=2e-3)
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -124,7 +134,7 @@ def main():
     print(f'{len(adapters)} adapters, rank {a.rank}: {sum(p.numel() for p in lora)} parameters; '
           f'{n_pose} posed frames ({len(pte)} held out), {n_old} film frames', flush=True)
     vgg = train.VGG().to(dev)
-    opt = torch.optim.Adam([{'params': lora, 'lr': 1e-3}, {'params': base.tex.parameters(), 'lr': 2e-3}])
+    opt = torch.optim.Adam([{'params': lora, 'lr': 1e-3}, {'params': base.tex.parameters(), 'lr': a.tex_lr}])
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda t: min(1, t / 100) * 0.5 * (1 + math.cos(math.pi * t / a.iters)))
     H, W = Xo.shape[1:3]
     ch, cw = map(int, a.crop.split('x'))
@@ -143,26 +153,68 @@ def main():
                 errs.append(F.l1_loss(train.over_white(pr), train.over_white(Y[i].permute(0, 3, 1, 2).float()), reduction='none').mean((1, 2, 3)))
         return torch.cat(errs).mean().item()
 
+    M = 32  # margin kept clear of the crops' edges, where zero padding differs between the two
+
+    def shifted_pair(X, P, ids, codes, y0, x0, dy, dx):
+        """Drawings of a crop and of the same crop moved by (dy, dx), cut to where they overlap."""
+        A = model(X[ids, y0:y0 + ch, x0:x0 + cw].float(), P[ids], ids if codes else None)
+        B = model(X[ids, y0 + dy:y0 + dy + ch, x0 + dx:x0 + dx + cw].float(), P[ids], ids if codes else None)
+        A = A[:, :, dy + M:ch - M, dx + M:cw - M]
+        B = B[:, :, M:ch - dy - M, M:cw - dx - M]
+        return A, B
+
+    def equi_loss(A, B):
+        on = (torch.maximum(A[:, 3:4], B[:, 3:4]) > 0.02).float()
+        d = (train.over_white(A) - train.over_white(B)).abs() * on
+        return d.sum() / (on.sum() * 3 + 1)
+
+    def shift_error(X, P, ids, codes):
+        """Held-out shift error: mean over shifts 1, 3, 5, 8 (diagonal) of the drawing's change."""
+        errs = []
+        with torch.no_grad():
+            for k in range(0, len(ids), 2):
+                i = torch.from_numpy(ids[k:k + 2]).to(dev)
+                for s in (1, 3, 5, 8):
+                    A, B = shifted_pair_full(X, P, i, codes, s)
+                    errs.append(equi_loss(A, B).item())
+        return float(np.mean(errs))
+
+    def shifted_pair_full(X, P, i, codes, s):
+        hc, wc = H - 16, W - 16
+        A = model(X[i, :hc, :wc].float(), P[i], i if codes else None)[:, :, s + M:hc - M, s + M:wc - M]
+        B = model(X[i, s:s + hc, s:s + wc].float(), P[i], i if codes else None)[:, :, M:hc - s - M, M:wc - s - M]
+        return A, B
+
     log = open(out / 'log.txt', 'a')
     t0 = time.time()
     for it in range(0, a.iters + 1):
         if it % 250 == 0:
             model.eval()
             line = (f'it {it}  posed held-out L1 {evaluate(Xp, Yp, Pp, pte, False):.4f}  '
-                    f'film held-out L1 {evaluate(Xo, Yo, Po, ote, True):.4f}  {time.time() - t0:.0f}s')
+                    f'film held-out L1 {evaluate(Xo, Yo, Po, ote, True):.4f}  '
+                    f'shift error posed {shift_error(Xp, Pp, pte[::2], False):.4f} '
+                    f'film {shift_error(Xo, Po, ote[::3], True):.4f}  {time.time() - t0:.0f}s')
             print(line, flush=True)
             log.write(line + '\n')
             log.flush()
             model.train()
             if it == a.iters:
                 break
-        cy = np.random.randint(0, (H - ch) // 16 + 1) * 16
-        cx = np.random.randint(0, (W - cw) // 16 + 1) * 16
+        # Any offset, not just the 16-pixel grid: the browser's crop box lands anywhere.
+        sh = a.shift if a.equi else 0
+        cy = np.random.randint(0, H - ch - sh + 1)
+        cx = np.random.randint(0, W - cw - sh + 1)
         ip = torch.from_numpy(np.random.choice(ptr, n_p)).to(dev)
         io = torch.from_numpy(np.random.choice(otr, a.batch - n_p)).to(dev)
         lp = loss_of(model(Xp[ip, cy:cy + ch, cx:cx + cw].float(), Pp[ip]), Yp[ip, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float())
         lo = loss_of(model(Xo[io, cy:cy + ch, cx:cx + cw].float(), Po[io], io), Yo[io, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float())
         loss = (lp * n_p + lo * (a.batch - n_p)) / a.batch
+        if a.equi:
+            dy, dx = np.random.randint(0, a.shift + 1, 2)
+            if dy == dx == 0:
+                dy = 1
+            e = equi_loss(*shifted_pair(Xp, Pp, ip[:1], False, cy, cx, dy, dx)) + equi_loss(*shifted_pair(Xo, Po, io[:1], True, cy, cx, dy, dx))
+            loss = loss + a.equi * e / 2
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
