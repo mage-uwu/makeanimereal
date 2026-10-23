@@ -352,21 +352,29 @@ static STAGE void walk(const Trees *z, const v128_t *t, const float *b2, float *
     for (int i = 0; i < 16; i++) y[i] = wasm_f32x4_add(t[i], wasm_v128_load(b2 + 4 * i));
     int a[MAXT] = {0};
     for (int j = 0; j < TV; j++) {
-        float sv[4] __attribute__((aligned(16))) = {0}, gv[4] __attribute__((aligned(16)));
-        int row[MAXT];
-        for (int tr = 0; tr < TREES; tr++) {
+        /* the trees' integer sums, one accumulator each, then transposed and added: lane k is tree k's */
+        v128_t acc[MAXT], sc, bs; int row[MAXT];
+        float scs[4] __attribute__((aligned(16))) = {0}, bss[4] __attribute__((aligned(16))) = {0};
+        for (int tr = 0; tr < MAXT; tr++) {
+            if (tr >= TREES) { acc[tr] = wasm_i32x4_splat(0); continue; }
             int r = row[tr] = tr * TN + a[tr];
             const v128_t *w = z->win[r];
-            v128_t acc = wasm_i32x4_dot_i16x8(h[0], w[0]);
-            for (int i = 1; i < 8; i++) acc = wasm_i32x4_add(acc, wasm_i32x4_dot_i16x8(h[i], w[i]));
-            int sum = wasm_i32x4_extract_lane(acc, 0) + wasm_i32x4_extract_lane(acc, 1) + wasm_i32x4_extract_lane(acc, 2) + wasm_i32x4_extract_lane(acc, 3);
-            sv[tr] = (float)sum * z->sin[r] * xs + z->bias[r];
+            v128_t c = wasm_i32x4_dot_i16x8(h[0], w[0]);
+            for (int i = 1; i < 8; i++) c = wasm_i32x4_add(c, wasm_i32x4_dot_i16x8(h[i], w[i]));
+            acc[tr] = c; scs[tr] = z->sin[r]; bss[tr] = z->bias[r];
         }
-        wasm_v128_store(gv, gelu4(wasm_v128_load(sv)));
+        v128_t s01 = wasm_i32x4_add(wasm_i32x4_shuffle(acc[0], acc[1], 0, 4, 1, 5), wasm_i32x4_shuffle(acc[0], acc[1], 2, 6, 3, 7));
+        v128_t s23 = wasm_i32x4_add(wasm_i32x4_shuffle(acc[2], acc[3], 0, 4, 1, 5), wasm_i32x4_shuffle(acc[2], acc[3], 2, 6, 3, 7));
+        v128_t sum = wasm_i32x4_add(wasm_i32x4_shuffle(s01, s23, 0, 1, 4, 5), wasm_i32x4_shuffle(s01, s23, 2, 3, 6, 7));
+        sc = wasm_v128_load(scs); bs = wasm_v128_load(bss);
+        v128_t sv = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_mul(wasm_f32x4_convert_i32x4(sum), sc), splat(xs)), bs);
+        float gv[4] __attribute__((aligned(16)));
+        wasm_v128_store(gv, gelu4(sv));
+        int right = wasm_i32x4_bitmask(wasm_f32x4_gt(sv, splat(0)));
         for (int tr = 0; tr < TREES; tr++) {
             const float *wo = z->wout[row[tr]]; v128_t g = splat(gv[tr]);
             for (int i = 0; i < 16; i++) y[i] = madd(wasm_v128_load(wo + 4 * i), g, y[i]);
-            a[tr] = 2 * a[tr] + 1 + (sv[tr] > 0);
+            a[tr] = 2 * a[tr] + 1 + ((right >> tr) & 1);
         }
     }
     for (int i = 0; i < 16; i++) wasm_v128_store(yo + 4 * i, y[i]);

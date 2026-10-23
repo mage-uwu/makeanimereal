@@ -8,7 +8,8 @@ import { Session } from 'node:inspector/promises';
 const [wasmPath, refPath, finePath, secs = '6'] = process.argv.slice(2);
 const k = (await WebAssembly.instantiate(readFileSync(wasmPath))).instance.exports;
 const put = b => { const p = k.nts_alloc(b.length); new Uint8Array(k.memory.buffer).set(b, p); return p; };
-const net = readFileSync(new URL('../../live/nts/net.bin', import.meta.url));
+// NTS_DIR: an export_nts.py output folder other than the viewer's
+const net = readFileSync(process.env.NTS_DIR ? `${process.env.NTS_DIR}/net.bin` : new URL('../../live/nts/net.bin', import.meta.url));
 if (!k.nts_load(put(net), net.length)) throw new Error('net.bin did not load');
 k.nts_set_fine(put(readFileSync(finePath)));
 
