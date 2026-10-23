@@ -47,14 +47,18 @@ function parseNet(buf) {
   const i8 = n => { const a = new Int8Array(buf.slice(o, o + n)); o += n; return a; };
   // NTSV: colour only. NTS2: an ink branch too; the colour head reads block NBC's output, the ink head
   // (black line art's opacity) the last block's.
+  // NTS3: each block's FFN is T binary trees of V levels (shader_nts.c --tree)
   const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
-  if (magic !== 'NTSV' && magic !== 'NTS2') throw new Error('net: not NTSV or NTS2');
-  const NB = i32(), P = i32(), NBC = magic === 'NTS2' ? i32() : NB, DIL = Array.from({ length: NB }, i32);
+  if (magic !== 'NTSV' && magic !== 'NTS2' && magic !== 'NTS3') throw new Error('net: not NTSV, NTS2 or NTS3');
+  const NB = i32(), P = i32(), NBC = magic === 'NTS2' ? i32() : NB;
+  const T = magic === 'NTS3' ? i32() : 0, V = T ? i32() : 0, TN = (1 << V) - 1, DIL = Array.from({ length: NB }, i32);
   const We = f32(DW * CIN), be = f32(DW), blocks = [];
-  for (let b = 0; b < NB; b++) blocks.push({ q: i8((KT + 4) * DW), gate: f32(DW), b1: f32(DW), b2: f32(DW), s1: f32(DW), s2: f32(DW), c1: i8(DW * DW), c2: i8(DW * DW) });
+  for (let b = 0; b < NB; b++) blocks.push(T
+    ? { q: i8((KT + 4) * DW), gate: f32(DW), b2: f32(DW), bias: f32(T * TN), sin: f32(T * TN), sout: f32(T * TN), cin: i8(T * TN * DW), cout: i8(T * TN * DW) }
+    : { q: i8((KT + 4) * DW), gate: f32(DW), b1: f32(DW), b2: f32(DW), s1: f32(DW), s2: f32(DW), c1: i8(DW * DW), c2: i8(DW * DW) });
   const Wh = f32(4 * DW), bh = f32(4), Wl = NBC < NB ? f32(DW) : null, bl = NBC < NB ? f32(1)[0] : 0, lo = f32(2 * FCH), st = f32(2 * FCH);
   const coarse = new Uint8Array(buf.slice(o, o + P * COARSE * COARSE * FCH));
-  return { NB, NBC, P, DIL, We, be, blocks, Wh, bh, Wl, bl, lo, st, coarse };
+  return { NB, NBC, P, DIL, T, V, TN, We, be, blocks, Wh, bh, Wl, bl, lo, st, coarse };
 }
 
 // The background's value after each block, in JS: infer.c's token() with every neighbour the same.
@@ -81,7 +85,19 @@ function backgroundStates(net, input) {
         t[i] = k.gate[i] * (m * 0.5) + x[i];
       }
     }
-    const q1 = quant(t), g = new Array(DW);
+    const q1 = quant(t);
+    if (net.T) {   // the trees (infer.c walk): t + b2 + each visited node's gelu(s) w_out
+      const { T, V, TN } = net, y = t.map((v, r) => v + k.b2[r]);
+      for (let tr = 0; tr < T; tr++) for (let j = 0, a = 0; j < V; j++) {
+        const row = tr * TN + a; let sum = 0;
+        for (let i = 0; i < DW; i++) sum += q1.c[i] * k.cin[row * DW + i];
+        const sv = f(f(f(sum * k.sin[row]) * q1.xs) + k.bias[row]), g = gelu(sv);
+        for (let r = 0; r < DW; r++) y[r] += g * k.cout[row * DW + r] * k.sout[row];
+        a = 2 * a + 1 + (sv > 0 ? 1 : 0);
+      }
+      x = y; states.push(x); continue;
+    }
+    const g = new Array(DW);
     for (let r = 0; r < DW; r++) { let a = 0; for (let i = 0; i < DW; i++) a += q1.c[i] * k.c1[r * DW + i]; g[r] = gelu(a * k.s1[r] * q1.xs + k.b1[r]); }
     const q2 = quant(g);
     x = Array.from({ length: DW }, (_, r) => { let a = 0; for (let i = 0; i < DW; i++) a += q2.c[i] * k.c2[r * DW + i]; return a * k.s2[r] * q2.xs + k.b2[r] + t[r]; });
@@ -190,6 +206,58 @@ void main() {
     vec4 o;
     for (int e = 0; e < 4; e++) o[e] = rowdot(c, 4 * L + e) * s2[L][e] * xs + b2[L][e];
     y[j] = o + stencil(p, L);
+  }
+  ${Array.from({ length: M }, (_, j) => `o${j} = y[${j}];`).join(' ')}
+}`;
+// Tree blocks (NTS3): the FFN is T binary trees of V levels. Pass TA: the stencil, quant8, then each
+// tree's walk: at each level the node's s = w_in . codes (w_in from the Wt buffer, its row scale and
+// bias in Blk's s1 and b1 slots), gelu(s) kept and the child sign(s) picks. Out: the visited nodes
+// (a tree's in one uint, 8 bits a level) and their GELUs (half floats, two to a uint). Pass TB:
+// x = stencil + b2 + each visited node's gelu x its w_out row (the next Wt buffer), M layers a pass.
+const PASS_TA = (T, V, TN) => HEAD + BLOCK_COMMON + `${outs(3, 'uvec4')}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (distAt(p) > needCur) discard;
+  vec4 v[16];
+  for (int L = 0; L < 16; L++) v[L] = stencil(p, L);
+  float xs = quant(v);
+  uvec4 nodes = uvec4(0u);
+  float g[16];
+  for (int k = 0; k < 16; k++) g[k] = 0.0;
+  for (int tr = 0; tr < ${T}; tr++) {
+    int a = 0;
+    for (int j = 0; j < ${V}; j++) {
+      int row = tr * ${TN} + a;
+      float sv = rowdot(v, row) * s1[row / 4][row % 4] * xs + b1[row / 4][row % 4];
+      g[tr * ${V} + j] = gelu(sv);
+      nodes[tr] |= uint(row) << (8u * uint(j));
+      a = 2 * a + 1 + (sv > 0.0 ? 1 : 0);
+    }
+  }
+  o0 = nodes;
+  o1 = uvec4(packHalf2x16(vec2(g[0], g[1])), packHalf2x16(vec2(g[2], g[3])), packHalf2x16(vec2(g[4], g[5])), packHalf2x16(vec2(g[6], g[7])));
+  o2 = uvec4(packHalf2x16(vec2(g[8], g[9])), packHalf2x16(vec2(g[10], g[11])), packHalf2x16(vec2(g[12], g[13])), packHalf2x16(vec2(g[14], g[15])));
+}`;
+const PASS_TB = (M, T, V) => HEAD + BLOCK_COMMON + `${outs(M)}
+uniform highp usampler2DArray C; uniform int hf;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (distAt(p) > needCur) discard;
+  uvec4 nodes = texelFetch(C, ivec3(p, 0), 0), h0 = texelFetch(C, ivec3(p, 1), 0), h1 = texelFetch(C, ivec3(p, 2), 0);
+  float g[16];
+  for (int i = 0; i < 4; i++) {
+    vec2 a = unpackHalf2x16(h0[i]), b = unpackHalf2x16(h1[i]);
+    g[2 * i] = a.x; g[2 * i + 1] = a.y; g[8 + 2 * i] = b.x; g[8 + 2 * i + 1] = b.y;
+  }
+  vec4 y[${M}];
+  for (int j = 0; j < ${M}; j++) {
+    int L = ${M} * hf + j;
+    vec4 acc = stencil(p, L) + b2[L];
+    for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
+      int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
+      acc += g[tr * ${V} + k] * W[row * 16 + L];
+    }
+    y[j] = acc;
   }
   ${Array.from({ length: M }, (_, j) => `o${j} = y[${j}];`).join(' ')}
 }`;
@@ -410,7 +478,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     for (const b of ['Blk', 'Wt', 'Emb']) { const i = gl.getUniformBlockIndex(p, b); if (i !== gl.INVALID_INDEX) { const point = { Blk: 0, Wt: 1, Emb: 2 }[b]; gl.uniformBlockBinding(p, i, point); blocks[b] = point; } }
     return { p, u, blocks };
   }
-  const prog = { A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), ink: program(INK_PASS), show: program(SHOW) };
+  const prog = { TA: net.T ? program(PASS_TA(net.T, net.V, net.TN)) : null, TB: net.T ? program(PASS_TB(M, net.T, net.V)) : null,
+    A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), ink: program(INK_PASS), show: program(SHOW) };
 
   // ---- textures ----
   function tex2d(w, h, internal, format, type, data = null, filter = gl.NEAREST) {
@@ -468,6 +537,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   net.blocks.forEach((k, b) => {
     const o = b * BLK / 4;
     for (let i = 0; i < 13 * DW; i++) blkData[o + i] = k.q[i];   // Q[t * 16 + L] = codes of tap t, channels 4L..4L+3
+    if (net.T) {   // trees: node biases and w_in row scales in the b1 and s1 slots; w_in codes, then w_out (x its scale)
+      [k.gate, k.bias, k.b2, k.sin].forEach((a, j) => blkData.set(a, o + 13 * DW + j * DW));
+      const n = net.T * net.TN, wi = 2 * b * WT / 4, wo = (2 * b + 1) * WT / 4;
+      for (let i = 0; i < n * DW; i++) { wtData[wi + i] = k.cin[i]; wtData[wo + i] = k.cout[i] * k.sout[i / DW | 0]; }
+      return;
+    }
     [k.gate, k.b1, k.b2, k.s1, k.s2].forEach((a, j) => blkData.set(a, o + 13 * DW + j * DW));
     for (const [m, c] of [[0, k.c1], [1, k.c2]]) { const w = (2 * b + m) * WT / 4; for (let i = 0; i < DW * DW; i++) wtData[w + i] = c[i]; }
   });
@@ -584,12 +659,20 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
           gl.uniform1i(u.dil, DIL[b]); gl.uniform1i(u.needPrev, b ? need[b - 1] : 0); gl.uniform1i(u.needCur, need[b]);
         };
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
-        if (M >= 5) pass(prog.A, Cq, 0, 5, common);
-        else { pass(prog.A, Cq, 0, 4, common); pass(prog.A2, Cq, 4, 1, common); }   // 4 draw buffers: the scale on its own
-        mark(`block ${b} A: stencil, FFN1, GELU`);
-        gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
-        for (let h = 0; h < 16 / M; h++) pass(prog.B, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
-        mark(`block ${b} B: FFN2, residual`);
+        if (net.T) {   // trees: the walk, then the visited nodes' outputs
+          pass(prog.TA, Cq, 0, 3, common);
+          mark(`block ${b} A: stencil, tree walk`);
+          gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
+          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+          mark(`block ${b} B: tree outputs, residual`);
+        } else {
+          if (M >= 5) pass(prog.A, Cq, 0, 5, common);
+          else { pass(prog.A, Cq, 0, 4, common); pass(prog.A2, Cq, 4, 1, common); }   // 4 draw buffers: the scale on its own
+          mark(`block ${b} A: stencil, FFN1, GELU`);
+          gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
+          for (let h = 0; h < 16 / M; h++) pass(prog.B, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+          mark(`block ${b} B: FFN2, residual`);
+        }
         [x, y] = [y, x];
         if (b === NBC - 1) {   // the colour, before the ink branch's blocks (if any) go on
           clear(outT);

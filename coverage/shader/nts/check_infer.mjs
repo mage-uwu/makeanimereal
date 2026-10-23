@@ -2,9 +2,11 @@
 // browser kernel, split into bands as the viewer splits them, then the largest and mean difference.
 //   node check_infer.mjs ref.bin fine.raw [bands]
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const [refPath, finePath, bandsArg = '3'] = process.argv.slice(2);
-const dir = new URL('../../live/nts/', import.meta.url);
+// NTS_DIR: an export_nts.py output folder other than the viewer's
+const dir = process.env.NTS_DIR ? pathToFileURL(process.env.NTS_DIR.replace(/\/?$/, '/')) : new URL('../../live/nts/', import.meta.url);
 const { instance } = await WebAssembly.instantiate(readFileSync(process.env.WASM || new URL('infer.wasm', dir)));
 const k = instance.exports, mem = () => new Uint8Array(k.memory.buffer);
 const put = bytes => { const p = k.nts_alloc(bytes.length); mem().set(bytes, p); return p; };

@@ -52,6 +52,18 @@ static int NB, NBC, P, DIL[MAXB];   /* NBC: the block the colour head reads (NB 
 static float We[DW * CIN], WeT[CIN * DW], be[DW], Wh[4 * DW], bh[4], Wl[DW], bl, lo[2][FCH], st[2][FCH];
 static Block *blk;
 static const uint8_t *coarse, *fine;
+/* NTS3 (shader_nts.c --tree): each block's FFN is T <= 4 binary trees of V <= 5 levels, the engine's
+ * fast feedforward path sum: a token visits one node a level, s = w_in . quant8(t) + b, adds gelu(s)
+ * w_out and goes to the child sign(s) picks. The trees walk side by side, one lane each. */
+#define MAXT 4
+#define MAXTN 31
+static int TREES, TV, TN;
+typedef struct {
+    float bias[MAXT * MAXTN], sin[MAXT * MAXTN];
+    v128_t win[MAXT * MAXTN][8];                         /* w_in codes, i16 */
+    float wout[MAXT * MAXTN][DW] __attribute__((aligned(16)));   /* w_out codes x their row scale */
+} Trees;
+static Trees *trees;
 
 #ifndef NO_LUT
 #define LUT          /* -DNO_LUT: the dot-product kernel instead (same sums) */
@@ -94,10 +106,13 @@ static void pack_rows(const int8_t *c, v128_t *w) {
 /* net: export_nts.py's net.bin, which must stay alive (the coarse texture is read in place). */
 EXPORT int nts_load(const uint8_t *net, int len) {
     const uint8_t *p = net;
-    /* NTSV: colour only; NTS2: also NBC, and the ink head after the colour head */
-    if (len < 12 || p[0] != 'N' || p[1] != 'T' || p[2] != 'S' || (p[3] != 'V' && p[3] != '2')) return 0;
-    int lines = p[3] == '2', hd[3]; copy(hd, p + 4, lines ? 12 : 8); NB = hd[0]; P = hd[1]; NBC = lines ? hd[2] : NB; p += lines ? 16 : 12;
-    if (NB < 1 || NB > MAXB || NBC < 1 || NBC > NB) return 0;
+    /* NTSV: colour only; NTS2: also NBC, and the ink head after the colour head; NTS3: trees, levels */
+    if (len < 12 || p[0] != 'N' || p[1] != 'T' || p[2] != 'S' || (p[3] != 'V' && p[3] != '2' && p[3] != '3')) return 0;
+    int lines = p[3] == '2', tree = p[3] == '3', hd[4]; copy(hd, p + 4, lines ? 12 : tree ? 16 : 8);
+    NB = hd[0]; P = hd[1]; NBC = lines ? hd[2] : NB; p += lines ? 16 : tree ? 20 : 12;
+    TREES = tree ? hd[2] : 0; TV = tree ? hd[3] : 0; TN = (1 << TV) - 1;
+    if (NB < 1 || NB > MAXB || NBC < 1 || NBC > NB || (tree && (TREES < 1 || TREES > MAXT || TV < 1 || TN > MAXTN))) return 0;
+    if (tree) trees = nts_alloc(NB * (int)sizeof(Trees));
     copy(DIL, p, 4 * NB); p += 4 * NB;
     copy(We, p, sizeof We); p += sizeof We;
     copy(be, p, sizeof be); p += sizeof be;
@@ -108,6 +123,21 @@ EXPORT int nts_load(const uint8_t *net, int len) {
         for (int r = 0; r < KT + TCG; r++) for (int i = 0; i < DW; i++) k->q[r][i] = (float)(int8_t)p[r * DW + i];
         p += (KT + TCG) * DW;
         copy(k->gate, p, 4 * DW); p += 4 * DW;
+        if (tree) {
+            Trees *z = trees + b; int n = TREES * TN; float so[MAXT * MAXTN];
+            copy(k->b2, p, 4 * DW); p += 4 * DW;
+            copy(z->bias, p, 4 * n); p += 4 * n;
+            copy(z->sin, p, 4 * n); p += 4 * n;
+            copy(so, p, 4 * n); p += 4 * n;
+            for (int r = 0; r < n; r++) {
+                int16_t v[DW]; for (int i = 0; i < DW; i++) v[i] = (int8_t)p[r * DW + i];
+                for (int i = 0; i < 8; i++) z->win[r][i] = wasm_v128_load(v + 8 * i);
+            }
+            p += n * DW;
+            for (int r = 0; r < n; r++) for (int i = 0; i < DW; i++) z->wout[r][i] = (float)(int8_t)p[r * DW + i] * so[r];
+            p += n * DW;
+            continue;
+        }
         copy(k->b1, p, 4 * DW); p += 4 * DW;
         copy(k->b2, p, 4 * DW); p += 4 * DW;
         copy(k->s1, p, 4 * DW); p += 4 * DW;
@@ -214,7 +244,8 @@ static float exp1(float x) {   /* scalar exp for the head's sigmoid */
 }
 
 /* quant8 (round to nearest even, clamp to int8) into 64 codes; returns the code's scale. */
-static STAGE float quant(const v128_t *x, code_t *code, int *sum) {
+/* quant8's codes as 8 vectors of int16; returns their scale */
+static STAGE float quant16(const v128_t *x, v128_t *h) {
     v128_t m = wasm_f32x4_abs(x[0]);
     for (int i = 1; i < 16; i++) m = wasm_f32x4_max(m, wasm_f32x4_abs(x[i]));
     m = wasm_f32x4_max(m, wasm_i32x4_shuffle(m, m, 2, 3, 0, 1));
@@ -223,9 +254,13 @@ static STAGE float quant(const v128_t *x, code_t *code, int *sum) {
     if (mx < 1e-5f) mx = 1e-5f;
     float scale = 127 / mx; v128_t S = splat(scale);
     /* |x| <= mx, so |x * scale| <= 127 (to a rounding): no clamp needed */
-    v128_t h[8];
     for (int i = 0; i < 16; i += 2)
         h[i / 2] = wasm_i16x8_narrow_i32x4(as_int(rounded(wasm_f32x4_mul(x[i], S))), as_int(rounded(wasm_f32x4_mul(x[i + 1], S))));
+    return 1 / scale;
+}
+static inline float quant(const v128_t *x, code_t *code, int *sum) {
+    v128_t h[8];
+    float xs = quant16(x, h);
 #if defined(__wasm_relaxed_simd__) && !defined(LUT)
     for (int i = 0; i < 4; i++) wasm_v128_store(code + 16 * i, wasm_i8x16_narrow_i16x8(h[2 * i], h[2 * i + 1]));
     v128_t a = wasm_i32x4_extadd_pairwise_i16x8(h[0]);
@@ -235,7 +270,7 @@ static STAGE float quant(const v128_t *x, code_t *code, int *sum) {
     *sum = 0;
     for (int i = 0; i < 8; i++) wasm_v128_store(code + 8 * i, h[i]);
 #endif
-    return 1 / scale;
+    return xs;
 }
 /* out[r] = sum_i code[i] * w[r][i] * s[r] * xs (+ add[r]): rows64_dot8's integer sum, then its scaling. */
 /* Two passes of 8 accumulators: 16 would not stay in the 16 vector registers V8 has on x86-64.
@@ -309,9 +344,37 @@ static STAGE void stencil(const Block *k, const float *const *src, const float *
     }
 }
 static STAGE void gelu16(const v128_t *h, v128_t *g) { for (int i = 0; i < 16; i++) g[i] = gelu4(h[i]); }
+/* The trees on quant8(t): out = t + b2 + their path sum. Level by level, the trees side by side: one
+ * lane each for s and its GELU. */
+static STAGE void walk(const Trees *z, const v128_t *t, const float *b2, float *yo) {
+    v128_t h[8], y[16];
+    float xs = quant16(t, h);
+    for (int i = 0; i < 16; i++) y[i] = wasm_f32x4_add(t[i], wasm_v128_load(b2 + 4 * i));
+    int a[MAXT] = {0};
+    for (int j = 0; j < TV; j++) {
+        float sv[4] __attribute__((aligned(16))) = {0}, gv[4] __attribute__((aligned(16)));
+        int row[MAXT];
+        for (int tr = 0; tr < TREES; tr++) {
+            int r = row[tr] = tr * TN + a[tr];
+            const v128_t *w = z->win[r];
+            v128_t acc = wasm_i32x4_dot_i16x8(h[0], w[0]);
+            for (int i = 1; i < 8; i++) acc = wasm_i32x4_add(acc, wasm_i32x4_dot_i16x8(h[i], w[i]));
+            int sum = wasm_i32x4_extract_lane(acc, 0) + wasm_i32x4_extract_lane(acc, 1) + wasm_i32x4_extract_lane(acc, 2) + wasm_i32x4_extract_lane(acc, 3);
+            sv[tr] = (float)sum * z->sin[r] * xs + z->bias[r];
+        }
+        wasm_v128_store(gv, gelu4(wasm_v128_load(sv)));
+        for (int tr = 0; tr < TREES; tr++) {
+            const float *wo = z->wout[row[tr]]; v128_t g = splat(gv[tr]);
+            for (int i = 0; i < 16; i++) y[i] = madd(wasm_v128_load(wo + 4 * i), g, y[i]);
+            a[tr] = 2 * a[tr] + 1 + (sv[tr] > 0);
+        }
+    }
+    for (int i = 0; i < 16; i++) wasm_v128_store(yo + 4 * i, y[i]);
+}
 static void token(const Block *k, const float *const *src, const float *xc, float *yo) {
     v128_t t[16], hb[16], g[16];
     stencil(k, src, xc, t);
+    if (TREES) { walk(trees + (k - blk), t, k->b2, yo); return; }
     code_t code[DW + 8] __attribute__((aligned(16))) = {0};   /* past DW: the lookup kernel's zero padding */
     int sum;
     float xs = quant(t, code, &sum);
