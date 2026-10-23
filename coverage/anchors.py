@@ -36,8 +36,14 @@ def data_url(img):
     return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
 
 
-def draw(render, ref, model):
-    body = {'model': model, 'prompt': PROMPT, 'input_references': [
+def draw(render, ref, model, lighting=None):
+    prompt = PROMPT
+    if lighting:
+        # The style reference is evenly lit; spell the lighting out, as flat cel shading.
+        prompt += (f' Lighting: {lighting}. Draw that lighting in the reference\'s flat cel style: hard-edged '
+                   'shadow shapes in one flat shadow tone, the light\'s colour over the lit side, no soft '
+                   'gradients, no glow; keep her outfit\'s colours recognisable under it.')
+    body = {'model': model, 'prompt': prompt, 'input_references': [
         {'type': 'image_url', 'image_url': {'url': data_url(render)}},
         {'type': 'image_url', 'image_url': {'url': data_url(ref)}},
     ]}
@@ -63,6 +69,9 @@ def main():
     n = len(list((renders / 'frames').glob('*.png')))
     want = [int(f) for f in a.frames.split(',')] if a.frames else sorted(set(range(0, n, a.every)) | {n - 1})
     ref = Image.open(a.ref).convert('RGB')
+    # Per-frame lighting notes (render-orbit.mjs --poses with light.desc), if any.
+    cams = json.loads((renders / 'cameras.json').read_text()).get('cameras', []) if (renders / 'cameras.json').exists() else []
+    notes = {c['frame']: (c.get('light') or {}).get('desc') for c in cams}
 
     def one(i):
         path = out / f'{i:04d}.png'
@@ -70,7 +79,7 @@ def main():
             return f'{path.name} kept'
         for attempt in range(3):
             try:
-                draw(Image.open(renders / 'frames' / f'{i:04d}.png').convert('RGB'), ref, a.model).save(path)
+                draw(Image.open(renders / 'frames' / f'{i:04d}.png').convert('RGB'), ref, a.model, notes.get(i)).save(path)
                 return f'{path.name} drawn'
             except Exception as e:  # noqa: BLE001 - retry anything, report the last
                 err = e

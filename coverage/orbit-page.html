@@ -20,7 +20,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createMotion } from '/coverage/live/motion.js';
 
-let renderer, scene, camera, vrm, target, radius, motion, standPose;
+let renderer, scene, camera, vrm, target, radius, motion, standPose, ambient, sun;
 // Linear depth across the character, inverted so nearer is brighter (the video model's convention).
 const depthMat = new THREE.ShaderMaterial({
   vertexShader: `#include <common>
@@ -116,8 +116,9 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts, 
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(background);
-  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  ambient = new THREE.AmbientLight(0xffffff, 1.2);
+  scene.add(ambient);
+  sun = new THREE.DirectionalLight(0xffffff, 2.2);
   sun.position.set(1, 3, 2);
   scene.add(sun);
 
@@ -154,6 +155,13 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts, 
   // gets shorter on screen, and her width is well inside the portrait frame.
   radius = size.y * 0.58 / Math.tan(THREE.MathUtils.degToRad(fov) / 2);
   return { size: size.toArray(), target: target.toArray(), radius };
+};
+
+// Light her (the colour pass): sun direction (towards the light, world), colour and strength, and
+// the ambient's; called with nothing, the coverage films' own light.
+window.light = ({ dir = [1, 3, 2], color = [1, 1, 1], intensity = 2.2, amb = 1.2, ambColor = [1, 1, 1] } = {}) => {
+  sun.position.set(...dir); sun.color.setRGB(...color); sun.intensity = intensity;
+  ambient.intensity = amb; ambient.color.setRGB(...ambColor);
 };
 
 // Pose her at time t of a mocap clip (coverage/live/motions.json), or back in the stand ('stand').

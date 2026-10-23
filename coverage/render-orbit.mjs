@@ -6,8 +6,9 @@
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
 //        [--yaw0 0] [--skip-first] [--shorts] [--gbuffer]   (continue another spiral: start at its end yaw, without repeating that frame)
-//        [--poses poses.json]   (instead of the spiral: [{clip, t, yaw, pitch}, ...] per frame, posed with the
-//                                mocap clips in coverage/live/motions.json; clip 'stand' is the plain stand)
+//        [--poses poses.json]   (instead of the spiral: [{clip, t, yaw, pitch[, light]}, ...] per frame, posed with
+//                                the mocap clips in coverage/live/motions.json; clip 'stand' is the plain stand;
+//                                light is {dir, color, intensity, amb, ambColor} for orbit-page's window.light)
 //
 // The spiral climbs linearly in pitch while turning at a constant yaw rate, so consecutive turns
 // sit (pitch range / turns) apart and every frame moves the same small angle from the last.
@@ -79,7 +80,7 @@ try {
   let parts = null;
   for (const i of which) {
     const c = cam(i);
-    if (poses) await page.evaluate(([clip, t]) => window.pose(clip, t), [poses[i].clip, poses[i].t]);
+    if (poses) await page.evaluate(([clip, t, light]) => { window.pose(clip, t); window.light(light || undefined); }, [poses[i].clip, poses[i].t, poses[i].light || null]);
     const s = await page.evaluate(([y, p]) => window.shot(y, p), [c.yaw, c.pitch]);
     const name = `${String(i).padStart(4, '0')}.png`;
     await fs.writeFile(path.join(outDir, 'frames', name), Buffer.from(s.png.split(',')[1], 'base64'));
@@ -89,7 +90,7 @@ try {
       for (const k of ['normal', 'uva', 'uvb']) await fs.writeFile(path.join(outDir, k, name), Buffer.from(g[k].split(',')[1], 'base64'));
       parts = g.parts;
     }
-    cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, ...(poses ? { clip: poses[i].clip, t: poses[i].t } : {}), position: s.position, quaternion: s.quaternion });
+    cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c, ...(poses ? { clip: poses[i].clip, t: poses[i].t, light: poses[i].light } : {}), position: s.position, quaternion: s.quaternion });
     if (i % 50 === 0) console.log(`frame ${i}/${n}  yaw ${c.yaw}  pitch ${c.pitch}`);
   }
   await fs.writeFile(path.join(outDir, 'cameras.json'), JSON.stringify({

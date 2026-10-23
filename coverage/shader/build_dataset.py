@@ -70,7 +70,8 @@ def main():
                 arr[..., 1] = remap[arr[..., 1]]
                 img = Image.fromarray(arr)
             img.save(dst)
-        done.append({'frame': i, 'pitch': cams['cameras'][i]['pitch'], 'yaw': cams['cameras'][i]['yaw']})
+        done.append({'frame': i, 'pitch': cams['cameras'][i]['pitch'], 'yaw': cams['cameras'][i]['yaw'],
+                     **({'light': cams['cameras'][i]['light']} if cams['cameras'][i].get('light') else {})})
     (out / 'meta.json').write_text(json.dumps({'size': [w, h], 'parts': parts, 'frames': done}))
     print(f'{len(done)} frames -> {out}')
 
