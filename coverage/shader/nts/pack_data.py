@@ -6,10 +6,12 @@
 Per frame, per pixel, 17 bytes straight from the PNGs: colour rgb, normal rgb, depth, uva rgb
 (u high, u low, v high), uvb rgb (v low, part, coverage), target rgba. shader_nts.c decodes them
 exactly as train.py's load() does. Header: 'NTSD', frames, height, width, parts (int32), then each
-frame's camera pitch (float32), then the frames.
+frame's camera pitch (float32), then the frames. --out /dev/stdout streams the pack straight into
+shader_nts --data /dev/stdin (progress goes to stderr), for sets larger than the disk.
 """
 import argparse
 import json
+import sys
 import struct
 from pathlib import Path
 
@@ -44,5 +46,5 @@ with open(a.out, 'wb') as out:
         assert px.shape == (H, W, 17), px.shape
         out.write(np.ascontiguousarray(px, np.uint8).tobytes())
         if k % 200 == 0:
-            print(k, '/', len(frames), flush=True)
-print(f'{len(frames)} frames {W}x{H}, {parts} parts -> {a.out}')
+            print(k, '/', len(frames), file=sys.stderr, flush=True)
+print(f'{len(frames)} frames {W}x{H}, {parts} parts -> {a.out}', file=sys.stderr)
