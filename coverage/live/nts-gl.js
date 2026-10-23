@@ -500,6 +500,33 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), toon
   // (toon.js's render: contour mask and depth, or null), guide (guide.js's texture: the edge-aware
   // upscale; null: bilinear), showOnly (the last drawing again, e.g. zoomed) }.
+  // Profiling (cpu.html #prof): each stage ends by reading back one pixel of a private 1 x 1 target,
+  // which can't return before every command before it has run (gl.finish() can, in some browsers),
+  // timed on the CPU clock. That works on any device (iPhones have no GPU timer queries); the stalls
+  // make frames slower, but the shares hold.
+  const syncT = tex2d(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE), syncPx = new Uint8Array(4);
+  const sync = () => {
+    const prev = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(syncT)); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, syncPx);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prev);
+  };
+  const prof = {
+    on: false, t: 0, frames: 0, acc: new Map(),
+    start() { if (!this.on) return; sync(); this.t = performance.now(); },
+    mark(name) {
+      if (!this.on) return;
+      sync(); const t = performance.now();
+      this.acc.set(name, (this.acc.get(name) || 0) + t - this.t); this.t = t;
+    },
+    end() { if (this.on) this.frames++; },
+    // [[stage, ms a frame]], largest first; then cleared
+    report() {
+      const r = [...this.acc].map(([k, v]) => [k, v / Math.max(1, this.frames)]).sort((a, b) => b[1] - a[1]);
+      this.acc.clear(); this.frames = 0; return r;
+    },
+  };
+  const mark = n => prof.mark(n);
+
   function frame({ pitch, view }) {
     renderer.resetState();
     gl.bindVertexArray(vao);
@@ -520,6 +547,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
       pass(prog.diff, diffT, 0, 1, bindTiles);
       pass(prog.distH, hT, 0, 1, u => bindTex(0, gl.TEXTURE_2D, diffT, null, u.M));
       pass(prog.distV, distT, 0, 1, u => bindTex(0, gl.TEXTURE_2D, hT, null, u.M));
+      mark('background test + distance');
       gl.bindBufferBase(gl.UNIFORM_BUFFER, 2, embBuf);
       for (let h = 0; h < 16 / M; h++) pass(prog.embed, X, M * h, M, u => {
         bindTiles(u); bindTex(5, gl.TEXTURE_2D, distT, null, u.distT);
@@ -527,6 +555,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
         coarse.forEach((t, k) => bindTex(9 + k, gl.TEXTURE_2D, t, null, u[`C${k}`]));
         gl.uniform1i(u.parts, P); gl.uniform1i(u.cols, meta.cols); gl.uniform1i(u.hf, h); gl.uniform2f(u.pitch, Math.fround(sinp), Math.fround(cosp));
       });
+      mark('embed (inputs + neural texture)');
       let x = X, y = Y;
       for (let b = 0; b < NB; b++) {
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, blkBuf, b * BLK, BLK);
@@ -537,8 +566,10 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
         if (M >= 5) pass(prog.A, Cq, 0, 5, common);
         else { pass(prog.A, Cq, 0, 4, common); pass(prog.A2, Cq, 4, 1, common); }   // 4 draw buffers: the scale on its own
+        mark(`block ${b} A: stencil, FFN1, GELU`);
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
         for (let h = 0; h < 16 / M; h++) pass(prog.B, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+        mark(`block ${b} B: FFN2, residual`);
         [x, y] = [y, x];
         if (b === NBC - 1) {   // the colour, before the ink branch's blocks (if any) go on
           clear(outT);
@@ -546,6 +577,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
             bindTex(0, gl.TEXTURE_2D_ARRAY, x.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
             gl.uniform4fv(u.Wh, WhT); gl.uniform4fv(u.bh, net.bh); gl.uniform4fv(u.pbg, pbg);
           });
+          mark('head');
         }
       }
       clear(inkT);
@@ -571,6 +603,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     }
     if (view.toon) { bindTex(3, gl.TEXTURE_2D, view.toon.ink, null, s.u.TT); bindTex(4, gl.TEXTURE_2D, view.toon.depth, null, s.u.TD); gl.uniform3f(s.u.toonP, view.toon.near, view.toon.far, view.toon.width); }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    mark(view.guide ? 'display (edge-aware upscale)' : 'display');
     gl.bindVertexArray(null);
     renderer.resetState();
   }
@@ -588,5 +621,5 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     renderer.resetState();
     return { px, tiles: t };
   }
-  return { renderTiles, frame, read, parts: meta.parts, blocks: NB, ink: !!net.Wl };
+  return { renderTiles, frame, read, prof, parts: meta.parts, blocks: NB, ink: !!net.Wl };
 }

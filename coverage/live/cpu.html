@@ -33,6 +33,8 @@ h1 { margin: 0; font-family: var(--display); font-size: clamp(1.15rem, 4.5vw, 1.
 #stage { position: relative; min-height: 0; touch-action: none; overflow: hidden; cursor: grab; }
 #stage:active { cursor: grabbing; }
 #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#prof { position: absolute; left: 8px; top: 8px; margin: 0; padding: 6px 8px; font: .68rem/1.4 var(--mono); color: var(--ink);
+  background: var(--chip); border: 1px solid var(--line); border-radius: 8px; pointer-events: none; white-space: pre; font-variant-numeric: tabular-nums; }
 #status { position: absolute; inset: auto 16px 12px; text-align: center; color: var(--muted); font-size: .8rem; font-family: var(--mono); }
 footer { padding: 8px 0 max(10px, env(safe-area-inset-bottom, 0px)); display: grid; gap: 6px; }
 .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
@@ -61,6 +63,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
   </header>
   <div id="stage" aria-label="Live character view; drag to orbit">
     <canvas id="view"></canvas>
+    <pre id="prof" hidden></pre>
     <div id="status">loading model and shader…</div>
   </div>
   <footer>
@@ -113,6 +116,7 @@ import { createGuide } from './guide.js';
 // #tight: the training frame itself (the checks compare against it).
 const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('cpu') ? 'cpu' : 'gpu';
+const PROF = location.hash.includes('prof');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32;
 const status = document.getElementById('status'), readout = document.getElementById('readout');
@@ -429,9 +433,14 @@ function frameOnce(t) {
   const crop = raw ? [0, 0, NW, NH] : cropBox();
   if (gls) {   // GPU: no readback; a fence per frame keeps the GPU from queueing frames behind it
     depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+    gls.prof.start();
     gls.renderTiles(scene, camera, GL_PASSES(), crop);
     for (const m of shorts) m.visible = true;
-    gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView() });
+    gls.prof.mark('G-buffer tiles (three.js)');
+    const v = glView();
+    gls.prof.mark('guide (screen-res geometry)');
+    gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: v });
+    gls.prof.end();
     fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
     return Promise.resolve();
   }
@@ -530,6 +539,7 @@ function loop(now) {
   if (shader ? shader.busy : gpuBusy()) return;   // one frame in flight: the next starts from the time it's actually drawn
   if (!pts.size && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) { cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true; }
   cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
+  if (PROF) dirty = true;
   if (!animated() && !dirty && !faceMoving && performance.now() < face.blinkAt - 20) return;   // still: wake for the next blink
   dtLast = (now - lastT) / 1000; lastT = now; dirty = false;
   const t0 = performance.now();
@@ -538,7 +548,19 @@ function loop(now) {
     fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
     readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${fps.toFixed(1)} fps`
       : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
+    if (PROF && gls && t1 - profShown > 2000) showProf(t1);
   }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
+}
+// #prof: the stages' average times over the last two seconds; blocks also summed by pass
+let profShown = 0;
+function showProf(now) {
+  const frames = gls.prof.frames, r = gls.prof.report(); profShown = now;
+  const total = r.reduce((a, [, ms]) => a + ms, 0), sum = re => r.filter(([k]) => re.test(k)).reduce((a, [, ms]) => a + ms, 0);
+  const rows = [['all blocks, pass A', sum(/ A:/)], ['all blocks, pass B', sum(/ B:/)], ...r.filter(([k]) => !/^block/.test(k))].sort((a, b) => b[1] - a[1]);
+  const line = ([k, ms]) => `${ms.toFixed(2).padStart(6)} ms ${(100 * ms / total).toFixed(0).padStart(3)}%  ${k}`;
+  const text = [`${NW}×${NH} frame, ${frames} frames, ${total.toFixed(1)} ms (stalled per stage)`, ...rows.map(line), '', ...r.filter(([k]) => /^block/.test(k)).map(line)].join('\n');
+  const el = document.getElementById('prof'); el.hidden = false; el.textContent = text;
+  window.profReport = text; console.log(text);
 }
 
 // Engine buttons: switching reloads with the other engine.
@@ -577,6 +599,7 @@ try {
   }
   assignParts(parts);
   // Line art (toon contours, the ink branch) is off for now: the chip stays hidden and toon.js unused.
+  if (gls) gls.prof.on = PROF;
   if (gls) {   // GPU engine: the edge-aware upscale
     guide = createGuide({ THREE, renderer, vertexShader: gbufVert, depthUniforms: depthMat.uniforms });
     const b = document.getElementById('m-sharp'); b.hidden = false; b.setAttribute('aria-pressed', String(sharp));

@@ -166,11 +166,24 @@ EXPORT void nts_prepare(const uint8_t *tiles, int w, int h, float sinp, float co
 }
 
 /* ---- maths (shader_nts.c's float GELU: Abramowitz-Stegun erf, one exp) ---- */
+/* -DPROF: the kernel's stages as separate functions, for a sampling profiler's per-function times
+ * (profile_infer.mjs); otherwise inlined. */
+#ifdef PROF
+#define STAGE __attribute__((noinline))
+#else
+#define STAGE inline
+#endif
 static inline v128_t splat(float x) { return wasm_f32x4_splat(x); }
 static inline v128_t madd(v128_t a, v128_t b, v128_t c) { return wasm_f32x4_add(wasm_f32x4_mul(a, b), c); }
+/* Round to nearest even without f32x4.nearest or trunc_sat (on x86 V8 turns the latter into a NaN and
+ * overflow fix-up): + 1.5 * 2^23 makes the add itself round, and the integer is then the low bits.
+ * Exact for |x| < 2^22. ROUNDED: the rounded float; its integer: bits - 0x4B400000. */
+#define MAGIC 12582912.f
+static inline v128_t rounded(v128_t x) { return wasm_f32x4_add(x, splat(MAGIC)); }
+static inline v128_t as_int(v128_t r) { return wasm_i32x4_sub(r, wasm_i32x4_splat(0x4B400000)); }
 static inline v128_t exp4(v128_t x) {
     x = wasm_f32x4_max(x, splat(-87.f));
-    v128_t n = wasm_f32x4_nearest(wasm_f32x4_mul(x, splat(1.44269504f)));
+    v128_t nr = rounded(wasm_f32x4_mul(x, splat(1.44269504f))), n = wasm_f32x4_sub(nr, splat(MAGIC));
     v128_t r = wasm_f32x4_sub(x, wasm_f32x4_mul(n, splat(0.693359375f)));
     r = wasm_f32x4_sub(r, wasm_f32x4_mul(n, splat(-2.12194440e-4f)));
     v128_t p = splat(1.9875691500e-4f);
@@ -180,7 +193,7 @@ static inline v128_t exp4(v128_t x) {
     p = madd(p, r, splat(1.6666665459e-1f));
     p = madd(p, r, splat(5.0000001201e-1f));
     p = madd(p, wasm_f32x4_mul(r, r), wasm_f32x4_add(r, splat(1.f)));
-    v128_t e = wasm_i32x4_shl(wasm_i32x4_add(wasm_i32x4_trunc_sat_f32x4(n), wasm_i32x4_splat(127)), 23);
+    v128_t e = wasm_i32x4_shl(wasm_i32x4_add(as_int(nr), wasm_i32x4_splat(127)), 23);
     return wasm_f32x4_mul(p, e);
 }
 static inline v128_t gelu4(v128_t v) {
@@ -201,19 +214,18 @@ static float exp1(float x) {   /* scalar exp for the head's sigmoid */
 }
 
 /* quant8 (round to nearest even, clamp to int8) into 64 codes; returns the code's scale. */
-static inline float quant(const v128_t *x, code_t *code, int *sum) {
+static STAGE float quant(const v128_t *x, code_t *code, int *sum) {
     v128_t m = wasm_f32x4_abs(x[0]);
     for (int i = 1; i < 16; i++) m = wasm_f32x4_max(m, wasm_f32x4_abs(x[i]));
+    m = wasm_f32x4_max(m, wasm_i32x4_shuffle(m, m, 2, 3, 0, 1));
+    m = wasm_f32x4_max(m, wasm_i32x4_shuffle(m, m, 1, 0, 3, 2));
     float mx = wasm_f32x4_extract_lane(m, 0);
-    for (int l = 1; l < 4; l++) { float v = l == 1 ? wasm_f32x4_extract_lane(m, 1) : l == 2 ? wasm_f32x4_extract_lane(m, 2) : wasm_f32x4_extract_lane(m, 3); if (v > mx) mx = v; }
     if (mx < 1e-5f) mx = 1e-5f;
     float scale = 127 / mx; v128_t S = splat(scale);
+    /* |x| <= mx, so |x * scale| <= 127 (to a rounding): no clamp needed */
     v128_t h[8];
-    for (int i = 0; i < 16; i += 2) {
-        v128_t a = wasm_f32x4_min(wasm_f32x4_max(wasm_f32x4_nearest(wasm_f32x4_mul(x[i], S)), splat(-128.f)), splat(127.f));
-        v128_t b = wasm_f32x4_min(wasm_f32x4_max(wasm_f32x4_nearest(wasm_f32x4_mul(x[i + 1], S)), splat(-128.f)), splat(127.f));
-        h[i / 2] = wasm_i16x8_narrow_i32x4(wasm_i32x4_trunc_sat_f32x4(a), wasm_i32x4_trunc_sat_f32x4(b));
-    }
+    for (int i = 0; i < 16; i += 2)
+        h[i / 2] = wasm_i16x8_narrow_i32x4(as_int(rounded(wasm_f32x4_mul(x[i], S))), as_int(rounded(wasm_f32x4_mul(x[i + 1], S))));
 #if defined(__wasm_relaxed_simd__) && !defined(LUT)
     for (int i = 0; i < 4; i++) wasm_v128_store(code + 16 * i, wasm_i8x16_narrow_i16x8(h[2 * i], h[2 * i + 1]));
     v128_t a = wasm_i32x4_extadd_pairwise_i16x8(h[0]);
@@ -238,7 +250,7 @@ static inline float quant(const v128_t *x, code_t *code, int *sum) {
 #else
 #define SWZ wasm_i8x16_swizzle
 #endif
-static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
+static STAGE void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
     (void)sum;
     const v128_t M0 = wasm_i16x8_make(0, -1, 0, -1, 0, -1, 0, -1), M1 = wasm_i16x8_make(0, 0, -1, -1, 0, 0, -1, -1),
                  M2 = wasm_i16x8_make(0, 0, 0, 0, -1, -1, -1, -1);
@@ -260,7 +272,7 @@ static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, 
     }
 }
 #else
-static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
+static STAGE void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
     const int32_t *grp = (const int32_t *)code;
     v128_t X = splat(xs);
     for (int half = 0; half < 16; half += 8) {
@@ -282,9 +294,9 @@ static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, 
 #endif
 
 /* One token of a block: src, its 3 x 3 dilated neighbours' block inputs (0: outside, zero padding). */
-static void token(const Block *k, const float *const *src, const float *xc, float *yo) {
+/* The ternary stencil (depthwise 3 x 3, then the 4-channel group mix) and the residual: t. */
+static STAGE void stencil(const Block *k, const float *const *src, const float *xc, v128_t *t) {
     const v128_t invk = splat(1.f / 3.f), half = splat(.5f);   /* tc_code_new: 1/sqrt(K), K = 9 */
-    v128_t t[16], hb[16], g[16];
     for (int i = 0; i < 16; i++) {
         v128_t z = wasm_f32x4_splat(0);
         for (int q = 0; q < KT; q++) if (src[q]) z = madd(wasm_v128_load(&k->q[q][4 * i]), wasm_v128_load(src[q] + 4 * i), z);
@@ -295,16 +307,21 @@ static void token(const Block *k, const float *const *src, const float *xc, floa
         m = madd(wasm_v128_load(&k->q[KT + 3][4 * i]), wasm_i32x4_shuffle(dw, dw, 3, 3, 3, 3), m);
         t[i] = madd(wasm_v128_load(k->gate + 4 * i), wasm_f32x4_mul(m, half), wasm_v128_load(xc + 4 * i));
     }
+}
+static STAGE void gelu16(const v128_t *h, v128_t *g) { for (int i = 0; i < 16; i++) g[i] = gelu4(h[i]); }
+static void token(const Block *k, const float *const *src, const float *xc, float *yo) {
+    v128_t t[16], hb[16], g[16];
+    stencil(k, src, xc, t);
     code_t code[DW + 8] __attribute__((aligned(16))) = {0};   /* past DW: the lookup kernel's zero padding */
     int sum;
     float xs = quant(t, code, &sum);
     rows(k->w1, code, sum, xs, k->s1, k->b1, hb);
-    for (int i = 0; i < 16; i++) g[i] = gelu4(hb[i]);
+    gelu16(hb, g);
     xs = quant(g, code, &sum);
     rows(k->w2, code, sum, xs, k->s2, k->b2, hb);
     for (int i = 0; i < 16; i++) wasm_v128_store(yo + 4 * i, wasm_f32x4_add(hb[i], t[i]));
 }
-static void embed(const float *f, float *x) {
+static STAGE void embed(const float *f, float *x) {
     for (int j = 0; j < DW; j += 4) {
         v128_t s = wasm_f32x4_splat(0);
         for (int i = 0; i < CIN; i++) s = madd(wasm_v128_load(WeT + i * DW + j), splat(f[i]), s);
@@ -319,7 +336,7 @@ static float ink(const float *v) {   /* the ink head: opacity of black line art 
     float k = 1 / (1 + exp1(-z)), t = (k - .4f) / .3f; t = t < 0 ? 0 : t > 1 ? 1 : t;
     return t * t * (3 - 2 * t);
 }
-static void head(const float *v, float *p) {
+static STAGE void head(const float *v, float *p) {
     for (int k = 0; k < 4; k++) {
         v128_t s = wasm_f32x4_splat(0);
         for (int i = 0; i < DW; i += 4) s = madd(wasm_v128_load(Wh + k * DW + i), wasm_v128_load(v + i), s);
