@@ -8,9 +8,10 @@
 // G x 4 times; all passes go out in one command buffer and only cover the box around the character.
 // Tensors are float16 where the GPU has shader-f16, accumulating in float32.
 
-const PX = 4, G = 4, TILES = 5;
+const G = 4, TILES = 5;
 
-export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false, skipEmpty = true, profile = false, math = 'auto' }) {
+export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false, skipEmpty = true, profile = false, math = 'auto', px = 8, fuse = true }) {
+  const PX = px;  // output pixels per thread (8: more reuse of each loaded tap and weight; 4: fewer registers)
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) return null;
@@ -184,7 +185,7 @@ ${LIT ? `  // Light: cos(light, surface), key colour, ambient colour, on her (tr
   const convCode = math => `
 alias M = ${math === 'f16' ? 'f16' : 'f32'};
 ${math === 'emu' ? 'fn Q(x: vec4<f32>) -> vec4<f32> { return vec4<f32>(unpack2x16float(pack2x16float(x.xy)), unpack2x16float(pack2x16float(x.zw))); }' : ''}
-struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wbase: i32, row0: i32, groups: i32, act: i32, skip: i32 };
+struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wbase: i32, row0: i32, groups: i32, act: i32, skip: i32, fuse: i32, wbh: i32, rowh: i32, Lh: i32 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<uniform> crop: vec4<i32>;
 @group(0) @binding(2) var<storage, read> A: array<vec4<S>>;
@@ -192,6 +193,7 @@ struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wb
 @group(0) @binding(4) var<storage, read_write> O: array<vec4<S>>;
 @group(0) @binding(5) var<storage, read> Wt: array<vec4<S>>;
 @group(0) @binding(6) var<storage, read> aff: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> O2: array<vec4<S>>;
 ${CROP}
 fn loadA(l: i32, x: i32, y: i32) -> vec4<f32> {
   if (p.Wa == p.W) { return vec4<f32>(A[(l * p.Ha + y) * p.Wa + x]); }
@@ -213,12 +215,14 @@ fn loadIn(l: i32, x: i32, y: i32) -> vec4<f32> {
 fn gelu(x: vec4<f32>) -> vec4<f32> {
   return 0.5 * x * (1.0 + tanh(clamp(0.7978845608 * (x + 0.044715 * x * x * x), vec4<f32>(-10.0), vec4<f32>(10.0))));
 }
-// Shared-memory tiling: a workgroup of 8 x 8 threads makes a 32 x 8 output tile. For each input
-// layer it loads the tile's 34 x 10 input region once (upsampling there, when the input is smaller),
-// then every thread reads its taps from workgroup memory.
+// Shared-memory tiling: a workgroup of 8 x 8 threads makes a (8 PX) x 8 output tile, each thread PX
+// pixels of a row for up to G groups of 4 output channels. For each input layer (4 channels) it loads
+// the tile's input region once (upsampling there, when the input is smaller) and the layer's weights
+// for its groups once, then every thread reads taps and weights from workgroup memory.
 const TW = ${8 * PX + 2};
 const TH = 10;
 var<workgroup> tile: array<vec4<M>, ${(8 * PX + 2) * 10}>;
+var<workgroup> wsm: array<vec4<M>, ${G * 9 * 4}>;
 var<workgroup> anyMask: u32;
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
@@ -229,20 +233,24 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
   let inside = x0 < c.z && y < c.w;
   let g0 = i32(wid.z) * ${G};
   let ng = min(${G}, p.groups - g0);
+  let li = ly * 8 + lx;
   // Full-resolution layers (1-pixel reach): a tile with none of her coverage within 8 pixels draws
-  // nothing there, so it skips the convolution (the head writes transparent; its 3 x 3 input layer
-  // makes the same call, so what it leaves unwritten is never read). Coverage: B's 8th channel.
+  // nothing there, so it skips the convolution (the head writes transparent). Coverage: B's 8th channel.
   if (p.skip > 0) {
-    if (lid.x == 0u && lid.y == 0u) { anyMask = 0u; }
+    if (li == 0) { anyMask = 0u; }
     workgroupBarrier();
-    for (var i = i32(lid.y) * 8 + i32(lid.x); i < ${8 * PX + 16} * 24; i += 64) {
+    for (var i = li; i < ${8 * PX + 16} * 24; i += 64) {
       let gx = ox0 - 8 + i % ${8 * PX + 16}; let gy = oy0 - 8 + i / ${8 * PX + 16};
       if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H && f32(B[(p.H + gy) * p.W + gx].w) > 0.5) { anyMask = 1u; }
     }
     if (workgroupUniformLoad(&anyMask) == 0u) {
-      if (p.act == 2 && inside) {
-        for (var k = 0; k < ng; k++) {
-          for (var q = 0; q < ${PX}; q++) { if (x0 + q < c.z) { O[((g0 + k) * p.H + y) * p.W + x0 + q] = vec4<S>(0.0); } }
+      if (inside && (p.act == 2 || p.fuse > 0)) {
+        for (var k = 0; k < select(ng, 1, p.fuse > 0); k++) {
+          for (var q = 0; q < ${PX}; q++) {
+            if (x0 + q < c.z) {
+              if (p.fuse > 0) { O2[y * p.W + x0 + q] = vec4<S>(0.0); } else { O[((g0 + k) * p.H + y) * p.W + x0 + q] = vec4<S>(0.0); }
+            }
+          }
         }
       }
       return;
@@ -254,11 +262,16 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
     for (var q = 0; q < ${PX}; q++) { acc[q][k] = b; }
   }
   let r = p.K / 2;
-  let li = ly * 8 + lx;
+  let nw = ng * p.T * 4;
   for (var l = 0; l < p.L; l++) {
     for (var i = li; i < TW * TH; i += 64) {
       let gx = ox0 - 1 + i % TW; let gy = oy0 - 1 + i / TW;
       if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H) { tile[i] = vec4<M>(${math === 'emu' ? 'Q(loadIn(l, gx, gy))' : 'loadIn(l, gx, gy)'}); } else { tile[i] = vec4<M>(0.0); }
+    }
+    // This layer's weights for the workgroup's groups: [group k][tap t][output j].
+    for (var i = li; i < nw; i += 64) {
+      let k = i / (p.T * 4); let rem = i % (p.T * 4);
+      wsm[i] = vec4<M>(Wt[p.wbase + (((g0 + k) * p.L + l) * p.T) * 4 + rem]);
     }
     workgroupBarrier();
     if (inside) {
@@ -271,8 +284,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
         var v: array<vec4<M>, ${PX}>;
         for (var q = 0; q < ${PX}; q++) { v[q] = tile[rowBase + q]; }
         for (var k = 0; k < ng; k++) {
-          let wi = p.wbase + (((g0 + k) * p.L + l) * p.T + t) * 4;
-          let w0 = vec4<M>(Wt[wi]); let w1 = vec4<M>(Wt[wi + 1]); let w2 = vec4<M>(Wt[wi + 2]); let w3 = vec4<M>(Wt[wi + 3]);
+          let wi = (k * p.T + t) * 4;
+          let w0 = wsm[wi]; let w1 = wsm[wi + 1]; let w2 = wsm[wi + 2]; let w3 = wsm[wi + 3];
           for (var q = 0; q < ${PX}; q++) {
             ${math === 'emu' ? 'part[q][k] = Q(part[q][k] + Q(vec4<f32>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]))));'
               : 'part[q][k] += vec4<M>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]));'}
@@ -284,15 +297,26 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
     workgroupBarrier();
   }
   if (!inside) { return; }
-  for (var k = 0; k < ng; k++) {
-    let row = (p.row0 + g0 + k) * 3;
-    let sc = aff[row + 1]; let sh = aff[row + 2];
-    for (var q = 0; q < ${PX}; q++) {
-      let x = x0 + q;
-      if (x >= c.z) { break; }
+  for (var q = 0; q < ${PX}; q++) {
+    let x = x0 + q;
+    if (x >= c.z) { break; }
+    for (var k = 0; k < ng; k++) {
+      let row = (p.row0 + g0 + k) * 3;
       var a = acc[q][k];
       if (p.act == 1) { a = gelu(a); } else { a = 1.0 / (1.0 + exp(-a)); }
-      O[((g0 + k) * p.H + y) * p.W + x] = vec4<S>(a * sc + sh);
+      acc[q][k] = a * aff[row + 1] + aff[row + 2];
+      if (p.fuse == 0) { O[((g0 + k) * p.H + y) * p.W + x] = vec4<S>(acc[q][k]); }
+    }
+    // Fused head (1 x 1 over this layer's 16 channels and B's): the drawing, straight from registers.
+    if (p.fuse > 0) {
+      var h = aff[p.rowh * 3];
+      for (var l = 0; l < p.Lh; l++) {
+        let iv = select(vec4<f32>(B[((l - ${G}) * p.H + y) * p.W + x]), acc[q][min(l, ${G} - 1)], l < ${G});
+        let wi = p.wbh + l * 4;
+        h += vec4<f32>(dot(vec4<f32>(Wt[wi]), iv), dot(vec4<f32>(Wt[wi + 1]), iv), dot(vec4<f32>(Wt[wi + 2]), iv), dot(vec4<f32>(Wt[wi + 3]), iv));
+      }
+      h = 1.0 / (1.0 + exp(-h));
+      O2[y * p.W + x] = vec4<S>(h * aff[p.rowh * 3 + 1] + aff[p.rowh * 3 + 2]);
     }
   }
 }`;
@@ -321,16 +345,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   // ---- the pass list, with static bind groups ----
   const steps = [];
+  // The full-resolution 3 x 3 layer and the 1 x 1 head fuse: srh keeps its 16 channels in registers
+  // and writes the drawing (rgba), so its full-resolution output never goes to memory.
+  const headL = net.layers.find(l => l.name === 'srhead');
+  const fused = fuse && net.sharp && headL && net.layers.find(l => l.name === 'srh')?.cout === 4 * G;
+  const dummy = buf(16, STORE);
   for (const l of net.layers) {
+    if (fused && l === headL) continue;
     const out = T[l.out], A = T[l.inputs[0]], B = T[l.inputs[1] ?? l.inputs[0]];
     const skip = skipEmpty && net.sharp && (l.name === 'srh' || l.name === 'srhead') ? 1 : 0;
-    const params = uniform(new Int32Array([out.w, out.h, A.w, A.h, l.la, l.L, l.T, l.k, l.wbase, l.row, l.groups, l.act === 'gelu' ? 1 : 2, skip]));
+    const f = fused && l.name === 'srh';
+    const params = uniform(new Int32Array([out.w, out.h, A.w, A.h, l.la, l.L, l.T, l.k, l.wbase, l.row, l.groups, l.act === 'gelu' ? 1 : 2, skip,
+      f ? 1 : 0, f ? headL.wbase : 0, f ? headL.row : 0, f ? headL.L : 0, 0, 0, 0]));
     const groups = {};
     for (const m of mathModes) groups[m] = device.createBindGroup({ layout: convPipes[m].getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: params } }, { binding: 1, resource: { buffer: cropBuf } },
       { binding: 2, resource: { buffer: A.buf } }, { binding: 3, resource: { buffer: B.buf } },
-      { binding: 4, resource: { buffer: out.buf } }, { binding: 5, resource: { buffer: wBuf } },
-      { binding: 6, resource: { buffer: affBuf } }] });
+      { binding: 4, resource: { buffer: f ? dummy : out.buf } }, { binding: 5, resource: { buffer: wBuf } },
+      { binding: 6, resource: { buffer: affBuf } }, { binding: 7, resource: { buffer: f ? T.rgba.buf : dummy } }] });
     steps.push({ name: l.name, conv: true, pipes: convPipes, groups, out, z: Math.ceil(l.groups / G), px: PX,
       get pipe() { return this.pipes[mathMode]; }, get group() { return this.groups[mathMode]; } });
     const pooled = Object.entries(net.pools).find(([, src]) => src === l.out);

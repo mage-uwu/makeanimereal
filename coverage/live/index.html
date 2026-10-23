@@ -1052,7 +1052,8 @@ async function loadGpu() {
   const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${modelDir()}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
   gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32'), skipEmpty: !location.hash.includes('noskip'), profile: location.hash.includes('gpuprof'),
-    math: location.hash.includes('emu16') ? 'emu' : location.hash.includes('f32math') ? 'f32' : 'auto' });
+    math: location.hash.includes('emu16') ? 'emu' : location.hash.includes('f32math') ? 'f32' : 'auto',
+    px: location.hash.includes('px4') ? 4 : 8, fuse: !location.hash.includes('nofuse') });
   if (!gpu) throw new Error('WebGPU device unavailable');
   renderer.setPixelRatio(1);
   renderer.setSize(GBW * 5, GBH, false);
