@@ -3,7 +3,8 @@
 
     python3 export_nts.py model.ntsw ../../live/nts --parts ../../../out/shader-data/w1/meta.json
 
-Writes net.bin (everything infer.c needs except the fine texture), fine0..2.png (the fine texture,
+Writes net.bin (everything infer.c needs except the fine texture) and net.png (the same bytes packed
+into an image, for the web), fine0..2.png (the fine texture,
 8 bits per channel, parts tiled 5 x 4) and meta.json. The ternary codes, row scales, stencil codes
 and gates are derived here exactly as shader_nts.c's requantize() does (tss_ternary, rows64_pack,
 tc_pack), in float32, so the browser runs what was trained.
@@ -100,6 +101,13 @@ out += lo.tobytes() + st.tobytes() + q8[1].tobytes()
 dst = Path(a.out)
 dst.mkdir(parents=True, exist_ok=True)
 (dst / 'net.bin').write_bytes(bytes(out))
+# The web copy: the bytes in an opaque RGB PNG, 3 a pixel after a 4-byte little-endian length (the
+# viewer's model.vrm.png packing), since artifacts serve images but not raw binaries.
+packed = struct.pack('<I', len(out)) + bytes(out)
+side = int(np.ceil(np.sqrt(len(packed) / 3)))
+px = np.zeros(side * side * 3, np.uint8)
+px[:len(packed)] = np.frombuffer(packed, np.uint8)
+Image.fromarray(px.reshape(side, side, 3)).save(dst / 'net.png', optimize=True)
 # Fine texture: three RGB images, channels 3k..3k+2; part p at tile (p % 5, p // 5) of 512 x 512.
 cols, rows = 5, (P + 4) // 5
 for k in range(3):

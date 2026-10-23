@@ -4,17 +4,28 @@
 // (nts-worker.js), the band plus the network's reach on both sides, so the bands join seamlessly.
 // infer-relaxed.wasm (8-bit dot products) where the browser has relaxed SIMD, else infer.wasm.
 
+// net.png: export_nts.py's net.bin packed 3 bytes a pixel into an opaque RGB PNG after a 4-byte length.
+async function unpackPng(blob) {
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const c = new OffscreenCanvas(bmp.width, bmp.height), ctx = c.getContext('2d');
+  ctx.drawImage(bmp, 0, 0);
+  const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data, rgb = new Uint8Array(bmp.width * bmp.height * 3);
+  for (let i = 0, j = 0; i < px.length; i += 4) { rgb[j++] = px[i]; rgb[j++] = px[i + 1]; rgb[j++] = px[i + 2]; }
+  const n = rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (rgb[3] << 24);
+  return rgb.buffer.slice(4, 4 + n);
+}
+
 export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
   const get = async f => { const r = await fetch(base + f); if (!r.ok) throw new Error(`${base}${f}: ${r.status}`); return r; };
   let module = null, relaxed = true;
   try { module = await WebAssembly.compile(await (await get('infer-relaxed.wasm')).arrayBuffer()); }
   catch { relaxed = false; module = await WebAssembly.compile(await (await get('infer.wasm')).arrayBuffer()); }
-  const [meta, net] = await Promise.all([get('meta.json').then(r => r.json()), get('net.bin').then(r => r.arrayBuffer())]);
+  const [meta, net] = await Promise.all([get('meta.json').then(r => r.json()), get('net.png').then(r => r.blob()).then(unpackPng)]);
 
   // The main thread's instance: inputs and the neural texture.
   const k = (await WebAssembly.instantiate(module)).exports;
   const put = bytes => { const p = k.nts_alloc(bytes.byteLength); new Uint8Array(k.memory.buffer).set(new Uint8Array(bytes), p); return p; };
-  if (!k.nts_load(put(net), net.byteLength)) throw new Error('nts/net.bin did not load');
+  if (!k.nts_load(put(net), net.byteLength)) throw new Error('nts/net.png did not load');
   // The fine texture: fine0..2.png hold channels 3k..3k+2, part p in tile (p % cols, p / cols).
   const P = meta.parts.length, T = meta.tile;
   const fineP = k.nts_alloc(P * T * T * 8);
