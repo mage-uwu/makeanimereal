@@ -66,6 +66,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="d-fast" aria-pressed="false">Fast</button>
       <button id="d-sharp" aria-pressed="true">Sharp</button>
       <button id="d-full" aria-pressed="false">Full</button>
+      <button id="d-smooth" aria-pressed="false" title="Sharp, fine-tuned against flicker">Smooth</button>
     </div>
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
@@ -102,9 +103,9 @@ const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 // Three trained shaders: 'sharp' (the fast decoder at half resolution plus a full-resolution head;
 // the default where WebGPU runs it), 'fast' (channels 16/32/48/64 at 360 x 640; the WebGL engine's
 // default) and 'full' (32/48/64/96, about 4x the work). #fast and #full pick the others.
-const ASKED = location.hash.includes('full') ? 'full' : location.hash.includes('fast') ? 'fast' : 'sharp';
+const ASKED = location.hash.includes('full') ? 'full' : location.hash.includes('fast') ? 'fast' : location.hash.includes('smooth') ? 'smooth' : 'sharp';
 let DETAIL = ASKED;
-const modelDir = () => ({ full: '', fast: 'fast/', sharp: location.hash.includes('equi') ? 'equi/' : 'sharp/' })[DETAIL];
+const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
 const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
 const status = document.getElementById('status');
@@ -414,7 +415,7 @@ async function loadImage(url) {
 }
 
 async function loadNet() {
-  if (DETAIL === 'sharp') DETAIL = 'fast';  // the WebGL engine runs the half-resolution shaders
+  if (DETAIL === 'sharp' || DETAIL === 'smooth') DETAIL = 'fast';  // the WebGL engine runs the half-resolution shaders
   net = await (await fetch(`${modelDir()}shader.json`)).json();
   parts = net.parts;
   featTex = await Promise.all([0, 1, 2].map(k => loadImage(`${modelDir()}feat${k}.png`)));
@@ -714,12 +715,12 @@ document.getElementById('m-shader').onclick = e => { mode = 0; setPressed('#m-sh
 document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shader, #m-raw', e.currentTarget); dirty = true; };
 // Switching shaders reloads the page with the other model.
 function showDetail() {
-  for (const d of ['fast', 'sharp', 'full']) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
-  document.getElementById('d-sharp').disabled = !gpuAdapter;
+  for (const d of ['fast', 'sharp', 'full', 'smooth']) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
+  document.getElementById('d-sharp').disabled = document.getElementById('d-smooth').disabled = !gpuAdapter;
 }
-for (const d of ['fast', 'sharp', 'full']) document.getElementById(`d-${d}`).onclick = () => {
+for (const d of ['fast', 'sharp', 'full', 'smooth']) document.getElementById(`d-${d}`).onclick = () => {
   if (d === DETAIL) return;
-  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full'].includes(t)), ...(d === 'sharp' ? [] : [d])].join('-');
+  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full', 'smooth'].includes(t)), ...(d === 'sharp' ? [] : [d])].join('-');
   location.reload();
 };
 const wirePose = b => b.onclick = () => {
