@@ -20,6 +20,19 @@ pooling grids, and a shader that draws a feature differently at different grid p
 Each step also draws a crop shifted by 1 to --shift pixels and asks that drawing-then-shifting
 equal shifting-then-drawing (away from the crops' edges). The log reports that shift error on
 held-out frames, the number this loss pulls down.
+
+--lines keeps the linework crisp (the shift loss alone favours soft, safe strokes): the target's ink
+lines (pixels clearly darker than their neighbourhood) weigh extra in the colour loss, and the
+drawing's gradients are matched to the target's. The log reports the line error and the drawing's
+edge strength as a fraction of the target's.
+
+--sharpen a bakes an unsharp mask (amount a) into the base's own drawing: with --keep, the target is
+the frozen base's output, sharpened, everywhere. The base's lines are already where its G-buffer
+puts them and steady from frame to frame, so this crisps them without the film's slightly
+misplaced ink pulling the drawing around.
+
+--keep holds the drawing to the base's own (a frozen copy) everywhere off the target's lines, so a
+linework pass can't shift colours or bring back flicker; only the line neighbourhood moves.
 """
 import argparse
 import math
@@ -96,6 +109,10 @@ def main():
     ap.add_argument('--equi', type=float, default=0.0, help='weight of the shift-consistency loss')
     ap.add_argument('--shift', type=int, default=15, help='largest shift for --equi, pixels')
     ap.add_argument('--tex-lr', type=float, default=2e-3)
+    ap.add_argument('--lines', type=float, default=0.0, help='weight of the linework losses')
+    ap.add_argument('--line-thresh', type=float, default=0.2, help='how much darker than its neighbourhood a pixel of ink is')
+    ap.add_argument('--sharpen', type=float, default=0.0, help='unsharp-mask amount baked in (with --keep)')
+    ap.add_argument('--keep', type=float, default=0.0, help='weight of matching the base off the lines')
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -124,25 +141,78 @@ def main():
     model.head.load_state_dict({k[5:]: v for k, v in ck['sr'].items() if k.startswith('head.')})
     for p in model.parameters():
         p.requires_grad_(False)
+    teacher = None
+    if a.keep:
+        import copy
+        teacher = copy.deepcopy(model).to(dev).eval()
     adapters = wrap(base.dec, a.rank)
     model.conv, model.head = LoRAConv(model.conv, a.rank), LoRAConv(model.head, a.rank)
     adapters += [model.conv, model.head]
     for p in base.tex.parameters():
-        p.requires_grad_(True)
+        p.requires_grad_(a.tex_lr > 0)
     model = model.to(dev)
     lora = [p for ad in adapters for p in (ad.down.weight, ad.up.weight)]
     print(f'{len(adapters)} adapters, rank {a.rank}: {sum(p.numel() for p in lora)} parameters; '
           f'{n_pose} posed frames ({len(pte)} held out), {n_old} film frames', flush=True)
     vgg = train.VGG().to(dev)
-    opt = torch.optim.Adam([{'params': lora, 'lr': 1e-3}, {'params': base.tex.parameters(), 'lr': a.tex_lr}])
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda t: min(1, t / 100) * 0.5 * (1 + math.cos(math.pi * t / a.iters)))
+    opt = torch.optim.Adam([{'params': lora, 'lr': 1e-3}] + ([{'params': base.tex.parameters(), 'lr': a.tex_lr}] if a.tex_lr > 0 else []))
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda t: min(1, t / 100) * 0.5 * (1 + math.cos(math.pi * t / max(1, a.iters))))
     H, W = Xo.shape[1:3]
     ch, cw = map(int, a.crop.split('x'))
     n_p = max(1, round(a.batch * a.posed_share))
 
-    def loss_of(pred, y):
-        return (F.l1_loss(pred[:, 3], y[:, 3]) + F.l1_loss(pred[:, :3] * y[:, 3:4], y[:, :3] * y[:, 3:4])
-                + a.vgg * vgg(train.over_white(pred), train.over_white(y)))
+    def lum(rgba):
+        return (train.over_white(rgba) * torch.tensor([0.299, 0.587, 0.114], device=dev)[:, None, None]).sum(1, keepdim=True)
+
+    def line_mask(y):
+        """The target's ink: pixels well darker than their 7 x 7 neighbourhood, on her."""
+        l = lum(y)
+        return ((l < F.avg_pool2d(l, 7, 1, 3, count_include_pad=False) - a.line_thresh) & (y[:, 3:4] > 0.5)).float()
+
+    def grads(img):
+        return img[..., 1:, :-1] - img[..., :-1, :-1], img[..., :-1, 1:] - img[..., :-1, :-1]
+
+    def near_lines(y):
+        return F.max_pool2d(line_mask(y), 3, 1, 1)
+
+    def line_losses(pred, y):
+        m = line_mask(y)
+        ink = ((train.over_white(pred) - train.over_white(y)).abs() * m).sum() / (m.sum() * 3 + 1)
+        (py, px), (ty, tx) = grads(lum(pred)), grads(lum(y))
+        on = near_lines(y)[..., :-1, :-1]
+        grad = (((py - ty).abs() + (px - tx).abs()) * on).sum() / (on.sum() + 1)
+        return ink + grad
+
+    def loss_of(pred, y, x=None, p=None, ids=None):
+        if teacher is not None:
+            # Off the lines: the base's own drawing. On them: the target's ink.
+            with torch.no_grad():
+                t = teacher(x, p, ids)
+                tw = train.over_white(t)
+                if a.sharpen:
+                    blur = F.avg_pool2d(F.avg_pool2d(tw, 3, 1, 1, count_include_pad=False), 3, 1, 1, count_include_pad=False)
+                    tw = (tw + a.sharpen * (tw - blur)).clamp(0, 1)
+            off = torch.ones_like(t[:, 3:4]) if a.sharpen else 1 - near_lines(y)
+            loss = (((train.over_white(pred) - tw).abs() * off).sum() / (off.sum() * 3 + 1)
+                    + ((pred[:, 3:4] - t[:, 3:4]).abs() * off).sum() / (off.sum() + 1)) * a.keep
+        else:
+            loss = (F.l1_loss(pred[:, 3], y[:, 3]) + F.l1_loss(pred[:, :3] * y[:, 3:4], y[:, :3] * y[:, 3:4])
+                    + a.vgg * vgg(train.over_white(pred), train.over_white(y)))
+        return loss + a.lines * line_losses(pred, y) if a.lines else loss
+
+    def line_stats(X, Y, P, ids, codes):
+        """Held-out line error and edge strength (drawing / target) on her."""
+        ink, ratio = [], []
+        with torch.no_grad():
+            for k in range(0, len(ids), 4):
+                i = torch.from_numpy(ids[k:k + 4]).to(dev)
+                pr, y = model(X[i].float(), P[i], i if codes else None), Y[i].permute(0, 3, 1, 2).float()
+                m = line_mask(y)
+                ink.append(((train.over_white(pr) - train.over_white(y)).abs() * m).sum().item() / (m.sum().item() * 3 + 1))
+                (py, px), (ty, tx) = grads(lum(pr)), grads(lum(y))
+                on = (y[:, 3:4, :-1, :-1] > 0.05).float()
+                ratio.append(((py.abs() + px.abs()) * on).sum().item() / (((ty.abs() + tx.abs()) * on).sum().item() + 1e-6))
+        return float(np.mean(ink)), float(np.mean(ratio))
 
     def evaluate(X, Y, P, ids, codes):
         errs = []
@@ -193,7 +263,9 @@ def main():
             line = (f'it {it}  posed held-out L1 {evaluate(Xp, Yp, Pp, pte, False):.4f}  '
                     f'film held-out L1 {evaluate(Xo, Yo, Po, ote, True):.4f}  '
                     f'shift error posed {shift_error(Xp, Pp, pte[::2], False):.4f} '
-                    f'film {shift_error(Xo, Po, ote[::3], True):.4f}  {time.time() - t0:.0f}s')
+                    f'film {shift_error(Xo, Po, ote[::3], True):.4f}  '
+                    'line error / edge strength posed %.4f / %.2f film %.4f / %.2f  ' % (*line_stats(Xp, Yp, Pp, pte, False), *line_stats(Xo, Yo, Po, ote, True))
+                    + f'{time.time() - t0:.0f}s')
             print(line, flush=True)
             log.write(line + '\n')
             log.flush()
@@ -206,8 +278,9 @@ def main():
         cx = np.random.randint(0, W - cw - sh + 1)
         ip = torch.from_numpy(np.random.choice(ptr, n_p)).to(dev)
         io = torch.from_numpy(np.random.choice(otr, a.batch - n_p)).to(dev)
-        lp = loss_of(model(Xp[ip, cy:cy + ch, cx:cx + cw].float(), Pp[ip]), Yp[ip, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float())
-        lo = loss_of(model(Xo[io, cy:cy + ch, cx:cx + cw].float(), Po[io], io), Yo[io, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float())
+        xp, xo = Xp[ip, cy:cy + ch, cx:cx + cw].float(), Xo[io, cy:cy + ch, cx:cx + cw].float()
+        lp = loss_of(model(xp, Pp[ip]), Yp[ip, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float(), xp, Pp[ip], None)
+        lo = loss_of(model(xo, Po[io], io), Yo[io, cy:cy + ch, cx:cx + cw].permute(0, 3, 1, 2).float(), xo, Po[io], io)
         loss = (lp * n_p + lo * (a.batch - n_p)) / a.batch
         if a.equi:
             dy, dx = np.random.randint(0, a.shift + 1, 2)
