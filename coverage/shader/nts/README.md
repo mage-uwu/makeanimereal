@@ -31,3 +31,14 @@ near her, which is about a third of the work and gives the same drawing (check_i
 
 run1 (40 minutes on 16 vCPUs): held-out L1 0.0114 over all 144 held-out frames, the same with the
 8-bit texture. The browser kernel matches the trainer to a mean 2e-5 over white.
+
+## Fine-tune against splotches: crisp as the teacher (run2, the shipped model)
+
+`distill_data.py` has crisp (the U-Net line's end: VGG loss, LoRA on posed frames, shift
+consistency, baked sharpening) draw 1200 frames: every other film frame from both orbits, the 120
+posed frames and 360 new mocap frames (pick_poses.py --seed 1, render-orbit.mjs --poses). run2 is
+run1 fine-tuned 50 minutes on those plus the film frames (`pack_data.py ... --out /dev/stdout |
+shader_nts --data /dev/stdin --load run1.ntsw --lr 0.0015 --lr-tex 0.005`). The film's frame-to-frame
+inconsistency had settled into the neural texture as splotchy shading; against crisp's consistent
+drawing it goes, the sash and ornaments come out clean and posed hands are right. It's paler than
+the film (crisp is): film held-out L1 0.0154 (run1 0.0114), 0.0079 on the mixed held-out set.

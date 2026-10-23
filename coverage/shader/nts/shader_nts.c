@@ -708,7 +708,12 @@ int main(int argc, char **argv) {
         fwrite(frame_px(&d, fi), 17, (size_t)d.H * d.W, f); fwrite(ews[0]->p, 4, (size_t)d.H * d.W * 4, f); fclose(f);
         printf("reference frame %d -> %s\n", fi, ref);
     }
-    if (iters == 0) { printf("held-out L1 %.4f over %d frames\n", evaluate(&d, eval_ids, neval, ews, nbf), neval); return 0; }
+    if (iters == 0) {   /* evaluation only: the error, and the preview of up to 6 held-out frames */
+        printf("held-out L1 %.4f over %d frames\n", evaluate(&d, eval_ids, neval, ews, nbf), neval);
+        int pick[6], np = nh < 6 ? nh : 6; for (int i = 0; i < np; i++) pick[i] = held[np > 1 ? (long)i * (nh - 1) / (np - 1) : 0];
+        preview(&d, pick, np, ews[0], nbf, prev);
+        return 0;
+    }
     for (int it = 1; it <= iters; it++) {
         double el = wall() - t0, prog = seconds > 0 ? fmin(1, el / seconds) : (double)it / iters;
         double sched = fmin(1, it / 300.0) * (.1 + .9 * .5 * (1 + cos(M_PI * prog)));
