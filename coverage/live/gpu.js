@@ -356,8 +356,15 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
   // One frame: copy the G-buffer canvas in, run the network on the crop, draw.
   // lighting (models with light channels): 9 floats, the light's view-space direction, key colour x strength
   // and ambient colour x strength relative to the films' light (train_light.py light_params).
-  function frame({ source, crop, pitch, mode, top, bottom, lighting = null, limit = Infinity, noCopy = false, noShow = false }) {
-    if (!noCopy) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [GW * TILES, GH]);
+  // rect: the part of each G-buffer tile to copy in ([x, y, w, h], top-down); the whole tile by default.
+  function frame({ source, crop, rect = null, pitch, mode, top, bottom, lighting = null, limit = Infinity, noCopy = false, noShow = false }) {
+    if (!noCopy) {
+      if (!rect) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [GW * TILES, GH]);
+      else for (let k = 0; k < TILES; k++) {
+        const o = { x: k * GW + rect[0], y: rect[1] };
+        device.queue.copyExternalImageToTexture({ source, origin: o }, { texture: gbuf, origin: o }, [rect[2], rect[3]]);
+      }
+    }
     device.queue.writeBuffer(cropBuf, 0, new Int32Array(crop));
     packParams[0] = Math.sin(pitch); packParams[1] = Math.cos(pitch);
     if (lighting) { packParams.set(lighting.slice(0, 3), 24); packParams.set(lighting.slice(3, 6), 28); packParams.set(lighting.slice(6, 9), 32); }

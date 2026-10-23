@@ -125,7 +125,7 @@ const ASKED = ['full', 'fast', 'smooth', 'sharp'].find(d => location.hash.includ
 let DETAIL = ASKED;
 const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
-const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
+const CROP_PAD = 32;  // past her silhouette: the drawing inside matches computing the whole frame (debugReach, #nocrop)
 const status = document.getElementById('status');
 
 const canvas = document.getElementById('view');
@@ -136,7 +136,9 @@ if (navigator.gpu && !location.hash.includes('webgl')) {
   try { gpuAdapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch { gpuAdapter = null; }
 }
 const glCanvas = gpuAdapter ? document.createElement('canvas') : canvas;
-const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: !!gpuAdapter, alpha: false, preserveDrawingBuffer: !!gpuAdapter, powerPreference: 'high-performance' });
+// The WebGPU path's G-buffer canvas is never shown and is copied right after it's drawn, so it keeps no
+// preserved buffer; #noaa drops its multisampling (the shaders trained on multisampled renders).
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: !!gpuAdapter && !location.hash.includes('noaa'), alpha: false, powerPreference: 'high-performance' });
 let gpu = null;
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -295,6 +297,7 @@ function placeCamera() {
   const y = THREE.MathUtils.degToRad(cam.yaw), p = THREE.MathUtils.degToRad(cam.pitch);
   camera.position.set(target.x + radius * Math.cos(p) * Math.sin(y), target.y + radius * Math.sin(p), target.z + radius * Math.cos(p) * Math.cos(y));
   camera.lookAt(target);
+  camera.updateMatrixWorld();  // the crop box projects bones with it before anything renders
 }
 
 function renderGBuffer() {
@@ -336,13 +339,23 @@ const uvSplit = which => new THREE.ShaderMaterial({
 });
 const uvMatA = uvSplit('a'), uvMatB = uvSplit('b');
 const BLACK = new THREE.Color(0x000000), GREEN_C = new THREE.Color(GREEN);
-function renderGBufferTiles() {
+// The crop (network pixels, top-down) as a G-buffer rectangle [x, y, w, h], top-down, with the margin
+// the pack step reads (gpu.js cropOf).
+function gbufRect(crop) {
+  const s = GBW / NW;
+  const x0 = Math.max(0, Math.floor(crop[0] * s)), y0 = Math.max(0, Math.floor(crop[1] * s));
+  const x1 = Math.min(GBW, Math.ceil(crop[2] * s) + 2), y1 = Math.min(GBH, Math.ceil(crop[3] * s) + 2);
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+// The five G-buffer tiles, drawn only inside the crop (the network reads nothing else).
+function renderGBufferTiles(crop = [0, 0, NW, NH]) {
   placeCamera();
   depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+  const [rx, ry, rw, rh] = gbufRect(crop);
   renderer.setScissorTest(true);
   [[GREEN_C, null], [BLACK, normalMat], [BLACK, depthMat], [BLACK, uvMatA], [BLACK, uvMatB]].forEach(([bg, mat], k) => {
     for (const m of shorts) m.visible = !mat;
-    renderer.setViewport(k * GBW, 0, GBW, GBH); renderer.setScissor(k * GBW, 0, GBW, GBH);
+    renderer.setViewport(k * GBW, 0, GBW, GBH); renderer.setScissor(k * GBW + rx, GBH - ry - rh, rw, rh);
     scene.background = bg; scene.overrideMaterial = mat;
     renderer.render(scene, camera);
   });
@@ -360,16 +373,17 @@ function cropBox(topDown = false) {
     b.getWorldPosition(v3).project(camera);
     x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y);
   }
-  // Bones sit inside the skin, cloth and hair: pad by a fixed share of the frame, then by the reach.
+  // Bones sit inside the skin, cloth and hair.
   const px = x => (x * 0.5 + 0.5) * NW, py = y => (topDown ? 0.5 - y * 0.5 : y * 0.5 + 0.5) * NH;
   if (topDown) [y0, y1] = [y1, y0];
-  const m = 0.12 * TRAIN_H + CROP_PAD;
-  let box = [px(x0) - m, py(y0) - m, px(x1) + m, py(y1) + m];
+  // How far her silhouette reaches past the bones (debugReach over 10 poses x 5 angles, at most:
+  // top 52, sides 37, bottom 24 pixels), with some room, plus the decoder's reach.
+  let box = [px(x0) - 44 - CROP_PAD, py(y0) - 64 - CROP_PAD, px(x1) + 44 + CROP_PAD, py(y1) + 32 + CROP_PAD];
   const now = box;
   if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
   lastCrop = now;  // this frame's box, so next frame also clears what she leaves behind
   const snap = 16;
-  if (!box.every(Number.isFinite)) { lastCrop = null; return [0, 0, NW, NH]; }  // a degenerate projection: the whole frame
+  if (!box.every(Number.isFinite) || location.hash.includes('nocrop')) { lastCrop = null; return [0, 0, NW, NH]; }  // a degenerate projection: the whole frame
   return [Math.max(0, Math.floor(box[0] / snap) * snap), Math.max(0, Math.floor(box[1] / snap) * snap),
     Math.min(NW, Math.ceil(box[2] / snap) * snap), Math.min(NH, Math.ceil(box[3] / snap) * snap)];
 }
@@ -801,12 +815,13 @@ document.querySelectorAll('[data-pose]').forEach(wirePose);
 // browser has one; otherwise the readout shows the frame rate.
 function drawFrame() {
   if (gpu) {
-    renderGBufferTiles();
-    const crop = cropBox(true);
+    placeCamera();
+    const crop = mode === 1 ? [0, 0, NW, NH] : cropBox(true);
+    renderGBufferTiles(crop);
     const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
     if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
     const top = css('--stage-top'), bottom = css('--stage-bottom');
-    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
+    gpu.frame({ source: glCanvas, crop, rect: location.hash.includes("wholecopy") ? null : gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
       noShow: location.hash.includes('noshow') });
     gpuMs = gpu.gpuMs;
     return crop;
@@ -907,15 +922,43 @@ window.debugProfile = async (poseName, n, dt = 1 / 60, net = true) => {
     const t0 = performance.now(); setPose(poseName, k * dt);
     const t1 = performance.now(); vrm.update(dt); placeCamera();
     const t2 = performance.now(); const crop = cropBox(true);
-    const t3 = performance.now(); renderGBufferTiles();
+    const t3 = performance.now(); renderGBufferTiles(crop);
     const t4 = performance.now();
-    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [1, 1, 1], bottom: [1, 1, 1], noShow: true });
+    gpu.frame({ source: glCanvas, crop, rect: location.hash.includes("wholecopy") ? null : gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [1, 1, 1], bottom: [1, 1, 1], noShow: true });
     const t5 = performance.now(); await gpu.device.queue.onSubmittedWorkDone();
     const t6 = performance.now();
     rows.push([t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, (crop[2] - crop[0]) * (crop[3] - crop[1])]);
   }
   return rows;
 };
+window.debugTiles = (yaw, pitch) => {
+  cam.yaw = yaw; cam.pitch = pitch; lastCrop = null; setPose('stand', 0); vrm.update(0);
+  placeCamera(); const crop = cropBox(true); renderGBufferTiles(crop);
+  return { info: { crop, rect: gbufRect(crop), GBW, GBH, NW, NH, canvas: [glCanvas.width, glCanvas.height], pr: renderer.getPixelRatio() }, url: glCanvas.toDataURL() };
+};
+// How far her silhouette reaches past the bones' box, per side (network pixels), for sizing the crop.
+window.debugReach = (cases) => {
+  const out = [], s = GBW / NW, px = new Uint8Array(GBW * GBH * 4), gl2 = renderer.getContext();
+  for (const [p, t, yaw, pitch] of cases) {
+    cam.yaw = yaw; cam.pitch = pitch; lastCrop = null; setPose(p, t); vrm.update(0); placeCamera();
+    let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
+    for (const b of bones) { b.getWorldPosition(v3).project(camera); x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y); }
+    const bx = [(x0 * 0.5 + 0.5) * NW, (0.5 - y1 * 0.5) * NH, (x1 * 0.5 + 0.5) * NW, (0.5 - y0 * 0.5) * NH];
+    renderGBufferTiles([0, 0, NW, NH]);
+    gl2.readPixels(4 * GBW, 0, GBW, GBH, gl2.RGBA, gl2.UNSIGNED_BYTE, px);  // the uvb tile; b = coverage
+    let mx0 = 1e9, my0 = 1e9, mx1 = -1, my1 = -1;
+    for (let y = 0; y < GBH; y++) for (let x = 0; x < GBW; x++) if (px[(y * GBW + x) * 4 + 2] > 128) {
+      const ty = GBH - 1 - y; mx0 = Math.min(mx0, x); mx1 = Math.max(mx1, x); my0 = Math.min(my0, ty); my1 = Math.max(my1, ty);
+    }
+    out.push({ p, t, yaw, left: +(bx[0] - mx0 / s).toFixed(1), top: +(bx[1] - my0 / s).toFixed(1), right: +(mx1 / s - bx[2]).toFixed(1), bottom: +(my1 / s - bx[3]).toFixed(1) });
+  }
+  return out;
+};
+// The crop box for poses and cameras (network pixels).
+window.debugCrops = cases => cases.map(([p, t, yaw, pitch]) => {
+  cam.yaw = yaw; cam.pitch = pitch; lastCrop = null; setPose(p, t); vrm.update(0); placeCamera();
+  const c = cropBox(true); return [p, t, yaw, c[2] - c[0], c[3] - c[1]];
+});
 // Long-run soak (profiling): n animated frames of everything but the network; every `every` frames
 // the stage times, JS heap and three.js resource counts, to spot anything that grows.
 window.debugSoak = (poseName, n, every = 250) => {
