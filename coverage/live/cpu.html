@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Tree-SSM CPU Shader</title>
+<title>Tree-SSM Shader</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Shippori+Mincho:wght@600&family=JetBrains+Mono:wght@400&display=swap">
@@ -50,8 +50,8 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
 <div class="app">
   <header>
-    <h1>Tree-SSM CPU Shader</h1>
-    <p class="hint">Drawn every frame by the nanotss shader on your CPU (WebAssembly), no GPU compute. Drag to orbit, pinch to zoom, double-tap to reset.
+    <h1>Tree-SSM Shader</h1>
+    <p class="hint">Drawn every frame by the nanotss (Tree-SSM) shader: on the GPU in WebGL2, or on the CPU in WebAssembly. Drag to orbit, pinch to zoom, double-tap to reset.
       Motion: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset">Bandai Namco Research</a> (CC BY-NC 4.0).</p>
   </header>
   <div id="stage" aria-label="Live character view; drag to orbit">
@@ -63,6 +63,9 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span class="sep" id="clip-end"></span>
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
+      <span class="sep"></span>
+      <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
+      <button id="e-cpu" aria-pressed="false" title="The network in WebAssembly workers">CPU</button>
     </div>
     <div class="readout" id="readout" aria-live="polite">–</div>
   </footer>
@@ -76,28 +79,34 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 } }
 </script>
 <script type="module">
-// The CPU shader on its own: three.js draws the G-buffer (colour, normal, depth, UV and part) in WebGL
-// into a hidden canvas, the tiles are read back, and the nanotss shader (coverage/shader/nts, run in
-// WebAssembly workers by nts.js) draws her; a 2D canvas shows the result. Nothing else touches the
-// GPU, so it behaves the same on phones. Same model, camera, mocap and encodings as index.html.
+// The nanotss (Tree-SSM) shader on its own, two engines for the same network. GPU (the default):
+// three.js draws the G-buffer (colour, normal, depth, UV and part) into render targets and nts-gl.js
+// runs the network in WebGL2 fragment shaders on the same context, then draws the result. CPU (#cpu,
+// or where WebGL2 can't render to float targets): the G-buffer is drawn into a hidden canvas, read
+// back, and the network runs in WebAssembly workers (nts.js); a 2D canvas shows it. No WebGPU, so it
+// behaves the same on phones. Same model, camera, mocap and encodings as index.html.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createMotion } from './motion.js';
 import { createCpuShader } from './nts.js';
+import { createGlShader } from './nts-gl.js';
 
 // The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
-const TRAIN_H = 640, NW = 720, NH = 800, FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+// #tight: the training frame itself (the checks compare against it).
+const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const ENGINE = location.hash.includes('cpu') ? 'cpu' : 'gpu';
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32;
 const status = document.getElementById('status'), readout = document.getElementById('readout');
 const stage = document.getElementById('stage'), view = document.getElementById('view');
-const ctx = view.getContext('2d');
-
-const glCanvas = document.createElement('canvas');
-const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+// GPU: three.js and the network share the visible canvas (the G-buffer goes to multisampled render
+// targets). CPU: three.js draws into a hidden canvas and the visible one is 2D.
+const glCanvas = ENGINE === 'gpu' ? view : document.createElement('canvas');
+const ctx = ENGINE === 'cpu' ? view.getContext('2d') : null;
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: ENGINE === 'cpu', alpha: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(1);
-renderer.setSize(NW * 5, NH, false);
+if (ENGINE === 'cpu') renderer.setSize(NW * 5, NH, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 const gl = renderer.getContext();
 glCanvas.addEventListener('webglcontextlost', e => { e.preventDefault(); status.hidden = false; status.textContent = 'graphics context lost: reloading…'; });
@@ -263,17 +272,25 @@ const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
 let fps = 0, lastShown = 0, raw = false;
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
-function paint() {
+// Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
+// frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
+function frameBox() {
   const dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect();
   const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
   if (view.width !== W || view.height !== H) { view.width = W; view.height = H; }
+  const s = Math.min(H / NH, W / (NW * 0.62)) * zoom.z, w = NW * s, h = NH * s;
+  return { W, H, box: [(W - w) / 2 + zoom.tx * dpr, (H - h) / 2 + zoom.ty * dpr, w, h] };
+}
+const rgbOf = n => { const c = new THREE.Color().setStyle(css(n), THREE.LinearSRGBColorSpace); return [c.r, c.g, c.b]; };
+function glView(extra = {}) { return { ...frameBox(), top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ...extra }; }
+function paint() {
+  if (ENGINE === 'gpu') { if (gls) gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView({ showOnly: true }) }); return; }
+  const { W, H, box } = frameBox();
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, css('--stage-top')); g.addColorStop(1, css('--stage-bottom'));
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  // Fit her height (a portrait phone shows the middle of the wide frame), then the pinch zoom.
-  const s = Math.min(H / NH, W / (NW * 0.62)) * zoom.z, w = NW * s, h = NH * s;
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(net, (W - w) / 2 + zoom.tx * dpr, (H - h) / 2 + zoom.ty * dpr, w, h);
+  ctx.drawImage(net, ...box);
 }
 function show(rgba, crop) {
   netCtx.clearRect(0, 0, NW, NH);
@@ -281,13 +298,22 @@ function show(rgba, crop) {
   paint();
 }
 
-// ---------- one frame: G-buffer, read back, CPU shader, show ----------
-let shader, tiles = null;
+// ---------- one frame: G-buffer, network, show ----------
+let shader = null, gls = null, tiles = null, fence = null, gpuMs = null;
+const GL_PASSES = () => PASSES.map(([bg, mat]) => [bg, mat, () => { for (const m of shorts) m.visible = !mat; }]);
 function frameOnce(t) {
   setPose(pose, t);
   vrm.update(animated() ? Math.min(0.05, dtLast) : 0);
   placeCamera();
   const crop = raw ? [0, 0, NW, NH] : cropBox();
+  if (gls) {   // GPU: no readback; a fence per frame keeps the GPU from queueing frames behind it
+    depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+    gls.renderTiles(scene, camera, GL_PASSES(), crop);
+    for (const m of shorts) m.visible = true;
+    gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView() });
+    fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
+    return Promise.resolve();
+  }
   renderTiles(crop);
   const [x0, y0, x1, y1] = crop, w = x1 - x0, h = y1 - y0, n = w * h * 4;
   for (let k = 0; k < 5; k++) gl.readPixels(k * NW + x0, NH - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tiles.subarray(k * n, (k + 1) * n));
@@ -342,9 +368,16 @@ const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttr
 const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
 document.getElementById('m-raw').onclick = e => { raw = !raw; e.currentTarget.setAttribute('aria-pressed', String(raw)); dirty = true; };
 
+function gpuBusy() {
+  if (!fence) return false;
+  const s = gl.clientWaitSync(fence, 0, 0);
+  if (s === gl.TIMEOUT_EXPIRED) return true;
+  gl.deleteSync(fence); fence = null;
+  return false;
+}
 function loop(now) {
   requestAnimationFrame(loop);
-  if (shader.busy) return;   // one frame in flight: the next starts from the time it's actually drawn
+  if (shader ? shader.busy : gpuBusy()) return;   // one frame in flight: the next starts from the time it's actually drawn
   if (!pts.size && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) { cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true; }
   cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
   if (!animated() && !dirty) return;
@@ -353,18 +386,46 @@ function loop(now) {
   frameOnce((now - poseStart) / 1000).then(() => {
     const t1 = performance.now();
     fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
-    readout.textContent = raw ? 'raw render'
+    readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${fps.toFixed(1)} fps`
       : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
   }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
 }
 
+// Engine buttons: switching reloads with the other engine.
+const engineHash = e => { const t = location.hash.slice(1).split('-').filter(x => x && x !== 'cpu' && x !== 'gpu'); if (e === 'cpu') t.push('cpu'); return t.join('-'); };
+for (const e of ['gpu', 'cpu']) {
+  const b = document.getElementById(`e-${e}`);
+  b.setAttribute('aria-pressed', String(e === ENGINE));
+  b.onclick = () => { if (e !== ENGINE) { location.hash = engineHash(e); location.reload(); } };
+}
+
+// For checks (#tight): the GPU's drawing and tiles for one view, base64.
+window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName; lastCrop = null;
+  setPose(poseName, t); vrm.update(0); placeCamera();
+  depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+  gls.renderTiles(scene, camera, GL_PASSES(), [0, 0, NW, NH]);
+  for (const m of shorts) m.visible = true;
+  gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView() });
+  const { px, tiles } = gls.read();
+  const b64 = a => { let s = ''; for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode(...a.subarray(i, i + 0x8000)); return btoa(s); };
+  return { w: NW, h: NH, px: b64(px), tiles: tiles.map(b64) };
+};
+
 try {
-  if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
-    throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
-  const threads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
-  [shader] = await Promise.all([createCpuShader({ base: 'nts/', maxPixels: NW * NH, threads }), loadModel()]);
-  tiles = new Uint8Array(5 * NW * NH * 4);
-  assignParts(shader.parts);
+  let parts;
+  if (ENGINE === 'gpu') {
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: 'nts/' }), loadModel()]); parts = gls.parts; }
+    catch (e) { console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
+  } else {
+    if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
+      throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
+    const threads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+    [shader] = await Promise.all([createCpuShader({ base: 'nts/', maxPixels: NW * NH, threads }), loadModel()]);
+    tiles = new Uint8Array(5 * NW * NH * 4);
+    parts = shader.parts;
+  }
+  assignParts(parts);
   for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
     const b = document.createElement('button');
     b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');
