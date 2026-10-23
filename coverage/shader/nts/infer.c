@@ -3,14 +3,15 @@
  *
  *   clang --target=wasm32 -O3 -msimd128 -mbulk-memory -nostdlib -Wl,--no-entry -Wl,--export-dynamic \
  *         -Wl,--initial-memory=33554432 -o ../../live/nts/infer.wasm infer.c
- *   (the same with -mrelaxed-simd -o ../../live/nts/infer-relaxed.wasm: 8-bit dot products)
+ *   (the same with -mrelaxed-simd -o ../../live/nts/infer-relaxed.wasm: relaxed swizzle; -DNO_LUT for the
+ *   dot-product kernel, 8-bit dots with relaxed SIMD)
  *
  * It computes what shader_nts.c's forward() computes, from export_nts.py's net.bin: the input decode
  * and neural texture, the embedding, per block the engine's ternary stencil mixer (tc_one) and the
- * two ternary FFNs on int8 activation codes (quant8 + rows64_dot8: the same integer sums, here with
- * i32x4.dot_i16x8_s, or relaxed SIMD's 8-bit dot product where the browser has it; the ternary weights
- * fit its 7-bit operand) with the same GELU, then the head. A band computes each block only on the rows
- * later blocks still read, so overlapping bands give the whole-frame result.
+ * two ternary FFNs on int8 activation codes (quant8 + rows64_dot8: the same integer sums, here by
+ * table lookup, T-MAC style, or with -DNO_LUT dot products) with the same GELU, then the head. A
+ * band computes each block only on the rows later blocks still read, so overlapping bands give the
+ * whole-frame result.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -50,13 +51,35 @@ static float We[DW * CIN], WeT[CIN * DW], be[DW], Wh[4 * DW], bh[4], lo[2][FCH],
 static Block *blk;
 static const uint8_t *coarse, *fine;
 
-#ifdef __wasm_relaxed_simd__
+#ifndef NO_LUT
+#define LUT          /* -DNO_LUT: the dot-product kernel instead (same sums) */
+#endif
+#if defined(LUT)
+#define NG 22       /* groups of 3 inputs (the last padded) */
+typedef int16_t code_t;
+#elif defined(__wasm_relaxed_simd__)
 #define GROUPS 16   /* inputs per dot product: 4 */
 typedef int8_t code_t;
 #else
 #define GROUPS 32   /* 2 */
 typedef int16_t code_t;
 #endif
+#ifdef LUT
+/* Lookup-table form of a ternary row block (T-MAC style): per group of 3 inputs and 8 outputs, the
+ * byte-shuffle indices that pick each output's subset sum of the +1 inputs, then of the -1 inputs,
+ * from the group's table of 8 int16 subset sums. */
+static void pack_rows(const int8_t *c, v128_t *w) {
+    for (int g = 0; g < NG; g++) for (int q = 0; q < 8; q++) for (int s = 0; s < 2; s++) {
+        uint8_t v[16];
+        for (int o = 0; o < 8; o++) {
+            int idx = 0;
+            for (int j = 0; j < 3; j++) { int i = 3 * g + j; if (i < DW && c[(8 * q + o) * DW + i] == (s ? -1 : 1)) idx |= 1 << j; }
+            v[2 * o] = (uint8_t)(2 * idx); v[2 * o + 1] = (uint8_t)(2 * idx + 1);
+        }
+        w[(g * 8 + q) * 2 + s] = wasm_v128_load(v);
+    }
+}
+#else
 static void pack_rows(const int8_t *c, v128_t *w) {
     const int n = DW / GROUPS;
     for (int p = 0; p < GROUPS; p++) for (int q = 0; q < 16; q++) {
@@ -65,6 +88,7 @@ static void pack_rows(const int8_t *c, v128_t *w) {
         w[p * 16 + q] = wasm_v128_load(v);
     }
 }
+#endif
 /* net: export_nts.py's net.bin, which must stay alive (the coarse texture is read in place). */
 EXPORT int nts_load(const uint8_t *net, int len) {
     const uint8_t *p = net;
@@ -186,7 +210,7 @@ static inline float quant(const v128_t *x, code_t *code, int *sum) {
         v128_t b = wasm_f32x4_min(wasm_f32x4_max(wasm_f32x4_nearest(wasm_f32x4_mul(x[i + 1], S)), splat(-128.f)), splat(127.f));
         h[i / 2] = wasm_i16x8_narrow_i32x4(wasm_i32x4_trunc_sat_f32x4(a), wasm_i32x4_trunc_sat_f32x4(b));
     }
-#ifdef __wasm_relaxed_simd__
+#if defined(__wasm_relaxed_simd__) && !defined(LUT)
     for (int i = 0; i < 4; i++) wasm_v128_store(code + 16 * i, wasm_i8x16_narrow_i16x8(h[2 * i], h[2 * i + 1]));
     v128_t a = wasm_i32x4_extadd_pairwise_i16x8(h[0]);
     for (int i = 1; i < 8; i++) a = wasm_i32x4_add(a, wasm_i32x4_extadd_pairwise_i16x8(h[i]));
@@ -201,6 +225,37 @@ static inline float quant(const v128_t *x, code_t *code, int *sum) {
 /* Two passes of 8 accumulators: 16 would not stay in the 16 vector registers V8 has on x86-64.
  * Relaxed: the weights are stored + 1 (0..2: x86 runs the 7-bit operand as unsigned), so each sum
  * starts at -sum(codes), the engine's 0x80-offset correction the other way round. */
+#ifdef LUT
+/* The same integer sums by table lookup: no multiplies. Per group, its 8 subset sums of 3 codes as
+ * one int16 vector; per 8 outputs, two byte shuffles (the +1 and the -1 inputs) and an add and a
+ * subtract cover 24 multiply-adds. Sums stay within int16 (64 x 128). code: 66 entries, the last 2 zero. */
+#ifdef __wasm_relaxed_simd__
+#define SWZ wasm_i8x16_relaxed_swizzle   /* indices are always in range: the same result, one instruction on x86 */
+#else
+#define SWZ wasm_i8x16_swizzle
+#endif
+static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
+    (void)sum;
+    const v128_t M0 = wasm_i16x8_make(0, -1, 0, -1, 0, -1, 0, -1), M1 = wasm_i16x8_make(0, 0, -1, -1, 0, 0, -1, -1),
+                 M2 = wasm_i16x8_make(0, 0, 0, 0, -1, -1, -1, -1);
+    v128_t acc[8];
+    for (int q = 0; q < 8; q++) acc[q] = wasm_i16x8_splat(0);
+    for (int g = 0; g < NG; g++) {
+        v128_t T = wasm_i16x8_add(wasm_i16x8_add(wasm_v128_and(wasm_i16x8_splat(code[3 * g]), M0),
+                                                 wasm_v128_and(wasm_i16x8_splat(code[3 * g + 1]), M1)),
+                                  wasm_v128_and(wasm_i16x8_splat(code[3 * g + 2]), M2));
+        const v128_t *wg = w + g * 16;
+        for (int q = 0; q < 8; q++)
+            acc[q] = wasm_i16x8_sub(wasm_i16x8_add(acc[q], SWZ(T, wg[2 * q])), SWZ(T, wg[2 * q + 1]));
+    }
+    v128_t X = splat(xs);
+    for (int q = 0; q < 8; q++) for (int h = 0; h < 2; h++) {
+        v128_t a = h ? wasm_i32x4_extend_high_i16x8(acc[q]) : wasm_i32x4_extend_low_i16x8(acc[q]);
+        int o = 8 * q + 4 * h;
+        out[2 * q + h] = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_mul(wasm_f32x4_convert_i32x4(a), wasm_v128_load(s + o)), X), wasm_v128_load(add + o));
+    }
+}
+#else
 static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, const float *s, const float *add, v128_t *out) {
     const int32_t *grp = (const int32_t *)code;
     v128_t X = splat(xs);
@@ -220,6 +275,7 @@ static inline void rows(const v128_t *w, const code_t *code, int sum, float xs, 
             out[half + q] = wasm_f32x4_add(wasm_f32x4_mul(wasm_f32x4_mul(wasm_f32x4_convert_i32x4(acc[q]), wasm_v128_load(s + 4 * (half + q))), X), wasm_v128_load(add + 4 * (half + q)));
     }
 }
+#endif
 
 /* One token of a block: src, its 3 x 3 dilated neighbours' block inputs (0: outside, zero padding). */
 static void token(const Block *k, const float *const *src, const float *xc, float *yo) {
@@ -235,7 +291,7 @@ static void token(const Block *k, const float *const *src, const float *xc, floa
         m = madd(wasm_v128_load(&k->q[KT + 3][4 * i]), wasm_i32x4_shuffle(dw, dw, 3, 3, 3, 3), m);
         t[i] = madd(wasm_v128_load(k->gate + 4 * i), wasm_f32x4_mul(m, half), wasm_v128_load(xc + 4 * i));
     }
-    code_t code[DW] __attribute__((aligned(16)));
+    code_t code[DW + 8] __attribute__((aligned(16))) = {0};   /* past DW: the lookup kernel's zero padding */
     int sum;
     float xs = quant(t, code, &sum);
     rows(k->w1, code, sum, xs, k->s1, k->b1, hb);

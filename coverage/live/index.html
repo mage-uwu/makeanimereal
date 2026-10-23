@@ -950,7 +950,7 @@ function frame(now) {
     window.framesDrawn = (window.framesDrawn || 0) + 1;
     if (stats) { stats.drawn++; if (gpuMs != null) stats.gpu.push(gpuMs); }
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
-    const engine = cpu ? `CPU WebAssembly ${cpu.relaxed ? '8-bit' : '16-bit'} dots × ${cpu.threads} · nanotss`
+    const engine = cpu ? `CPU WebAssembly ${cpu.relaxed ? 'relaxed ' : ''}SIMD lookup tables × ${cpu.threads} · nanotss`
       : `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}${gpu.math === 'f16' ? ' maths' : ''}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
       : cpu?.ms != null ? `${engine} · ${cpu.ms.toFixed(0)} ms · ${Math.round(fps)} fps`
