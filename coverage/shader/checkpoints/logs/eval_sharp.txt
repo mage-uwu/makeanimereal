@@ -1,0 +1,1 @@
+it 0  posed held-out L1 0.0133  film held-out L1 0.0152  shift error posed 0.0132 film 0.0141  line error / edge strength posed 0.1574 / 0.49 film 0.1989 / 0.49  2s

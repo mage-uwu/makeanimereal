@@ -1,0 +1,12 @@
+it 500  loss 0.0548  held-out L1 0.0162  55s
+it 1000  loss 0.0644  held-out L1 0.0136  119s
+it 1500  loss 0.0528  held-out L1 0.0124  183s
+it 2000  loss 0.0412  held-out L1 0.0118  247s
+it 2500  loss 0.0365  held-out L1 0.0110  311s
+it 3000  loss 0.0374  held-out L1 0.0106  375s
+it 3500  loss 0.0231  held-out L1 0.0104  439s
+it 4000  loss 0.0327  held-out L1 0.0104  503s
+it 4500  loss 0.0330  held-out L1 0.0103  562s
+it 5000  loss 0.0325  held-out L1 0.0103  591s
+it 5500  loss 0.0242  held-out L1 0.0102  620s
+it 6000  loss 0.0259  held-out L1 0.0102  650s

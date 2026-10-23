@@ -1,0 +1,13 @@
+it 0  posed held-out L1 0.0217  film held-out L1 0.0132  1s
+it 250  posed held-out L1 0.0164  film held-out L1 0.0147  25s
+it 500  posed held-out L1 0.0149  film held-out L1 0.0149  50s
+it 750  posed held-out L1 0.0143  film held-out L1 0.0151  74s
+it 1000  posed held-out L1 0.0138  film held-out L1 0.0153  99s
+it 1250  posed held-out L1 0.0136  film held-out L1 0.0152  124s
+it 1500  posed held-out L1 0.0135  film held-out L1 0.0151  149s
+it 1750  posed held-out L1 0.0133  film held-out L1 0.0152  174s
+it 2000  posed held-out L1 0.0135  film held-out L1 0.0150  198s
+it 2250  posed held-out L1 0.0133  film held-out L1 0.0151  223s
+it 2500  posed held-out L1 0.0133  film held-out L1 0.0152  248s
+it 2750  posed held-out L1 0.0133  film held-out L1 0.0152  273s
+it 3000  posed held-out L1 0.0133  film held-out L1 0.0152  298s

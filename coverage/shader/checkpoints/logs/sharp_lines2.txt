@@ -1,0 +1,9 @@
+it 0  posed held-out L1 0.0123  film held-out L1 0.0172  shift error posed 0.0024 film 0.0027  line error / edge strength posed 0.1676 / 0.48 film 0.2357 / 0.45  2s
+it 250  posed held-out L1 0.0198  film held-out L1 0.0222  shift error posed 0.0046 film 0.0048  line error / edge strength posed 0.0982 / 0.50 film 0.1356 / 0.45  33s
+it 500  posed held-out L1 0.0196  film held-out L1 0.0216  shift error posed 0.0046 film 0.0050  line error / edge strength posed 0.0967 / 0.48 film 0.1306 / 0.42  63s
+it 750  posed held-out L1 0.0201  film held-out L1 0.0222  shift error posed 0.0046 film 0.0050  line error / edge strength posed 0.0946 / 0.47 film 0.1285 / 0.41  95s
+it 1000  posed held-out L1 0.0195  film held-out L1 0.0216  shift error posed 0.0045 film 0.0049  line error / edge strength posed 0.0948 / 0.46 film 0.1322 / 0.41  125s
+it 1250  posed held-out L1 0.0193  film held-out L1 0.0215  shift error posed 0.0045 film 0.0049  line error / edge strength posed 0.0941 / 0.46 film 0.1301 / 0.41  155s
+it 1500  posed held-out L1 0.0199  film held-out L1 0.0219  shift error posed 0.0047 film 0.0051  line error / edge strength posed 0.0927 / 0.46 film 0.1271 / 0.41  185s
+it 1750  posed held-out L1 0.0200  film held-out L1 0.0220  shift error posed 0.0046 film 0.0050  line error / edge strength posed 0.0925 / 0.46 film 0.1269 / 0.41  216s
+it 2000  posed held-out L1 0.0200  film held-out L1 0.0219  shift error posed 0.0047 film 0.0050  line error / edge strength posed 0.0923 / 0.46 film 0.1265 / 0.41  247s

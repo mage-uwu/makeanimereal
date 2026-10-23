@@ -1,0 +1,13 @@
+it 0  posed held-out L1 0.0133  film held-out L1 0.0152  shift error posed 0.0132 film 0.0141  2s
+it 250  posed held-out L1 0.0134  film held-out L1 0.0167  shift error posed 0.0056 film 0.0062  38s
+it 500  posed held-out L1 0.0132  film held-out L1 0.0174  shift error posed 0.0040 film 0.0044  74s
+it 750  posed held-out L1 0.0128  film held-out L1 0.0171  shift error posed 0.0038 film 0.0042  111s
+it 1000  posed held-out L1 0.0130  film held-out L1 0.0175  shift error posed 0.0031 film 0.0034  148s
+it 1250  posed held-out L1 0.0127  film held-out L1 0.0174  shift error posed 0.0027 film 0.0031  185s
+it 1500  posed held-out L1 0.0125  film held-out L1 0.0172  shift error posed 0.0026 film 0.0030  222s
+it 1750  posed held-out L1 0.0124  film held-out L1 0.0172  shift error posed 0.0026 film 0.0030  258s
+it 2000  posed held-out L1 0.0124  film held-out L1 0.0172  shift error posed 0.0025 film 0.0028  295s
+it 2250  posed held-out L1 0.0124  film held-out L1 0.0173  shift error posed 0.0023 film 0.0026  332s
+it 2500  posed held-out L1 0.0124  film held-out L1 0.0172  shift error posed 0.0023 film 0.0027  369s
+it 2750  posed held-out L1 0.0123  film held-out L1 0.0172  shift error posed 0.0024 film 0.0027  406s
+it 3000  posed held-out L1 0.0123  film held-out L1 0.0172  shift error posed 0.0024 film 0.0027  443s
