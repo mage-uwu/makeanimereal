@@ -134,21 +134,41 @@ float gelu(float v) {
 }
 float rowdot(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a += dot(c[k], W[r * 16 + k]); return a; }
 `;
-const PASS_A = (scaleOnly, M) => HEAD + BLOCK_COMMON + `${M >= 5 ? outs(5, 'uvec4') : scaleOnly ? outs(1, 'uvec4') : outs(4, 'uvec4')}
+// ablate (profiling only, benchA): steps to leave out, each replaced by the cheapest thing that keeps
+// the data flowing (so the compiler can't drop the rest): STENCIL (the pixel's own input), QUANT
+// (scale 1, no rounding), FFN (each output its own input), GELU (the identity).
+const PASS_A = (scaleOnly, M, ablate = []) => HEAD.replace('\n', '\n' + ablate.map(a => `#define NO_${a}\n`).join('')) + BLOCK_COMMON + `${M >= 5 ? outs(5, 'uvec4') : scaleOnly ? outs(1, 'uvec4') : outs(4, 'uvec4')}
 uint pack4(vec4 c) { uvec4 i = uvec4(ivec4(c) & 255); return i.x | (i.y << 8u) | (i.z << 16u) | (i.w << 24u); }
+#ifdef NO_QUANT
+#define QUANT(v) 1.0
+#else
+#define QUANT(v) quant(v)
+#endif
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   if (distAt(p) > needCur) discard;
   vec4 v[16];
+#ifdef NO_STENCIL
+  for (int L = 0; L < 16; L++) v[L] = xin(p, L);
+#else
   for (int L = 0; L < 16; L++) v[L] = stencil(p, L);
-  float xs = quant(v);
+#endif
+  float xs = QUANT(v);
   vec4 g[16];
   for (int L = 0; L < 16; L++) {
     vec4 h;
+#ifdef NO_FFN
+    for (int e = 0; e < 4; e++) h[e] = v[L][e] * s1[L][e] * xs + b1[L][e];
+#else
     for (int e = 0; e < 4; e++) h[e] = rowdot(v, 4 * L + e) * s1[L][e] * xs + b1[L][e];
+#endif
+#ifdef NO_GELU
+    g[L] = h;
+#else
     g[L] = vec4(gelu(h.x), gelu(h.y), gelu(h.z), gelu(h.w));
+#endif
   }
-  float xs2 = quant(g);
+  float xs2 = QUANT(g);
   ${M >= 5 || !scaleOnly ? `o0 = uvec4(pack4(g[0]), pack4(g[1]), pack4(g[2]), pack4(g[3]));
   o1 = uvec4(pack4(g[4]), pack4(g[5]), pack4(g[6]), pack4(g[7]));
   o2 = uvec4(pack4(g[8]), pack4(g[9]), pack4(g[10]), pack4(g[11]));
@@ -621,5 +641,35 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     renderer.resetState();
     return { px, tiles: t };
   }
-  return { renderTiles, frame, read, prof, parts: meta.parts, blocks: NB, ink: !!net.Wl };
+  // Pass A by ablation (cpu.html #profA): one block's pass A alone, reps times, with each step left out
+  // in turn; a step's cost is the time it saves. Run after a frame (it reads that frame's distances
+  // and activations; the values don't matter, only the work). Each run closed by a readback, as prof.
+  const variants = new Map();
+  function benchA({ block = 3, reps = 8 } = {}) {
+    const sets = { full: [], 'no stencil': ['STENCIL'], 'no int8 rounding': ['QUANT'], 'no FFN1': ['FFN'], 'no GELU': ['GELU'],
+      'none (fetch, pack, write)': ['STENCIL', 'QUANT', 'FFN', 'GELU'] };
+    const out = {};
+    renderer.resetState(); gl.bindVertexArray(vao);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST);
+    gl.viewport(0, 0, NW, NH); gl.enable(gl.SCISSOR_TEST); gl.scissor(crop[0], crop[1], crop[2] - crop[0], crop[3] - crop[1]);
+    gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, blkBuf, block * BLK, BLK);
+    gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * block) * WT, WT);
+    const common = u => {
+      bindTex(0, gl.TEXTURE_2D_ARRAY, X.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
+      gl.uniform1i(u.dil, DIL[block]); gl.uniform1i(u.needPrev, block ? need[block - 1] : 0); gl.uniform1i(u.needCur, need[block]);
+    };
+    for (const [name, ab] of Object.entries(sets)) {
+      const key = ab.join();
+      if (!variants.has(key)) variants.set(key, program(PASS_A(false, M, ab)));
+      const pr = variants.get(key), m = M >= 5 ? 5 : 4;
+      pass(pr, Cq, 0, m, common); sync();   // warm: the first draw compiles
+      const t0 = performance.now();
+      for (let r = 0; r < reps; r++) pass(pr, Cq, 0, m, common);
+      sync();
+      out[name] = (performance.now() - t0) / reps;
+    }
+    gl.bindVertexArray(null); renderer.resetState();
+    return out;
+  }
+  return { renderTiles, frame, read, prof, benchA, parts: meta.parts, blocks: NB, ink: !!net.Wl };
 }

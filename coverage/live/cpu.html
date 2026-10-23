@@ -116,7 +116,7 @@ import { createGuide } from './guide.js';
 // #tight: the training frame itself (the checks compare against it).
 const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('cpu') ? 'cpu' : 'gpu';
-const PROF = location.hash.includes('prof');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
+const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32;
 const status = document.getElementById('status'), readout = document.getElementById('readout');
@@ -549,7 +549,21 @@ function loop(now) {
     readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${fps.toFixed(1)} fps`
       : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
     if (PROF && gls && t1 - profShown > 2000) showProf(t1);
+    if (PROF_A && gls && !profADone) { profADone = true; setTimeout(showProfA, 50); }
   }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
+}
+// #profA: block pass A's steps by ablation (nts-gl.js benchA), once, on the frame just drawn
+let profADone = false;
+function showProfA() {
+  const block = 3, r = gls.benchA({ block, reps: 8 }), full = r.full;
+  const step = (name, without) => [name, full - r[without]];
+  const rows = [step('stencil (9 dilated taps + group mix)', 'no stencil'), step('FFN1 (64×64 ternary)', 'no FFN1'),
+    step('GELU', 'no GELU'), step('int8 rounding (×2)', 'no int8 rounding'), ['fetch, pack, write (the rest)', r['none (fetch, pack, write)']]];
+  const line = ([k, ms]) => `${ms.toFixed(2).padStart(7)} ms ${(100 * ms / full).toFixed(0).padStart(4)}%  ${k}`;
+  const text = [`block ${block} pass A (dilation ${[1, 2, 4, 8, 16, 1, 2, 4][block]}), ${NW}×${NH} frame: ${full.toFixed(2)} ms a run`,
+    ...rows.map(line), '', 'without each step:', ...Object.entries(r).map(([k, ms]) => `${ms.toFixed(2).padStart(7)} ms  ${k}`)].join('\n');
+  const el = document.getElementById('prof'); el.hidden = false; el.textContent = text;
+  window.profReport = text; console.log(text);
 }
 // #prof: the stages' average times over the last two seconds; blocks also summed by pass
 let profShown = 0;
@@ -599,7 +613,7 @@ try {
   }
   assignParts(parts);
   // Line art (toon contours, the ink branch) is off for now: the chip stays hidden and toon.js unused.
-  if (gls) gls.prof.on = PROF;
+  if (gls) gls.prof.on = PROF && !PROF_A;
   if (gls) {   // GPU engine: the edge-aware upscale
     guide = createGuide({ THREE, renderer, vertexShader: gbufVert, depthUniforms: depthMat.uniforms });
     const b = document.getElementById('m-sharp'); b.hidden = false; b.setAttribute('aria-pressed', String(sharp));
