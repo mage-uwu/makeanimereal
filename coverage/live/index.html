@@ -104,7 +104,7 @@ const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 // default) and 'full' (32/48/64/96, about 4x the work). #fast and #full pick the others.
 const ASKED = location.hash.includes('full') ? 'full' : location.hash.includes('fast') ? 'fast' : 'sharp';
 let DETAIL = ASKED;
-const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/' })[DETAIL];
+const modelDir = () => ({ full: '', fast: 'fast/', sharp: location.hash.includes('lora') ? 'lora/' : 'sharp/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
 const CROP_PAD = 64;                // > the decoder's reach in pixels, so the crop edge never shows
 const status = document.getElementById('status');
