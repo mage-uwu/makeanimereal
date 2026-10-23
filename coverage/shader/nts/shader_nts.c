@@ -312,7 +312,8 @@ static WS *ws_new(int L, int keep) {
     size_t LD = (size_t)L * DW;
     w->in = calloc((size_t)L * CIN, 4); w->uv = calloc(L, sizeof(UV));
     int nx = keep ? NB + 1 : 2;
-    for (int b = 0; b <= NB; b++) w->x[b] = b < nx ? calloc(LD, 4) : w->x[b % 2];
+    /* without backward, two buffers in turn; in line mode block NBC's output keeps its own (the colour head reads it after the branch) */
+    for (int b = 0; b <= NB; b++) w->x[b] = b < nx || (NBC && b == NBC) ? calloc(LD, 4) : w->x[b % 2];
     for (int b = 0; b < NB; b++) {
         int own = keep || b == 0;
         w->tw[b] = own ? tc_work_new(L, DW) : w->tw[0];
