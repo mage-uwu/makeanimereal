@@ -43,6 +43,11 @@ button { flex: 0 0 auto; font: inherit; font-size: .85rem; color: var(--ink); ba
   border-radius: 999px; padding: 8px 14px; min-height: 36px; cursor: pointer; touch-action: manipulation; }
 button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
 button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.say { display: flex; gap: 6px; padding: 0 max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); }
+.say[hidden] { display: none; }
+.say input { flex: 1; min-width: 0; font: inherit; font-size: 16px; color: var(--ink); background: var(--chip); border: 1px solid var(--line);
+  border-radius: 999px; padding: 7px 14px; -webkit-user-select: text; user-select: text; }
+.say input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 .readout { font-family: var(--mono); font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums;
   padding: 0 max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px));
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -51,7 +56,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 <div class="app">
   <header>
     <h1>Tree-SSM Shader</h1>
-    <p class="hint">Drawn every frame by the nanotss (Tree-SSM) shader: on the GPU in WebGL2, or on the CPU in WebAssembly. Drag to orbit, pinch to zoom, double-tap to reset.
+    <p class="hint">Drawn every frame by the nanotss (Tree-SSM) shader: on the GPU in WebGL2, or on the CPU in WebAssembly. Drag to orbit, pinch to zoom, double-tap to reset. Follow, Mic and Speak make her a VTuber.
       Motion: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset">Bandai Namco Research</a> (CC BY-NC 4.0).</p>
   </header>
   <div id="stage" aria-label="Live character view; drag to orbit">
@@ -62,11 +67,19 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     <div class="chips" id="chips" role="group" aria-label="Pose and view">
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span class="sep" id="clip-end"></span>
+      <button id="v-follow" aria-pressed="false" title="Her head and eyes follow your pointer or finger">Follow</button>
+      <button id="v-mic" aria-pressed="false" title="Lip-sync to your microphone">Mic</button>
+      <button id="v-speak" aria-pressed="false" title="Type a line for her to say">Speak</button>
+      <span class="sep"></span>
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
       <button id="e-cpu" aria-pressed="false" title="The network in WebAssembly workers">CPU</button>
     </div>
+    <form class="say" id="say" hidden>
+      <input id="say-text" type="text" placeholder="Something for her to say" maxlength="200" autocomplete="off" enterkeyhint="send">
+      <button type="submit">Say</button>
+    </form>
     <div class="readout" id="readout" aria-live="polite">–</div>
   </footer>
 </div>
@@ -298,12 +311,104 @@ function show(rgba, crop) {
   paint();
 }
 
+// ---------- VTuber: head and eyes follow the pointer, blinks, lip-sync (microphone or speech) ----------
+const face = { follow: false, ndc: null, yaw: 0, pitch: 0, blinkAt: performance.now() + 2500, mic: null, speak: null, mouth: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 } };
+const lookTarget = new THREE.Object3D(), headPos = new THREE.Vector3(), ray = new THREE.Raycaster(), plane = new THREE.Plane(), camDir = new THREE.Vector3();
+const qa = new THREE.Quaternion(), ea = new THREE.Euler();
+// Canvas position (CSS pixels) -> the network frame's NDC, through the same box the frame is drawn in.
+function pointerNdc(e) {
+  const dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect(), { box } = frameBox();
+  const fx = ((e.clientX - r.left) * dpr - box[0]) / box[2], fy = ((e.clientY - r.top) * dpr - box[1]) / box[3];
+  return new THREE.Vector2(fx * 2 - 1, 1 - fy * 2);
+}
+// After the pose is set, before vrm.update: turn neck and head toward the pointer (eased), aim the eyes,
+// blink now and then, and shape the mouth. Returns whether anything is still moving.
+function applyFace(dt) {
+  const now = performance.now();
+  let ty = 0, tp = 0;
+  if (face.follow && face.ndc) {
+    bone('head').getWorldPosition(headPos);
+    camera.getWorldDirection(camDir);
+    plane.setFromNormalAndCoplanarPoint(camDir, headPos);
+    ray.setFromCamera(face.ndc, camera);
+    if (ray.ray.intersectPlane(plane, lookTarget.position)) {
+      const d = lookTarget.position.clone().sub(headPos);
+      ty = Math.max(-1.05, Math.min(1.05, Math.atan2(d.x, d.z)));
+      tp = Math.max(-0.6, Math.min(0.6, Math.atan2(d.y, Math.hypot(d.x, d.z))));
+      if (Math.abs(Math.atan2(d.x, d.z)) > 2.3) ty = tp = 0;   // pointer behind her: look ahead
+    }
+  }
+  const k = Math.min(1, dt * 8);
+  face.yaw += (ty - face.yaw) * k; face.pitch += (tp - face.pitch) * k;
+  for (const [n, share] of [['neck', 0.4], ['head', 0.6]]) {
+    const b = bone(n); if (!b) continue;
+    b.quaternion.multiply(qa.setFromEuler(ea.set(-face.pitch * share, face.yaw * share, 0, 'YXZ')));
+  }
+  if (!(face.follow && face.ndc)) { bone('head').getWorldPosition(lookTarget.position); lookTarget.position.z += 2; }   // straight ahead
+  if (vrm.lookAt) vrm.lookAt.target = lookTarget;
+  const em = vrm.expressionManager;
+  // blink: closing and opening over 160 ms, every 2-6 s
+  const bt = now - face.blinkAt;
+  if (bt > 160) face.blinkAt = now + 2000 + Math.random() * 4000;
+  em?.setValue('blink', bt > 0 && bt < 160 ? Math.sin(Math.PI * bt / 160) : 0);
+  // mouth: the microphone or the speech, eased
+  const want = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  if (face.mic) Object.assign(want, micVowels());
+  else if (face.speak) Object.assign(want, speechVowels(now));
+  for (const v in want) { face.mouth[v] += (want[v] - face.mouth[v]) * Math.min(1, dt * 18); em?.setValue(v, face.mouth[v]); }
+  const moving = Math.abs(ty - face.yaw) > 0.002 || Math.abs(tp - face.pitch) > 0.002 || (bt > -40 && bt < 200)
+    || Object.values(face.mouth).some(x => x > 0.01) || !!face.mic || !!face.speak;
+  return moving;
+}
+// Microphone: loudness opens the mouth; where the energy sits picks the vowel (dark: ou/oh, bright: ee/ih).
+function micVowels() {
+  const { an, td, fd, sr } = face.mic;
+  an.getFloatTimeDomainData(td); an.getFloatFrequencyData(fd);
+  let e = 0; for (const x of td) e += x * x;
+  const open = Math.max(0, Math.min(1, (Math.sqrt(e / td.length) - 0.015) * 14));
+  const band = (a, b) => { let s = 0; for (let i = Math.floor(a / sr * 2 * fd.length); i < Math.min(fd.length, b / sr * 2 * fd.length); i++) s += 10 ** (fd[i] / 10); return s; };
+  const lo = band(250, 800), mid = band(800, 1600), hi = band(1600, 3200), all = lo + mid + hi + 1e-12;
+  return { aa: open * mid / all * 1.6, oh: open * lo / all * 1.2, ou: open * lo / all * 0.5, ee: open * hi / all * 1.2, ih: open * hi / all * 0.6 };
+}
+async function startMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  await ac.resume();
+  const an = ac.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0.5;
+  ac.createMediaStreamSource(stream).connect(an);
+  face.mic = { ac, an, stream, td: new Float32Array(an.fftSize), fd: new Float32Array(an.frequencyBinCount), sr: ac.sampleRate };
+}
+function stopMic() { if (!face.mic) return; face.mic.stream.getTracks().forEach(t => t.stop()); face.mic.ac.close(); face.mic = null; }
+// Speech: the browser's voice says the line; the mouth runs through the text's vowels at about 11 letters
+// a second, re-aligned at each word the voice reports.
+const VOWEL = { a: 'aa', i: 'ih', y: 'ih', u: 'ou', w: 'ou', e: 'ee', o: 'oh' };
+function speechVowels(now) {
+  const s = face.speak, i = Math.min(s.text.length - 1, s.at + Math.floor((now - s.since) / 90));
+  const v = VOWEL[s.text[i]?.toLowerCase()];
+  return v ? { [v]: 0.9 } : /[a-z]/i.test(s.text[i] || '') ? { aa: 0.15 } : {};
+}
+window.debugMouth = text => { face.speak = { text, at: 0, since: performance.now() }; dirty = true; };   // for checks: speech without a voice
+function say(text) {
+  if (!('speechSynthesis' in window) || !text.trim()) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.pitch = 1.35; u.rate = 1.05;
+  const v = speechSynthesis.getVoices().find(v => /female|samantha|kyoko|zira|aria|jenny/i.test(v.name) && v.lang.startsWith('en'));
+  if (v) u.voice = v;
+  u.onstart = () => { face.speak = { text, at: 0, since: performance.now() }; dirty = true; };
+  u.onboundary = e => { if (face.speak) { face.speak.at = e.charIndex; face.speak.since = performance.now(); } };
+  u.onend = u.onerror = () => { face.speak = null; };
+  speechSynthesis.speak(u);
+}
+
 // ---------- one frame: G-buffer, network, show ----------
 let shader = null, gls = null, tiles = null, fence = null, gpuMs = null;
 const GL_PASSES = () => PASSES.map(([bg, mat]) => [bg, mat, () => { for (const m of shorts) m.visible = !mat; }]);
+let faceMoving = false;
 function frameOnce(t) {
   setPose(pose, t);
-  vrm.update(animated() ? Math.min(0.05, dtLast) : 0);
+  faceMoving = applyFace(Math.min(0.05, dtLast));
+  vrm.update(animated() ? Math.min(0.05, dtLast) : 0.0001);   // a tiny step so expressions and gaze apply when still
   placeCamera();
   const crop = raw ? [0, 0, NW, NH] : cropBox();
   if (gls) {   // GPU: no readback; a fence per frame keeps the GPU from queueing frames behind it
@@ -340,7 +445,10 @@ stage.addEventListener('pointerdown', e => {
 stage.addEventListener('pointermove', e => {
   const p = pts.get(e.pointerId); if (!p) return;
   const dx = e.clientX - p[0], dy = e.clientY - p[1]; pts.set(e.pointerId, [e.clientX, e.clientY]);
-  if (pts.size === 1) { vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true; return; }
+  if (pts.size === 1) {
+    if (face.follow) { face.ndc = pointerNdc(e); dirty = true; return; }
+    vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true; return;
+  }
   if (pts.size === 2 && pinch) {
     const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]), m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     const r = stage.getBoundingClientRect(), cx = m[0] - r.left - r.width / 2, cy = m[1] - r.top - r.height / 2;
@@ -350,6 +458,9 @@ stage.addEventListener('pointermove', e => {
   }
 });
 const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+// Follow mode with a mouse: she watches it without a button held; a touch sets the point it moves to.
+stage.addEventListener('pointermove', e => { if (face.follow && !pts.size && e.pointerType === 'mouse') { face.ndc = pointerNdc(e); dirty = true; } });
+stage.addEventListener('pointerdown', e => { if (face.follow) { face.ndc = pointerNdc(e); dirty = true; } });
 ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => stage.addEventListener(n, up));
 stage.addEventListener('wheel', e => {   // desktop: the wheel zooms about the cursor
   e.preventDefault();
@@ -367,6 +478,22 @@ const animated = () => pose !== 'stand';
 const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
 const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
 document.getElementById('m-raw').onclick = e => { raw = !raw; e.currentTarget.setAttribute('aria-pressed', String(raw)); dirty = true; };
+document.getElementById('v-follow').onclick = e => {
+  face.follow = !face.follow; if (!face.follow) face.ndc = null;
+  e.currentTarget.setAttribute('aria-pressed', String(face.follow)); dirty = true;
+};
+document.getElementById('v-mic').onclick = async e => {
+  const b = e.currentTarget;
+  if (face.mic) { stopMic(); b.setAttribute('aria-pressed', 'false'); return; }
+  try { await startMic(); b.setAttribute('aria-pressed', 'true'); dirty = true; }
+  catch (err) { readout.textContent = `microphone unavailable: ${err.message}`; }
+};
+document.getElementById('v-speak').onclick = e => {
+  const f = document.getElementById('say'), on = f.hidden;
+  f.hidden = !on; e.currentTarget.setAttribute('aria-pressed', String(on));
+  if (on) document.getElementById('say-text').focus();
+};
+document.getElementById('say').onsubmit = e => { e.preventDefault(); say(document.getElementById('say-text').value); };
 
 function gpuBusy() {
   if (!fence) return false;
@@ -380,7 +507,7 @@ function loop(now) {
   if (shader ? shader.busy : gpuBusy()) return;   // one frame in flight: the next starts from the time it's actually drawn
   if (!pts.size && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) { cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true; }
   cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
-  if (!animated() && !dirty) return;
+  if (!animated() && !dirty && !faceMoving && performance.now() < face.blinkAt - 20) return;   // still: wake for the next blink
   dtLast = (now - lastT) / 1000; lastT = now; dirty = false;
   const t0 = performance.now();
   frameOnce((now - poseStart) / 1000).then(() => {
