@@ -51,6 +51,7 @@ def main():
     ck = torch.load(a.ckpt, map_location='cpu')
     sd, parts = dict(ck['model']), ck['parts']
     sharp = 'sr' in ck  # train_sr.py: decoder at half resolution, plus a full-resolution head
+    light = ck.get('light', 0)  # train_light.py: light channels after the 18 inputs, at both resolutions
     if sharp:
         sd.update({f'sr.{k}': v.detach() for k, v in ck['sr'].items()})
     P = len(parts)
@@ -91,7 +92,7 @@ def main():
     g, bb = sd['dec.film.bias'].float().chunk(2)  # appearance code 0: FiLM is a fixed per-channel affine
     layers = []
     w = list(ck.get('widths', (32, 48, 64, 96)))
-    chans = {'x': 18, 'd0': w[0], 'd1': w[1], 'd2': w[2], 'd3': w[3], 'u0': w[2], 'u1': w[1], 'u2': w[0]}
+    chans = {'x': 18 + light, 'd0': w[0], 'd1': w[1], 'd2': w[2], 'd3': w[3], 'u0': w[2], 'u1': w[1], 'u2': w[0]}
     prev = 'x'
     for k, name in enumerate(['d0', 'd1', 'd2', 'd3']):
         src = prev if k == 0 else f'{prev}_pool'
@@ -105,7 +106,7 @@ def main():
         layers.append(conv(f'{name}b', f'dec.up.{k}.2', [f'{name}_mid'], 'gelu', name))
         h = name
     if sharp:
-        chans['xf'] = 18
+        chans['xf'] = 18 + light
         layers.append(conv('srh', 'sr.conv', ['u2', 'xf'], 'gelu', 'srh'))
         layers.append(conv('srhead', 'sr.head', ['srh', 'xf'], 'sigmoid', 'rgba'))
     else:
@@ -117,23 +118,35 @@ def main():
             'u0_mid': [90, 160], 'u0': [90, 160], 'u1_mid': [180, 320], 'u1': [180, 320], 'u2_mid': [360, 640], 'u2': [360, 640],
             'xf': full, 'srh': full, 'rgba': full}
     meta = {'parts': parts, 'tile': T, 'cols': COLS, 'rows': ROWS, 'feat_lo': lo.tolist(), 'feat_hi': hi.tolist(),
-            'channels': chans, 'size': [360, 640], 'full': full, 'sharp': sharp, 'dims': dims, 'layers': layers,
+            'channels': chans, 'light': light, 'size': [360, 640], 'full': full, 'sharp': sharp, 'dims': dims, 'layers': layers,
             'pools': {'d0_pool': 'd0', 'd1_pool': 'd1', 'd2_pool': 'd2'}}
     (out / 'shader.json').write_text(json.dumps(meta))
 
     # Reference output for one held-out frame, through the exported (baked, quantised) texture.
     model = train.Shader(P, sd['codes.weight'].shape[0], ck['arch'], widths=tuple(w))
+    if light:
+        c0 = model.dec.down[0][0]
+        model.dec.down[0][0] = torch.nn.Conv2d(18 + light, c0.out_channels, c0.kernel_size, padding=c0.padding)
     model.load_state_dict(ck['model'])
     if sharp:
         import train_sr
         model = train_sr.Sharp(model, w[0], ck['sr_width'])
+        if light:
+            model.conv = torch.nn.Conv2d(w[0] + 18 + light, ck['sr_width'], 3, padding=1)
+            model.head = torch.nn.Conv2d(ck['sr_width'] + 18 + light, 4, 1)
         model.conv.load_state_dict({k[len('sr.conv.'):]: v for k, v in sd.items() if k.startswith('sr.conv.')})
         model.head.load_state_dict({k[len('sr.head.'):]: v for k, v in sd.items() if k.startswith('sr.head.')})
     model.eval()
     meta_d, x, y, pitch = train.load(a.data[0])
     i = 5
     with torch.no_grad():
-        pred = model(torch.from_numpy(x[i:i + 1].astype(np.float32)), torch.from_numpy(pitch[i:i + 1]))[0]
+        xi, pi = torch.from_numpy(x[i:i + 1].astype(np.float32)), torch.from_numpy(pitch[i:i + 1])
+        if light:  # under the films' own light
+            import train_light
+            lp = torch.from_numpy(train_light.light_params(meta_d['frames'][i])[None])
+            pred = train_light.lit_forward(model, xi, pi, None, lp)[0]
+        else:
+            pred = model(xi, pi)[0]
     rgba = (pred.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
     Image.fromarray(rgba, 'RGBA').save(out / 'reference.png')
     (out / 'reference.json').write_text(json.dumps({'frame': meta_d['frames'][i]}))

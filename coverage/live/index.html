@@ -63,11 +63,13 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     </div>
     <div class="group" role="group" aria-label="Light">
       <span class="label">Light</span>
-      <button data-light="off" aria-pressed="true">Off</button>
+      <button data-light="studio" aria-pressed="true">Studio</button>
       <button data-light="side" aria-pressed="false">Side</button>
       <button data-light="sunset" aria-pressed="false">Sunset</button>
       <button data-light="back" aria-pressed="false">Backlit</button>
+      <button data-light="noon" aria-pressed="false">Noon</button>
       <button data-light="night" aria-pressed="false">Night</button>
+      <button data-light="neon" aria-pressed="false">Neon</button>
     </div>
     <div class="group" role="group" aria-label="Detail">
       <span class="label">Detail</span>
@@ -685,7 +687,7 @@ stage.addEventListener('pointermove', e => {
   if (!dragging) return;
   const dx = e.clientX - last[0], dy = e.clientY - last[1]; last = [e.clientX, e.clientY];
   if (e.shiftKey && lightAt) {
-    lightAt.yaw -= dx * 0.6; lightAt.pitch = Math.max(-80, Math.min(85, lightAt.pitch - dy * 0.4)); dirty = true;
+    lightAt.yaw -= dx * 0.6; lightAt.pitch = Math.max(-80, Math.min(85, lightAt.pitch - dy * 0.4)); applyLight(); dirty = true;
     return;
   }
   vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true;
@@ -737,37 +739,52 @@ document.getElementById('m-raw').onclick = e => { mode = 1; setPressed('#m-shade
 function showDetail() {
   for (const d of ['fast', 'sharp', 'full', 'smooth', 'crisp']) document.getElementById(`d-${d}`).setAttribute('aria-pressed', String(d === DETAIL));
   for (const d of ['sharp', 'smooth', 'crisp']) document.getElementById(`d-${d}`).disabled = !gpuAdapter;
+  for (const b of document.querySelectorAll('[data-light]')) b.disabled = !gpu?.light;
 }
 for (const d of ['fast', 'sharp', 'full', 'smooth', 'crisp']) document.getElementById(`d-${d}`).onclick = () => {
   if (d === DETAIL) return;
   location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full', 'smooth', 'crisp', 'sharp'].includes(t)), ...(d === 'crisp' ? [] : [d])].join('-');
   location.reload();
 };
-// Toon cross-shading (WebGPU display pass): a cel key light and a rim light from the G-buffer's
-// normals, multiplied onto the drawing. Presets set colours and where the light sits around her
-// (yaw 0 is in front of her, degrees); shift-drag moves it.
+// Lighting: the network draws her under the scene's light (shaders trained with light channels,
+// train_light.py). A preset sets the sun (where it sits around her: yaw 0 in front of her, degrees),
+// its colour and strength, and the ambient's; the colour pass is lit by it and the network gets the
+// light's direction and colours. Studio is the films' own light. Shift-drag moves the sun.
 const LIGHTS = {
-  off: null,
-  side: { yaw: -70, pitch: 25, key: [1.08, 1.04, 1.0], shade: [0.62, 0.64, 0.82], soft: 0.06, at: 0.05, rim: [0, 0, 0], fall: 4 },
-  sunset: { yaw: 60, pitch: 8, key: [1.1, 0.96, 0.84], shade: [0.56, 0.5, 0.74], soft: 0.06, at: 0.1, rim: [0.5, 0.3, 0.15], fall: 3 },
-  back: { yaw: 170, pitch: 30, key: [1.05, 1.05, 1.05], shade: [0.7, 0.72, 0.88], soft: 0.08, at: 0.0, rim: [1.1, 1.05, 1.0], fall: 2 },
-  night: { yaw: -35, pitch: 45, key: [0.78, 0.86, 1.12], shade: [0.3, 0.33, 0.55], soft: 0.06, at: 0.15, rim: [0.2, 0.3, 0.6], fall: 3 },
+  studio: null,
+  side: { yaw: -80, pitch: 25, color: [1, 0.97, 0.92], intensity: 3.2, amb: 0.45, ambColor: [1, 1, 1] },
+  sunset: { yaw: 70, pitch: 8, color: [1, 0.72, 0.45], intensity: 3.1, amb: 0.5, ambColor: [0.6, 0.62, 1] },
+  back: { yaw: 175, pitch: 30, color: [1, 1, 1], intensity: 3.5, amb: 0.42, ambColor: [0.85, 0.88, 1] },
+  noon: { yaw: 0, pitch: 75, color: [1, 0.98, 0.9], intensity: 2.9, amb: 0.6, ambColor: [0.9, 0.95, 1] },
+  night: { yaw: -60, pitch: 50, color: [0.7, 0.82, 1.15], intensity: 2.3, amb: 0.35, ambColor: [0.5, 0.55, 0.95] },
+  neon: { yaw: 90, pitch: 5, color: [1, 0.45, 0.85], intensity: 3.1, amb: 0.42, ambColor: [0.7, 0.6, 1] },
 };
-let lightName = 'off', lightAt = null;
-const lightBuf = new Float32Array(16), lv = new THREE.Vector3();
-function lightParams() {
+let lightName = 'studio', lightAt = null;
+const lighting = new Float32Array(9), lv = new THREE.Vector3();
+function applyLight() {
   const L = LIGHTS[lightName];
-  if (!L) return null;
-  const y = THREE.MathUtils.degToRad(lightAt.yaw), p = THREE.MathUtils.degToRad(lightAt.pitch);
-  lv.set(Math.sin(y) * Math.cos(p), Math.sin(p), Math.cos(y) * Math.cos(p)).transformDirection(camera.matrixWorldInverse);
-  lightBuf.set([lv.x, lv.y, lv.z, 1, ...L.key, L.soft, ...L.shade, L.at, ...L.rim, L.fall]);
-  return lightBuf;
+  if (!L) {
+    sun.position.set(1, 3, 2); sun.color.setRGB(1, 1, 1); sun.intensity = 2.2; ambient.intensity = 1.2; ambient.color.setRGB(1, 1, 1);
+  } else {
+    const y = THREE.MathUtils.degToRad(lightAt.yaw), p = THREE.MathUtils.degToRad(lightAt.pitch);
+    sun.position.set(Math.sin(y) * Math.cos(p) * 3, Math.sin(p) * 3, Math.cos(y) * Math.cos(p) * 3);
+    sun.color.setRGB(...L.color); sun.intensity = L.intensity; ambient.intensity = L.amb; ambient.color.setRGB(...L.ambColor);
+  }
+}
+// The network's light inputs for this frame (after placeCamera): train_light.py light_params.
+function lightingParams() {
+  lv.copy(sun.position).normalize().transformDirection(camera.matrixWorldInverse);
+  const k = sun.intensity / 2.2, a = ambient.intensity / 1.2;
+  lighting.set([lv.x, lv.y, lv.z, sun.color.r * k, sun.color.g * k, sun.color.b * k, ambient.color.r * a, ambient.color.g * a, ambient.color.b * a]);
+  return lighting;
 }
 document.querySelectorAll('[data-light]').forEach(b => b.onclick = () => {
   lightName = b.dataset.light; lightAt = LIGHTS[lightName] && { yaw: LIGHTS[lightName].yaw, pitch: LIGHTS[lightName].pitch };
-  setPressed('[data-light]', b); dirty = true;
+  applyLight(); setPressed('[data-light]', b); dirty = true;
 });
-window.debugLighting = (name, at) => { lightName = name; lightAt = LIGHTS[name] && (at || { yaw: LIGHTS[name].yaw, pitch: LIGHTS[name].pitch }); };
+window.debugLighting = (name, at) => {
+  lightName = name; lightAt = LIGHTS[name] && (at || { yaw: LIGHTS[name].yaw, pitch: LIGHTS[name].pitch }); applyLight();
+};
 const wirePose = b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
 };
@@ -782,7 +799,7 @@ function drawFrame() {
     const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
     if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
     const top = css('--stage-top'), bottom = css('--stage-bottom');
-    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, light: mode === 0 ? lightParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
+    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, lighting: gpu.light ? lightingParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
       noShow: location.hash.includes('noshow') });
     gpuMs = gpu.gpuMs;
     return crop;
@@ -865,7 +882,7 @@ window.debugShow = async (yaw, pitch, poseName = 'stand', t = 0) => {
   cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
   setPose(poseName, t); vrm.update(0);
   const crop = drawFrame();
-  const r = await gpu.readShow({ crop, light: lightParams() });
+  const r = await gpu.readShow({ crop });
   const c = document.createElement('canvas'); c.width = r.w; c.height = r.h;
   const id = c.getContext('2d').createImageData(r.w, r.h); id.data.set(r.data);
   c.getContext('2d').putImageData(id, 0, 0);

@@ -42,8 +42,10 @@ export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = f
   // (xf) and draws at full resolution.
   const dimsOf = name => net.dims?.[name] ?? [NW / div[name.replace(/_mid$/, '')], NH / div[name.replace(/_mid$/, '')]];
   const [GW, GH] = net.sharp ? net.full : [NW, NH];  // the G-buffer's size
-  T.x = tensor(NW, NH, 5);
-  if (net.sharp) T.xf = tensor(GW, GH, 5);
+  const LIT = net.light || 0;  // light channels after the 18 inputs (train_light.py)
+  const XL = Math.ceil((18 + LIT) / 4);
+  T.x = tensor(NW, NH, XL);
+  if (net.sharp) T.xf = tensor(GW, GH, XL);
   for (const l of net.layers) { const [w, h] = dimsOf(l.out); T[l.out] = tensor(w, h, Math.ceil(l.cout / 4)); }
   for (const [pool, src] of Object.entries(net.pools)) T[pool] = tensor(T[src].w / 2, T[src].h / 2, T[src].layers);
   const [OW, OH] = [T.rgba.w, T.rgba.h];
@@ -108,7 +110,8 @@ fn cropOf(w: i32, h: i32) -> vec4<i32> {
   // ---- pack: G-buffer atlas -> an input tensor, at the G-buffer's size (down 1) or half of it (down 2:
   // 2 x 2 averages for colour, normal and depth, the top-left texel's UV, part and coverage, as train_sr.py) ----
   const packPipeFor = (down) => pipe(`
-struct PP { sinP: f32, cosP: f32, tile: f32, cols: f32, rows: f32, pad0: f32, pad1: f32, pad2: f32, lo0: vec4<f32>, lo1: vec4<f32>, hi0: vec4<f32>, hi1: vec4<f32> };
+struct PP { sinP: f32, cosP: f32, tile: f32, cols: f32, rows: f32, pad0: f32, pad1: f32, pad2: f32, lo0: vec4<f32>, lo1: vec4<f32>, hi0: vec4<f32>, hi1: vec4<f32>,
+  ldir: vec4<f32>, key: vec4<f32>, amb: vec4<f32> };
 @group(0) @binding(0) var<uniform> pp: PP;
 @group(0) @binding(1) var<uniform> crop: vec4<i32>;
 @group(0) @binding(2) var gb: texture_2d<f32>;
@@ -149,9 +152,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   X[i + L] = vec4<S>(vec4<f32>(n.y, n.z, d, mask));
   X[i + 2 * L] = vec4<S>((pp.lo0 + vec4<f32>(s0, s1.r) * (pp.hi0 - pp.lo0)) * mask);
   X[i + 3 * L] = vec4<S>((pp.lo1 + vec4<f32>(s1.g, s1.b, s2.r, s2.g) * (pp.hi1 - pp.lo1)) * mask);
-  X[i + 4 * L] = vec4<S>(vec4<f32>(pp.sinP, pp.cosP, 0.0, 0.0));
+${LIT ? `  // Light: cos(light, surface), key colour, ambient colour, on her (train_light.py light_channels).
+  let nn = n / max(length(n), 1e-3);
+  let ndl = dot(nn, pp.ldir.xyz) * mask;
+  X[i + 4 * L] = vec4<S>(vec4<f32>(pp.sinP, pp.cosP, ndl, pp.key.r * mask));
+  X[i + 5 * L] = vec4<S>(vec4<f32>(pp.key.g, pp.key.b, pp.amb.r, pp.amb.g) * mask);
+  X[i + 6 * L] = vec4<S>(vec4<f32>(pp.amb.b * mask, 0.0, 0.0, 0.0));` : `  X[i + 4 * L] = vec4<S>(vec4<f32>(pp.sinP, pp.cosP, 0.0, 0.0));`}
 }`);
-  const packParams = new Float32Array(24);
+  const packParams = new Float32Array(36);
   packParams.set([0, 1, net.tile, net.cols, net.rows, 0, 0, 0], 0);
   packParams.set(net.feat_lo.slice(0, 4), 8); packParams.set(net.feat_lo.slice(4, 8), 12);
   packParams.set(net.feat_hi.slice(0, 4), 16); packParams.set(net.feat_hi.slice(4, 8), 20);
@@ -297,8 +305,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   // ---- display ----
   const showMod = device.createShaderModule({ code: head + `
-struct V { box: vec4<f32>, crop: vec4<f32>, top: vec4<f32>, bottom: vec4<f32>, view: vec2<f32>, mode: f32, pad: f32,
-  key: vec4<f32>, keyCol: vec4<f32>, shade: vec4<f32>, rim: vec4<f32> };
+struct V { box: vec4<f32>, crop: vec4<f32>, top: vec4<f32>, bottom: vec4<f32>, view: vec2<f32>, mode: f32, pad: f32 };
 @group(0) @binding(0) var<uniform> v: V;
 @group(0) @binding(1) var<storage, read> R: array<vec4<S>>;
 @group(0) @binding(2) var gb: texture_2d<f32>;
@@ -323,41 +330,11 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
   if (qc.x < v.crop.x || qc.y < v.crop.y || qc.x > v.crop.z || qc.y > v.crop.w) { return vec4<f32>(bg, 1.0); }
   let i = vec2<i32>(floor(q)); let f = q - floor(q);
   let d = mix(mix(px(i.x, i.y), px(i.x + 1, i.y), f.x), mix(px(i.x, i.y + 1), px(i.x + 1, i.y + 1), f.x), f.y);
-  var c = d.rgb;
-  if (v.key.w > 0.5) { c = c * light(p); }
-  return vec4<f32>(mix(bg, c, d.a), 1.0);  // the canvas is not sRGB: values go out as drawn
-}
-// Toon cross-shading: a cel key light (soft-edged N.L threshold) between the light's colour and a
-// shadow tint, plus a rim light, from the G-buffer's view-space normals. Multiplied onto the drawing.
-fn normalAt(g: vec2<i32>) -> vec4<f32> {
-  let e = textureLoad(gb, vec2<i32>(${GW} + clamp(g.x, 0, ${GW - 1}), clamp(g.y, 0, ${GH - 1})), 0).rgb;
-  return vec4<f32>(e * 2.0 - 1.0, step(0.02, e.r + e.g + e.b));
-}
-fn light(p: vec2<f32>) -> vec3<f32> {
-  let g = p * vec2<f32>(${GW}.0, ${GH}.0) - 0.5;
-  let gi = vec2<i32>(floor(g)); let gf = g - floor(g);
-  // Bilinear over the covered texels only, so the silhouette doesn't pick up the background.
-  var n = vec3<f32>(0.0); var w = 0.0;
-  for (var k = 0; k < 4; k++) {
-    let o = vec2<i32>(k & 1, k >> 1);
-    let s = normalAt(gi + o);
-    let wk = select(1.0 - gf.x, gf.x, o.x == 1) * select(1.0 - gf.y, gf.y, o.y == 1) * s.w;
-    n += s.xyz * wk; w += wk;
-  }
-  if (w < 1e-3) { return vec3<f32>(1.0); }
-  n = normalize(n);
-  let ndl = dot(n, normalize(v.key.xyz));
-  let lit = smoothstep(v.shade.w - v.keyCol.w, v.shade.w + v.keyCol.w, ndl);
-  var c = mix(v.shade.rgb, v.keyCol.rgb, lit);
-  // Rim: grazing to the camera and on the light's side (or any side for a back light).
-  let edge = pow(clamp(1.0 - n.z, 0.0, 1.0), v.rim.w);
-  let side = smoothstep(-0.2, 0.3, dot(normalize(n.xy + vec2<f32>(1e-4)), normalize(v.key.xy + vec2<f32>(1e-4))));
-  c += v.rim.rgb * edge * side;
-  return c;
+  return vec4<f32>(mix(bg, d.rgb, d.a), 1.0);  // the canvas is not sRGB: values go out as drawn
 }` });
   const showPipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: showMod, entryPoint: 'vs' },
     fragment: { module: showMod, entryPoint: 'fs', targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
-  const showBuf = buf(160, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  const showBuf = buf(96, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
   const showGroup = device.createBindGroup({ layout: showPipe.getBindGroupLayout(0), entries: [
     { binding: 0, resource: { buffer: showBuf } }, { binding: 1, resource: { buffer: T.rgba.buf } },
     { binding: 2, resource: gbuf.createView() }] });
@@ -368,12 +345,13 @@ fn light(p: vec2<f32>) -> vec3<f32> {
   let qBusy = false, gpuMs = null;
 
   // One frame: copy the G-buffer canvas in, run the network on the crop, draw.
-  // light: 16 floats (key direction in view space + on, key colour + edge softness, shadow tint + threshold,
-  // rim colour + falloff), or null for the drawing as it is.
-  function frame({ source, crop, pitch, mode, top, bottom, light = null, limit = Infinity, noCopy = false, noShow = false }) {
+  // lighting (models with light channels): 9 floats, the light's view-space direction, key colour x strength
+  // and ambient colour x strength relative to the films' light (train_light.py light_params).
+  function frame({ source, crop, pitch, mode, top, bottom, lighting = null, limit = Infinity, noCopy = false, noShow = false }) {
     if (!noCopy) device.queue.copyExternalImageToTexture({ source }, { texture: gbuf }, [GW * TILES, GH]);
     device.queue.writeBuffer(cropBuf, 0, new Int32Array(crop));
     packParams[0] = Math.sin(pitch); packParams[1] = Math.cos(pitch);
+    if (lighting) { packParams.set(lighting.slice(0, 3), 24); packParams.set(lighting.slice(3, 6), 28); packParams.set(lighting.slice(6, 9), 32); }
     device.queue.writeBuffer(packBuf, 0, packParams);
     const enc = device.createCommandEncoder();
     if (mode === 0) {
@@ -396,7 +374,7 @@ fn light(p: vec2<f32>) -> vec3<f32> {
     if (noShow) { device.queue.submit([enc.finish()]); return; }  // checks: headless browsers can't present
     const W = canvas.width, H = canvas.height;
     const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
-    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0, ...(light || new Float32Array(16))]));
+    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
     const rp = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
     rp.setPipeline(showPipe); rp.setBindGroup(0, showGroup); rp.draw(3); rp.end();
     device.queue.submit([enc.finish()]);
@@ -427,10 +405,10 @@ fn light(p: vec2<f32>) -> vec3<f32> {
 
   // The display pass drawn offscreen and read back (checks: headless browsers can't present), after a
   // frame(): W must be a multiple of 64. Returns RGBA bytes.
-  async function readShow({ crop, mode = 0, light = null, top = [1, 1, 1], bottom = [1, 1, 1], W = 512, H = 910 }) {
+  async function readShow({ crop, mode = 0, top = [1, 1, 1], bottom = [1, 1, 1], W = 512, H = 910 }) {
     const tex = device.createTexture({ size: [W, H], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
-    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0, ...(light || new Float32Array(16))]));
+    device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
     const read = buf(W * H * 4, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
     const enc = device.createCommandEncoder();
     const rp = enc.beginRenderPass({ colorAttachments: [{ view: tex.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
@@ -444,7 +422,7 @@ fn light(p: vec2<f32>) -> vec3<f32> {
     return { w: W, h: H, data: px };
   }
 
-  return { frame, readTensor, readShow, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
+  return { frame, readTensor, readShow, light: LIT, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 
 function halfToFloat(h) {
