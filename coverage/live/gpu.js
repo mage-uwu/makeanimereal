@@ -10,7 +10,7 @@
 
 const PX = 4, G = 4, TILES = 5;
 
-export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false, skipEmpty = true, profile = false }) {
+export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false, skipEmpty = true, profile = false, math = 'auto' }) {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) return null;
@@ -178,7 +178,12 @@ ${LIT ? `  // Light: cos(light, surface), key colour, ambient colour, on her (tr
   });
 
   // ---- convolution ----
-  const convPipe = pipe(`
+  // math: 'f32' multiplies in f32; 'f16' (with shader-f16) multiplies in f16, summing each input
+  // chunk's 9 taps x 4 channels in f16 and the chunks in f32; 'emu' is the f16 scheme in f32 with
+  // every value rounded to f16 where 'f16' would round it (to check the precision without f16).
+  const convCode = math => `
+alias M = ${math === 'f16' ? 'f16' : 'f32'};
+${math === 'emu' ? 'fn Q(x: vec4<f32>) -> vec4<f32> { return vec4<f32>(unpack2x16float(pack2x16float(x.xy)), unpack2x16float(pack2x16float(x.zw))); }' : ''}
 struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wbase: i32, row0: i32, groups: i32, act: i32, skip: i32 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<uniform> crop: vec4<i32>;
@@ -213,7 +218,7 @@ fn gelu(x: vec4<f32>) -> vec4<f32> {
 // then every thread reads its taps from workgroup memory.
 const TW = ${8 * PX + 2};
 const TH = 10;
-var<workgroup> tile: array<vec4<f32>, ${(8 * PX + 2) * 10}>;
+var<workgroup> tile: array<vec4<M>, ${(8 * PX + 2) * 10}>;
 var<workgroup> anyMask: u32;
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
@@ -253,23 +258,28 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
   for (var l = 0; l < p.L; l++) {
     for (var i = li; i < TW * TH; i += 64) {
       let gx = ox0 - 1 + i % TW; let gy = oy0 - 1 + i / TW;
-      if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H) { tile[i] = loadIn(l, gx, gy); } else { tile[i] = vec4<f32>(0.0); }
+      if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H) { tile[i] = vec4<M>(${math === 'emu' ? 'Q(loadIn(l, gx, gy))' : 'loadIn(l, gx, gy)'}); } else { tile[i] = vec4<M>(0.0); }
     }
     workgroupBarrier();
     if (inside) {
+      // This input chunk's taps, summed in M, then added to the f32 sums.
+      var part: array<array<vec4<M>, ${G}>, ${PX}>;
+      for (var k = 0; k < ${G}; k++) { for (var q = 0; q < ${PX}; q++) { part[q][k] = vec4<M>(0.0); } }
       for (var t = 0; t < p.T; t++) {
         let dy = t / p.K - r; let dx = t % p.K - r;
         let rowBase = (ly + 1 + dy) * TW + lx * ${PX} + 1 + dx;
-        var v: array<vec4<f32>, ${PX}>;
+        var v: array<vec4<M>, ${PX}>;
         for (var q = 0; q < ${PX}; q++) { v[q] = tile[rowBase + q]; }
         for (var k = 0; k < ng; k++) {
           let wi = p.wbase + (((g0 + k) * p.L + l) * p.T + t) * 4;
-          let w0 = vec4<f32>(Wt[wi]); let w1 = vec4<f32>(Wt[wi + 1]); let w2 = vec4<f32>(Wt[wi + 2]); let w3 = vec4<f32>(Wt[wi + 3]);
+          let w0 = vec4<M>(Wt[wi]); let w1 = vec4<M>(Wt[wi + 1]); let w2 = vec4<M>(Wt[wi + 2]); let w3 = vec4<M>(Wt[wi + 3]);
           for (var q = 0; q < ${PX}; q++) {
-            acc[q][k] += vec4<f32>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]));
+            ${math === 'emu' ? 'part[q][k] = Q(part[q][k] + Q(vec4<f32>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]))));'
+              : 'part[q][k] += vec4<M>(dot(w0, v[q]), dot(w1, v[q]), dot(w2, v[q]), dot(w3, v[q]));'}
           }
         }
       }
+      for (var k = 0; k < ng; k++) { for (var q = 0; q < ${PX}; q++) { acc[q][k] += vec4<f32>(part[q][k]); } }
     }
     workgroupBarrier();
   }
@@ -285,7 +295,11 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
       O[((g0 + k) * p.H + y) * p.W + x] = vec4<S>(a * sc + sh);
     }
   }
-}`);
+}`;
+  const convPipes = {};
+  const mathModes = math === 'emu' ? ['emu', 'f32'] : f16 && math !== 'f32' ? ['f16', 'f32'] : ['f32'];
+  for (const m of mathModes) convPipes[m] = pipe(convCode(m));
+  let mathMode = mathModes[0];
 
   const poolPipe = pipe(`
 struct Q { W: i32, H: i32, layers: i32, pad: i32 };
@@ -311,12 +325,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     const out = T[l.out], A = T[l.inputs[0]], B = T[l.inputs[1] ?? l.inputs[0]];
     const skip = skipEmpty && net.sharp && (l.name === 'srh' || l.name === 'srhead') ? 1 : 0;
     const params = uniform(new Int32Array([out.w, out.h, A.w, A.h, l.la, l.L, l.T, l.k, l.wbase, l.row, l.groups, l.act === 'gelu' ? 1 : 2, skip]));
-    const group = device.createBindGroup({ layout: convPipe.getBindGroupLayout(0), entries: [
+    const groups = {};
+    for (const m of mathModes) groups[m] = device.createBindGroup({ layout: convPipes[m].getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: params } }, { binding: 1, resource: { buffer: cropBuf } },
       { binding: 2, resource: { buffer: A.buf } }, { binding: 3, resource: { buffer: B.buf } },
       { binding: 4, resource: { buffer: out.buf } }, { binding: 5, resource: { buffer: wBuf } },
       { binding: 6, resource: { buffer: affBuf } }] });
-    steps.push({ name: l.name, pipe: convPipe, group, out, z: Math.ceil(l.groups / G), px: PX });
+    steps.push({ name: l.name, conv: true, pipes: convPipes, groups, out, z: Math.ceil(l.groups / G), px: PX,
+      get pipe() { return this.pipes[mathMode]; }, get group() { return this.groups[mathMode]; } });
     const pooled = Object.entries(net.pools).find(([, src]) => src === l.out);
     if (pooled) {
       const dst = T[pooled[0]];
@@ -498,7 +514,8 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     return rows.sort((a, b) => b.ms - a.ms);
   }
 
-  return { frame, readTensor, readShow, layerTimes, light: LIT, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
+  return { frame, readTensor, readShow, layerTimes, light: LIT, mathModes,
+    get math() { return mathMode; }, set math(m) { if (convPipes[m]) mathMode = m; }, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 
 function halfToFloat(h) {

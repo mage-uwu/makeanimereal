@@ -883,7 +883,7 @@ function frame(now) {
     window.framesDrawn = (window.framesDrawn || 0) + 1;
     if (stats) { stats.drawn++; if (gpuMs != null) stats.gpu.push(gpuMs); }
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
-    const engine = `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}` : 'WebGL'} · ${DETAIL}`;
+    const engine = `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}${gpu.math === 'f16' ? ' maths' : ''}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
       : gpuMs != null ? `${engine} · ${gpuMs.toFixed(1)} ms GPU · ${Math.round(fps)} fps` : `${engine} · ${Math.round(fps)} fps`;
     dirty = false;
@@ -1012,6 +1012,30 @@ window.debugTensor = async (name, layer) => {
   return { w: t.w, h: t.h, data: Array.from(data) };
 };
 
+// The half-precision maths self-check: draw one frame with f16 multiplies and one in f32, and keep f16
+// only if they agree on her (mean difference under 0.004). Logs the numbers.
+async function checkMath() {
+  if (gpu.mathModes.length < 2) return;
+  const fast = gpu.mathModes[0], out = {};
+  for (const m of [fast, 'f32']) {
+    gpu.math = m; lastCrop = null; setPose('stand', 0); vrm.update(0);
+    placeCamera();
+    const crop = cropBox(true);
+    renderGBufferTiles(crop);
+    gpu.frame({ source: glCanvas, crop, rect: gbufRect(crop), pitch: THREE.MathUtils.degToRad(cam.pitch), mode: 0, lighting: gpu.light ? lightingParams() : null, top: [1, 1, 1], bottom: [1, 1, 1], noShow: true });
+    out[m] = (await gpu.readTensor('rgba', 0)).data;
+  }
+  let sum = 0, n = 0, worst = 0;
+  for (let i = 0; i < out.f32.length; i += 4) {
+    if (Math.max(out.f32[i + 3], out[fast][i + 3]) < 0.02) continue;
+    for (let c = 0; c < 4; c++) { const d = Math.abs(out.f32[i + c] - out[fast][i + c]); sum += d; n++; worst = Math.max(worst, d); }
+  }
+  const mean = sum / Math.max(n, 1);
+  gpu.math = mean < 0.004 ? fast : 'f32';
+  console.log(`[math] ${fast} vs f32 multiplies on her: mean difference ${mean.toFixed(5)}, worst ${worst.toFixed(3)}: using ${gpu.math}`);
+  window.mathCheck = { mode: gpu.math, mean, worst };
+}
+
 // WebGPU path: the network, its neural texture and the device (coverage/live/gpu.js).
 async function loadGpu() {
   const net = await (await fetch(`${modelDir()}shader.json`)).json();
@@ -1019,7 +1043,8 @@ async function loadGpu() {
   parts = net.parts;
   const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${modelDir()}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
-  gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32'), skipEmpty: !location.hash.includes('noskip'), profile: location.hash.includes('gpuprof') });
+  gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32'), skipEmpty: !location.hash.includes('noskip'), profile: location.hash.includes('gpuprof'),
+    math: location.hash.includes('emu16') ? 'emu' : location.hash.includes('f32math') ? 'f32' : 'auto' });
   if (!gpu) throw new Error('WebGPU device unavailable');
   renderer.setPixelRatio(1);
   renderer.setSize(GBW * 5, GBH, false);
@@ -1033,6 +1058,7 @@ try {
     if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('This browser cannot render to float textures (EXT_color_buffer_float), which the shader needs.');
     await Promise.all([loadModel(), loadNet(), loadMotions()]);
   }
+  if (gpu) await checkMath();
   window.__gpu = gpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
   window.engine = gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
   showDetail();
