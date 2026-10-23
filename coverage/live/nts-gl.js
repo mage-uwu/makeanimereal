@@ -280,20 +280,46 @@ void main() {
 }`;
 const SHOW = `#version 300 es
 precision highp float;
-uniform sampler2D R, K, T0; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw, ink;
+uniform sampler2D R, K, T0, TT, TD; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw, ink, toon;
+uniform vec3 toonP;   // near, far, line width (canvas pixels)
 out vec4 o;
+float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing was drawn
+  p = clamp(p, ivec2(0), ivec2(view) - 1);
+  float d = texelFetch(TD, p, 0).r;
+  if (d >= 1.0) return 1e4;
+  float n = toonP.x, f = toonP.y;
+  return 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
+}
+// toon.js's contours (canvas-sized), plus the near side of every step in depth of more than 3 cm from
+// one of her surfaces to another (the silhouette is the hull's): sixteen taps about half a line-width
+// away, thinner than the outline as inner lines are drawn, a partial count giving the soft edge.
+vec4 toonOver(vec4 c) {
+  if (toon == 0) return c;
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  float k = texelFetch(TT, p, 0).a, z = viewZ(p);
+  if (z < 1e3) {
+    float n = 0.0;
+    for (int i = 0; i < 16; i++) {
+      float a = float(i) * 0.3927 + 0.2, r = max(1.0, toonP.z * (i % 2 == 0 ? 0.45 : 0.8));
+      float zn = viewZ(p + ivec2(round(vec2(cos(a), sin(a)) * r)));
+      if (zn < 1e3 && zn - z > 0.03) n += 1.0;
+    }
+    k = max(k, smoothstep(0.5, 3.5, n));
+  }
+  return vec4(mix(c.rgb, vec3(0.012, 0.010, 0.022), k), 1.0);
+}
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
   vec2 q = vec2(gl_FragCoord.x, view.y - gl_FragCoord.y);   // canvas pixels, top-down
   vec3 bg = mix(top, bottom, q.y / view.y);
   vec2 p = (q - box.xy) / box.zw;
-  if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = vec4(bg, 1.0); return; }
+  if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = toonOver(vec4(bg, 1.0)); return; }
   vec2 uv = vec2(p.x, 1.0 - p.y);
   if (raw == 1) { vec3 c = toSrgb(texture(T0, uv).rgb); o = vec4(mix(c, bg, step(0.25, c.g - max(c.r, c.b))), 1.0); return; }
   vec4 d = texture(R, uv);
   float k = ink == 1 ? texture(K, uv).r : 0.0;   // ink over the colour: alpha a + k (1 - a), colour scaled by (1 - k)
   d = vec4(d.rgb * (1.0 - k), d.a + k * (1.0 - d.a));
-  o = vec4(bg * (1.0 - d.a) + d.rgb, 1.0);
+  o = toonOver(vec4(bg * (1.0 - d.a) + d.rgb, 1.0));
 }`;
 
 export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' }) {
@@ -431,7 +457,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   }
 
   // The network on the crop, then the display pass. view: { W, H, box: [x, y, w, h] in canvas pixels,
-  // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), showOnly (the last drawing again, e.g. zoomed) }.
+  // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), toon
+  // (toon.js's render: contour mask and depth, or null), showOnly (the last drawing again, e.g. zoomed) }.
   function frame({ pitch, view }) {
     renderer.resetState();
     gl.bindVertexArray(vao);
@@ -494,6 +521,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, glTex(tiles[0]), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
+    gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
+    if (view.toon) { bindTex(3, gl.TEXTURE_2D, view.toon.ink, null, s.u.TT); bindTex(4, gl.TEXTURE_2D, view.toon.depth, null, s.u.TD); gl.uniform3f(s.u.toonP, view.toon.near, view.toon.far, view.toon.width); }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
     renderer.resetState();
