@@ -10,7 +10,7 @@
 
 const PX = 4, G = 4, TILES = 5;
 
-export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false }) {
+export async function createGpuShader({ net, feats, canvas, NW, NH, forceF32 = false, skipEmpty = true, profile = false }) {
   if (!navigator.gpu) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) return null;
@@ -179,7 +179,7 @@ ${LIT ? `  // Light: cos(light, surface), key colour, ambient colour, on her (tr
 
   // ---- convolution ----
   const convPipe = pipe(`
-struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wbase: i32, row0: i32, groups: i32, act: i32 };
+struct P { W: i32, H: i32, Wa: i32, Ha: i32, la: i32, L: i32, T: i32, K: i32, wbase: i32, row0: i32, groups: i32, act: i32, skip: i32 };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var<uniform> crop: vec4<i32>;
 @group(0) @binding(2) var<storage, read> A: array<vec4<S>>;
@@ -214,6 +214,7 @@ fn gelu(x: vec4<f32>) -> vec4<f32> {
 const TW = ${8 * PX + 2};
 const TH = 10;
 var<workgroup> tile: array<vec4<f32>, ${(8 * PX + 2) * 10}>;
+var<workgroup> anyMask: u32;
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
   let c = cropOf(p.W, p.H);
@@ -223,6 +224,25 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
   let inside = x0 < c.z && y < c.w;
   let g0 = i32(wid.z) * ${G};
   let ng = min(${G}, p.groups - g0);
+  // Full-resolution layers (1-pixel reach): a tile with none of her coverage within 8 pixels draws
+  // nothing there, so it skips the convolution (the head writes transparent; its 3 x 3 input layer
+  // makes the same call, so what it leaves unwritten is never read). Coverage: B's 8th channel.
+  if (p.skip > 0) {
+    if (lid.x == 0u && lid.y == 0u) { anyMask = 0u; }
+    workgroupBarrier();
+    for (var i = i32(lid.y) * 8 + i32(lid.x); i < ${8 * PX + 16} * 24; i += 64) {
+      let gx = ox0 - 8 + i % ${8 * PX + 16}; let gy = oy0 - 8 + i / ${8 * PX + 16};
+      if (gx >= 0 && gx < p.W && gy >= 0 && gy < p.H && f32(B[(p.H + gy) * p.W + gx].w) > 0.5) { anyMask = 1u; }
+    }
+    if (workgroupUniformLoad(&anyMask) == 0u) {
+      if (p.act == 2 && inside) {
+        for (var k = 0; k < ng; k++) {
+          for (var q = 0; q < ${PX}; q++) { if (x0 + q < c.z) { O[((g0 + k) * p.H + y) * p.W + x0 + q] = vec4<S>(0.0); } }
+        }
+      }
+      return;
+    }
+  }
   var acc: array<array<vec4<f32>, ${G}>, ${PX}>;
   for (var k = 0; k < ng; k++) {
     let b = aff[(p.row0 + g0 + k) * 3];
@@ -289,13 +309,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   const steps = [];
   for (const l of net.layers) {
     const out = T[l.out], A = T[l.inputs[0]], B = T[l.inputs[1] ?? l.inputs[0]];
-    const params = uniform(new Int32Array([out.w, out.h, A.w, A.h, l.la, l.L, l.T, l.k, l.wbase, l.row, l.groups, l.act === 'gelu' ? 1 : 2]));
+    const skip = skipEmpty && net.sharp && (l.name === 'srh' || l.name === 'srhead') ? 1 : 0;
+    const params = uniform(new Int32Array([out.w, out.h, A.w, A.h, l.la, l.L, l.T, l.k, l.wbase, l.row, l.groups, l.act === 'gelu' ? 1 : 2, skip]));
     const group = device.createBindGroup({ layout: convPipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: params } }, { binding: 1, resource: { buffer: cropBuf } },
       { binding: 2, resource: { buffer: A.buf } }, { binding: 3, resource: { buffer: B.buf } },
       { binding: 4, resource: { buffer: out.buf } }, { binding: 5, resource: { buffer: wBuf } },
       { binding: 6, resource: { buffer: affBuf } }] });
-    steps.push({ pipe: convPipe, group, out, z: Math.ceil(l.groups / G), px: PX });
+    steps.push({ name: l.name, pipe: convPipe, group, out, z: Math.ceil(l.groups / G), px: PX });
     const pooled = Object.entries(net.pools).find(([, src]) => src === l.out);
     if (pooled) {
       const dst = T[pooled[0]];
@@ -303,7 +324,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         { binding: 0, resource: { buffer: uniform(new Int32Array([dst.w, dst.h, dst.layers, 0])) } },
         { binding: 1, resource: { buffer: cropBuf } }, { binding: 2, resource: { buffer: out.buf } },
         { binding: 3, resource: { buffer: dst.buf } }] });
-      steps.push({ pipe: poolPipe, group: pg, out: dst, z: dst.layers, px: 1 });
+      steps.push({ name: pooled[0], pipe: poolPipe, group: pg, out: dst, z: dst.layers, px: 1 });
     }
   }
 
@@ -344,6 +365,13 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     { binding: 2, resource: gbuf.createView() }] });
 
   const query = timestamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
+  // #gpuprof: every dispatch in its own pass with timestamps, averaged per stage (layerTimes()).
+  const prof = profile && timestamps ? (() => {
+    const names = [...packs.map((pk, i) => `pack ${i ? 'xf' : 'x'}`), ...steps.map(st => st.name)];
+    const n = names.length;
+    return { names, n, q: device.createQuerySet({ type: 'timestamp', count: 2 * n }), qb: buf(16 * n, GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC),
+      rb: buf(16 * n, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST), busy: false, sum: new Float64Array(n), count: 0 };
+  })() : null;
   const qBuf = timestamps ? buf(16, GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC) : null;
   const qRead = timestamps ? buf(16, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST) : null;
   let qBusy = false, gpuMs = null;
@@ -370,12 +398,20 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     if (lighting) { packParams.set(lighting.slice(0, 3), 24); packParams.set(lighting.slice(3, 6), 28); packParams.set(lighting.slice(6, 9), 32); }
     device.queue.writeBuffer(packBuf, 0, packParams);
     const enc = device.createCommandEncoder();
-    if (mode === 0) {
+    const span = (w, scale, px) => {
+      const s = w / NW;
+      return [Math.ceil((Math.ceil(crop[2] * s) + 1 - Math.floor(crop[0] * s)) / px / 8), Math.ceil((Math.ceil(crop[3] * s) + 1 - Math.floor(crop[1] * s)) / 8)];
+    };
+    if (mode === 0 && prof && !prof.busy) {
+      const list = [...packs.map(pk => [pk, span(pk.out.w, 1, 1), 1]), ...steps.map(st => [st, span(st.out.w, 1, st.px), st.z])];
+      list.forEach(([st, xy, z], i) => {
+        const pass = enc.beginComputePass({ timestampWrites: { querySet: prof.q, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 } });
+        pass.setPipeline(st.pipe); pass.setBindGroup(0, st.group); pass.dispatchWorkgroups(...xy, z); pass.end();
+      });
+      enc.resolveQuerySet(prof.q, 0, 2 * prof.n, prof.qb, 0); enc.copyBufferToBuffer(prof.qb, 0, prof.rb, 0, 16 * prof.n);
+      prof.pending = true;
+    } else if (mode === 0) {
       const pass = enc.beginComputePass(query && !qBusy ? { timestampWrites: { querySet: query, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
-      const span = (w, scale, px) => {
-        const s = w / NW;
-        return [Math.ceil((Math.ceil(crop[2] * s) + 1 - Math.floor(crop[0] * s)) / px / 8), Math.ceil((Math.ceil(crop[3] * s) + 1 - Math.floor(crop[1] * s)) / 8)];
-      };
       if (limit > 0) for (const pk of packs) {
         pass.setPipeline(pk.pipe); pass.setBindGroup(0, pk.group);
         pass.dispatchWorkgroups(...span(pk.out.w, 1, 1), 1);
@@ -387,8 +423,19 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
       pass.end();
       if (query && !qBusy) { enc.resolveQuerySet(query, 0, 2, qBuf, 0); enc.copyBufferToBuffer(qBuf, 0, qRead, 0, 16); }
     }
+    const readProf = () => {
+      if (!prof?.pending) return;
+      prof.pending = false; prof.busy = true;
+      prof.rb.mapAsync(GPUMapMode.READ).then(() => {
+        const t = new BigInt64Array(prof.rb.getMappedRange());
+        let total = 0;
+        for (let i = 0; i < prof.n; i++) { const ms = Number(t[2 * i + 1] - t[2 * i]) / 1e6; prof.sum[i] += ms; total += ms; }
+        prof.rb.unmap(); prof.count++; prof.busy = false;
+        gpuMs = gpuMs == null ? total : gpuMs * 0.8 + total * 0.2;
+      }).catch(() => { prof.busy = false; });
+    };
     const done = () => { inFlight++; device.queue.onSubmittedWorkDone().then(() => { inFlight--; }); };
-    if (noShow) { device.queue.submit([enc.finish()]); done(); return; }  // checks: headless browsers can't present
+    if (noShow) { device.queue.submit([enc.finish()]); done(); readProf(); return; }  // checks: headless browsers can't present
     const W = canvas.width, H = canvas.height;
     const s = Math.min(W / NW, H / NH), bw = NW * s / W, bh = NH * s / H;
     device.queue.writeBuffer(showBuf, 0, new Float32Array([(1 - bw) / 2, (1 - bh) / 2, bw, bh, ...crop, ...top, 1, ...bottom, 1, W, H, mode, 0]));
@@ -396,7 +443,8 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     rp.setPipeline(showPipe); rp.setBindGroup(0, showGroup); rp.draw(3); rp.end();
     device.queue.submit([enc.finish()]);
     done();
-    if (query && !qBusy && mode === 0) {
+    readProf();
+    if (query && !qBusy && mode === 0 && !prof) {
       qBusy = true;
       qRead.mapAsync(GPUMapMode.READ).then(() => {
         const t = new BigInt64Array(qRead.getMappedRange());
@@ -440,7 +488,17 @@ fn px(x: i32, y: i32) -> vec4<f32> { return vec4<f32>(R[clamp(y, 0, ${OH - 1}) *
     return { w: W, h: H, data: px };
   }
 
-  return { frame, readTensor, readShow, light: LIT, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
+  // Per-stage GPU ms averaged since the last call (#gpuprof), slowest first; resets.
+  function layerTimes() {
+    if (!prof || !prof.count) return [];
+    const rows = prof.names.map((name, i) => ({ stage: name, ms: +(prof.sum[i] / prof.count).toFixed(2) }));
+    const total = rows.reduce((a, r) => a + r.ms, 0);
+    rows.forEach(r => { r.share = `${(100 * r.ms / total).toFixed(0)}%`; });
+    prof.sum.fill(0); prof.count = 0;
+    return rows.sort((a, b) => b.ms - a.ms);
+  }
+
+  return { frame, readTensor, readShow, layerTimes, light: LIT, get busy() { return inFlight >= MAX_IN_FLIGHT; }, steps: steps.length, gbufSize: [GW, GH], outSize: [OW, OH], f16, get gpuMs() { return gpuMs; }, device };
 }
 
 function halfToFloat(h) {

@@ -857,7 +857,13 @@ function logStats(now) {
     + `skipped ${stats.skipped} of ${stats.ticks} ticks, heap ${performance.memory ? (performance.memory.usedJSHeapSize / 1e6).toFixed(0) + ' MB' : 'n/a'}`);
   Object.assign(stats, { t0: now, ticks: 0, skipped: 0, drawn: 0, gpu: [] });
 }
+// #gpuprof: every 5 s, a table of GPU ms per stage (pack, each convolution, pool), slowest first.
+let profT = 0;
 function frame(now) {
+  if (gpu?.layerTimes && location.hash.includes('gpuprof') && now - profT > 5000) {
+    profT = now; const rows = gpu.layerTimes();
+    if (rows.length) { console.log(`[gpuprof] total ${rows.reduce((a, r) => a + r.ms, 0).toFixed(1)} ms`); console.table(rows); }
+  }
   if (stats) { stats.ticks++; if (now - stats.t0 > 10000) logStats(now); }
   // The GPU is still on earlier frames: let it catch up (the next tick draws the pose of its own time).
   if (gpu?.busy) { if (stats) stats.skipped++; requestAnimationFrame(frame); return; }
@@ -1013,7 +1019,7 @@ async function loadGpu() {
   parts = net.parts;
   const feats = await Promise.all([0, 1, 2].map(async k => createImageBitmap(await (await fetch(`${modelDir()}feat${k}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' })));
   const { createGpuShader } = await import('./gpu.js');
-  gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32') });
+  gpu = await createGpuShader({ net, feats, canvas, NW, NH, forceF32: location.hash.includes('f32'), skipEmpty: !location.hash.includes('noskip'), profile: location.hash.includes('gpuprof') });
   if (!gpu) throw new Error('WebGPU device unavailable');
   renderer.setPixelRatio(1);
   renderer.setSize(GBW * 5, GBH, false);
