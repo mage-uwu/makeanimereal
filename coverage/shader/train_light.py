@@ -78,7 +78,7 @@ class Expanded(nn.Module):
 
     def merged(self):
         c = self.old.merged() if isinstance(self.old, LoRAConv) else self.old
-        out = nn.Conv2d(self.n + LIGHT_CH, c.out_channels, c.kernel_size, padding=c.padding)
+        out = nn.Conv2d(self.n + LIGHT_CH, c.out_channels, c.kernel_size, padding=c.padding).to(c.weight.device)
         out.weight.data.copy_(torch.cat([c.weight.detach(), self.w_new.detach()], 1))
         out.bias.data.copy_(c.bias.detach())
         return out

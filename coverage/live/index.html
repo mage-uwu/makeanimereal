@@ -369,6 +369,7 @@ function cropBox(topDown = false) {
   if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
   lastCrop = now;  // this frame's box, so next frame also clears what she leaves behind
   const snap = 16;
+  if (!box.every(Number.isFinite)) { lastCrop = null; return [0, 0, NW, NH]; }  // a degenerate projection: the whole frame
   return [Math.max(0, Math.floor(box[0] / snap) * snap), Math.max(0, Math.floor(box[1] / snap) * snap),
     Math.min(NW, Math.ceil(box[2] / snap) * snap), Math.min(NH, Math.ceil(box[3] / snap) * snap)];
 }
@@ -830,9 +831,21 @@ function readTimer() {
 }
 
 let lastT = performance.now(), fps = 0;
+// #stats: every 10 s, log the frame rate, GPU time per frame (mean, worst), ticks the GPU gate
+// skipped and the JS heap, to tell a GPU slowing down (rising GPU ms for the same work) from work
+// queueing (skips) or a CPU stall (neither).
+const stats = location.hash.includes('stats') ? { t0: performance.now(), ticks: 0, skipped: 0, drawn: 0, gpu: [] } : null;
+function logStats(now) {
+  const g = stats.gpu.length ? stats.gpu : [NaN];
+  console.log(`[stats] ${((now - stats.t0) / 1000).toFixed(0)}s window: ${(stats.drawn / ((now - stats.t0) / 1000)).toFixed(1)} fps, `
+    + `GPU ${(g.reduce((a, b) => a + b, 0) / g.length).toFixed(1)} ms mean / ${Math.max(...g).toFixed(1)} worst, `
+    + `skipped ${stats.skipped} of ${stats.ticks} ticks, heap ${performance.memory ? (performance.memory.usedJSHeapSize / 1e6).toFixed(0) + ' MB' : 'n/a'}`);
+  Object.assign(stats, { t0: now, ticks: 0, skipped: 0, drawn: 0, gpu: [] });
+}
 function frame(now) {
+  if (stats) { stats.ticks++; if (now - stats.t0 > 10000) logStats(now); }
   // The GPU is still on earlier frames: let it catch up (the next tick draws the pose of its own time).
-  if (gpu?.busy) { requestAnimationFrame(frame); return; }
+  if (gpu?.busy) { if (stats) stats.skipped++; requestAnimationFrame(frame); return; }
   const dt = Math.min(0.05, (now - lastT) / 1000);
   if (!dragging && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) {
     cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true;
@@ -847,6 +860,7 @@ function frame(now) {
     vrm.update(animated ? dt : 0);
     drawFrame();
     window.framesDrawn = (window.framesDrawn || 0) + 1;
+    if (stats) { stats.drawn++; if (gpuMs != null) stats.gpu.push(gpuMs); }
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
     const engine = `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
@@ -891,7 +905,7 @@ window.debugProfile = async (poseName, n, dt = 1 / 60, net = true) => {
   pose = poseName; mode = net ? 0 : 1; const rows = [];
   for (let k = 0; k < n; k++) {
     const t0 = performance.now(); setPose(poseName, k * dt);
-    const t1 = performance.now(); vrm.update(dt);
+    const t1 = performance.now(); vrm.update(dt); placeCamera();
     const t2 = performance.now(); const crop = cropBox(true);
     const t3 = performance.now(); renderGBufferTiles();
     const t4 = performance.now();
@@ -901,6 +915,26 @@ window.debugProfile = async (poseName, n, dt = 1 / 60, net = true) => {
     rows.push([t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, (crop[2] - crop[0]) * (crop[3] - crop[1])]);
   }
   return rows;
+};
+// Long-run soak (profiling): n animated frames of everything but the network; every `every` frames
+// the stage times, JS heap and three.js resource counts, to spot anything that grows.
+window.debugSoak = (poseName, n, every = 250) => {
+  pose = poseName; const out = []; let acc = [0, 0, 0, 0];
+  for (let k = 1; k <= n; k++) {
+    const t0 = performance.now(); setPose(poseName, k / 60);
+    const t1 = performance.now(); vrm.update(1 / 60);
+    const t2 = performance.now(); cropBox(true);
+    const t3 = performance.now(); renderGBufferTiles();
+    const t4 = performance.now();
+    acc = [acc[0] + t1 - t0, acc[1] + t2 - t1, acc[2] + t3 - t2, acc[3] + t4 - t3];
+    if (k % every === 0) {
+      const m = renderer.info.memory, mem = performance.memory;
+      out.push({ k, ms: acc.map(v => +(v / every).toFixed(2)), heapMB: mem ? +(mem.usedJSHeapSize / 1e6).toFixed(1) : null,
+        geometries: m.geometries, textures: m.textures, programs: renderer.info.programs.length });
+      acc = [0, 0, 0, 0];
+    }
+  }
+  return out;
 };
 // The displayed frame (WebGPU engine, with the toon light if one is set), as a PNG data URL.
 window.debugShow = async (yaw, pitch, poseName = 'stand', t = 0) => {
