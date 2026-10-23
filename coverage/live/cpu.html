@@ -72,6 +72,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="v-speak" aria-pressed="false" title="Type a line for her to say">Speak</button>
       <span class="sep"></span>
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
+      <button id="m-sharp" aria-pressed="true" hidden title="Edge-aware upscale: her edges at the screen's resolution, guided by her geometry (off: plain bilinear)">Sharp</button>
       <button id="m-lines" aria-pressed="true" hidden title="Line art: toon contours (drawn from her geometry), the network's learned ink, or none">Lines: Toon</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
@@ -106,6 +107,7 @@ import { createMotion } from './motion.js';
 import { createCpuShader } from './nts.js';
 import { createGlShader } from './nts-gl.js';
 import { createToon } from './toon.js';
+import { createGuide } from './guide.js';
 
 // The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
 // #tight: the training frame itself (the checks compare against it).
@@ -285,7 +287,7 @@ const net = document.createElement('canvas');
 net.width = NW; net.height = NH;
 const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
-let fps = 0, lastShown = 0, raw = false, lines = 'off';   // line art (both off for now): 'toon' (toon.js), 'neural' (the ink branch), 'off'
+let fps = 0, lastShown = 0, raw = false, lines = 'off', sharp = !location.hash.includes('nosharp');   // line art (both off for now); the edge-aware upscale: 'toon' (toon.js), 'neural' (the ink branch), 'off'
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
 // frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
@@ -301,7 +303,9 @@ function glView(extra = {}) {
   const fb = frameBox();
   // toon contours: drawn for the canvas as it is now (so a zoom redraws them), about 1.5 CSS pixels wide at the fitted size
   const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(8, Math.max(1, fb.box[3] * 0.0019))) : null;
-  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines === 'neural', toon: toonTex, ...extra };
+  // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
+  const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
+  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines === 'neural', toon: toonTex, guide: guideTex, ...extra };
 }
 function paint() {
   if (ENGINE === 'gpu') { if (gls) gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView({ showOnly: true }) }); return; }
@@ -414,7 +418,7 @@ function say(text) {
 }
 
 // ---------- one frame: G-buffer, network, show ----------
-let shader = null, gls = null, toon = null, tiles = null, fence = null, gpuMs = null;
+let shader = null, gls = null, toon = null, guide = null, tiles = null, fence = null, gpuMs = null;
 const GL_PASSES = () => PASSES.map(([bg, mat]) => [bg, mat, () => { for (const m of shorts) m.visible = !mat; }]);
 let faceMoving = false;
 function frameOnce(t) {
@@ -489,6 +493,7 @@ let pose = 'stand', poseStart = performance.now(), dtLast = 0, lastT = performan
 const animated = () => pose !== 'stand';
 const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
 const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
+document.getElementById('m-sharp').onclick = e => { sharp = !sharp; e.currentTarget.setAttribute('aria-pressed', String(sharp)); dirty = true; };
 document.getElementById('m-lines').onclick = e => {
   const modes = ['toon', ...(gls?.ink ? ['neural'] : []), 'off'];
   lines = modes[(modes.indexOf(lines) + 1) % modes.length];
@@ -572,6 +577,10 @@ try {
   }
   assignParts(parts);
   // Line art (toon contours, the ink branch) is off for now: the chip stays hidden and toon.js unused.
+  if (gls) {   // GPU engine: the edge-aware upscale
+    guide = createGuide({ THREE, renderer, vertexShader: gbufVert, depthUniforms: depthMat.uniforms });
+    const b = document.getElementById('m-sharp'); b.hidden = false; b.setAttribute('aria-pressed', String(sharp));
+  }
   for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
     const b = document.createElement('button');
     b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');

@@ -282,7 +282,46 @@ const SHOW = `#version 300 es
 precision highp float;
 uniform sampler2D R, K, T0, TT, TD; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw, ink, toon;
 uniform vec3 toonP;   // near, far, line width (canvas pixels)
+uniform sampler2D G, T1, T2, T4; uniform int sharp; uniform vec2 lowRes;
 out vec4 o;
+// The edge-aware upscale (joint bilateral): the drawing is the network's resolution, guide.js's G is
+// her geometry at the canvas's. A canvas pixel takes the drawing's pixels around it (4 x 4) weighted by
+// bilinear's weights and by how well their geometry (the tiles' normal, depth, mask) matches its own, so her
+// edges and the edges between her parts land where the canvas-sized geometry puts them, and only
+// colour from the same surface crosses into a pixel. Pixels the drawing half-covers count by their
+// alpha; her outline's softness comes from G's coverage. Where nothing around matches (a strand
+// thinner than the drawing's pixels), the plain bilinear sample.
+vec4 upscale(vec2 uv, vec4 bil) {
+  vec4 g = texelFetch(G, ivec2(gl_FragCoord.xy), 0);
+  float cov = g.a;
+  if (cov < 0.004) return vec4(0.0);
+  vec2 gxy = g.xy / cov;
+  vec3 gn = vec3(gxy, sqrt(max(0.0, 1.0 - dot(gxy, gxy))));
+  float gd = g.z / cov;
+  vec2 P = uv * lowRes - 0.5;
+  ivec2 b = ivec2(floor(P));
+  vec3 srgb = vec3(0.0); float sa = 0.0, saa = 0.0;
+  for (int j = -1; j <= 2; j++) for (int i = -1; i <= 2; i++) {
+    ivec2 q = clamp(b + ivec2(i, j), ivec2(0), ivec2(lowRes) - 1);
+    vec4 c = texelFetch(R, q, 0);
+    if (c.a < 0.004) continue;
+    vec3 n = normalize(texelFetch(T1, q, 0).rgb * 2.0 - 1.0);
+    float dz = (texelFetch(T2, q, 0).r - gd) * 80.0;   // in 2 cm steps (the depth tile spans 1.6 m)
+    vec2 dd = P - vec2(q);
+    // bilinear's own weights (so a surface with no edge in it is exactly the bilinear sample) plus a
+    // faint wider tail, for an edge pixel whose nearest four are all across the edge
+    vec2 t = max(vec2(0.0), 1.0 - abs(dd));
+    float w = (t.x * t.y + 0.02 * exp(-0.5 * dot(dd, dd))) * exp(-0.5 * dz * dz) * exp(-8.0 * (1.0 - dot(n, gn)));
+    w *= texelFetch(T4, q, 0).b > 0.5 ? 1.0 : 0.05;
+    srgb += w * c.rgb; sa += w * c.a; saa += w * c.a * c.a;
+  }
+  vec3 rgb; float a;
+  if (sa > 1e-4) { rgb = srgb / sa; a = saa / sa; }
+  else if (bil.a > 0.004) { rgb = bil.rgb / bil.a; a = bil.a; }
+  else return vec4(0.0);
+  a *= cov;
+  return vec4(rgb * a, a);
+}
 float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing was drawn
   p = clamp(p, ivec2(0), ivec2(view) - 1);
   float d = texelFetch(TD, p, 0).r;
@@ -317,6 +356,7 @@ void main() {
   vec2 uv = vec2(p.x, 1.0 - p.y);
   if (raw == 1) { vec3 c = toSrgb(texture(T0, uv).rgb); o = vec4(mix(c, bg, step(0.25, c.g - max(c.r, c.b))), 1.0); return; }
   vec4 d = texture(R, uv);
+  if (sharp == 1) d = upscale(uv, d);
   float k = ink == 1 ? texture(K, uv).r : 0.0;   // ink over the colour: alpha a + k (1 - a), colour scaled by (1 - k)
   d = vec4(d.rgb * (1.0 - k), d.a + k * (1.0 - d.a));
   o = toonOver(vec4(bg * (1.0 - d.a) + d.rgb, 1.0));
@@ -458,7 +498,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
 
   // The network on the crop, then the display pass. view: { W, H, box: [x, y, w, h] in canvas pixels,
   // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), toon
-  // (toon.js's render: contour mask and depth, or null), showOnly (the last drawing again, e.g. zoomed) }.
+  // (toon.js's render: contour mask and depth, or null), guide (guide.js's texture: the edge-aware
+  // upscale; null: bilinear), showOnly (the last drawing again, e.g. zoomed) }.
   function frame({ pitch, view }) {
     renderer.resetState();
     gl.bindVertexArray(vao);
@@ -522,6 +563,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
+    gl.uniform1i(s.u.sharp, view.guide && !view.raw ? 1 : 0);
+    if (view.guide) {
+      bindTex(5, gl.TEXTURE_2D, view.guide, null, s.u.G);
+      [1, 2, 4].forEach((k, i) => bindTex(6 + i, gl.TEXTURE_2D, glTex(tiles[k]), null, s.u[`T${k}`]));
+      gl.uniform2f(s.u.lowRes, NW, NH);
+    }
     if (view.toon) { bindTex(3, gl.TEXTURE_2D, view.toon.ink, null, s.u.TT); bindTex(4, gl.TEXTURE_2D, view.toon.depth, null, s.u.TD); gl.uniform3f(s.u.toonP, view.toon.near, view.toon.far, view.toon.width); }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
