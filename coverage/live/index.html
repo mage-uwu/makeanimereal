@@ -127,10 +127,16 @@ const gl = renderer.getContext();
 
 // ---------- the model, posed and lit as in the coverage renders ----------
 const scene = new THREE.Scene();
-scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const ambient = new THREE.AmbientLight(0xffffff, 1.2);
+scene.add(ambient);
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(1, 3, 2);
 scene.add(sun);
+// Relight (debug): sun direction (towards the light), colour and strength, ambient strength.
+window.debugLight = ({ dir = [1, 3, 2], color = 0xffffff, intensity = 2.2, amb = 1.2, ambColor = 0xffffff } = {}) => {
+  sun.position.set(...dir); sun.color.setHex(color); sun.intensity = intensity;
+  ambient.intensity = amb; ambient.color.setHex(ambColor);
+};
 const camera = new THREE.PerspectiveCamera(FOV, NW / NH, 0.01, 100);
 let vrm, target, radius, parts = [], bones = [];
 
