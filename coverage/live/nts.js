@@ -58,30 +58,42 @@ export async function createCpuShader({ base = 'nts/', maxPixels, threads }) {
     w.postMessage({ init: true, module, net }, []);
   })));
 
+  // Buffers go to the workers and come back (transferred, never copied or dropped), and the output
+  // array is kept: no per-frame garbage, which on phones turns into collector pauses.
+  const bufs = workers.map(() => ({ input: new ArrayBuffer(0), rgba: new ArrayBuffer(0) }));
+  let out = new Uint8ClampedArray(0);
   let busy = false, ms = null;
   // tiles: the five G-buffer tiles (colour, normal, depth, uv-a, uv-b), each w x h RGBA, rows
-  // bottom-up as readPixels gives them. Resolves to straight RGBA, w x h, rows top-down.
+  // bottom-up as readPixels gives them. Resolves to straight RGBA, w x h, rows top-down (valid until
+  // the next frame).
   async function frame({ tiles, w, h, pitch }) {
     busy = true;
     const t0 = performance.now();
     new Uint8Array(k.memory.buffer, tilesP, tiles.length).set(tiles);
     k.nts_prepare(tilesP, w, h, Math.sin(pitch), Math.cos(pitch), inP);
     const all = new Float32Array(k.memory.buffer, inP, w * h * 18);
+    if (out.length < w * h * 4) out = new Uint8ClampedArray(Math.ceil(w * h * 4 * 1.3));
     // Bands of equal height; each worker gets its band's inputs plus the reach above and below.
-    const out = new Uint8ClampedArray(w * h * 4);
     await Promise.all(workers.map((wk, i) => new Promise(resolve => {
       const r0 = Math.round(h * i / n), r1 = Math.round(h * (i + 1) / n);
       if (r1 <= r0) { resolve(); return; }
-      const a = Math.max(0, r0 - reach), b = Math.min(h, r1 + reach);
-      const input = all.slice(a * w * 18, b * w * 18);
-      wk.onmessage = e => { if (e.data.error) console.error('[cpu worker]', e.data.error); else out.set(new Uint8Array(e.data.rgba), r0 * w * 4); resolve(); };
-      wk.postMessage({ input, w, h: b - a, r0: r0 - a, r1: r1 - a }, [input.buffer]);
+      const a = Math.max(0, r0 - reach), b = Math.min(h, r1 + reach), len = (b - a) * w * 18, B = bufs[i];
+      if (B.input.byteLength < len * 4) B.input = new ArrayBuffer(Math.ceil(len * 4 * 1.3));
+      new Float32Array(B.input, 0, len).set(all.subarray(a * w * 18, b * w * 18));
+      wk.onmessage = e => {
+        const d = e.data;
+        if (d.error) console.error('[cpu worker]', d.error);
+        else out.set(new Uint8Array(d.rgba, 0, (r1 - r0) * w * 4), r0 * w * 4);
+        if (d.input) { B.input = d.input; B.rgba = d.rgba; }
+        resolve();
+      };
+      wk.postMessage({ input: B.input, rgba: B.rgba, w, h: b - a, r0: r0 - a, r1: r1 - a }, [B.input, B.rgba]);
     })));
     const dt = performance.now() - t0;
     if (globalThis.cpuLog) console.log(`[cpu] ${w}x${h} in ${dt.toFixed(0)} ms`);
     ms = ms == null ? dt : ms * 0.8 + dt * 0.2;
     busy = false;
-    return out;
+    return out.subarray(0, w * h * 4);
   }
   // For checks: the fine texture as decoded here, sampled every 4099th byte.
   const fineSample = () => Array.from({ length: 2048 }, (_, i) => new Uint8Array(k.memory.buffer, fineP, P * T * T * 8)[i * 4099]);

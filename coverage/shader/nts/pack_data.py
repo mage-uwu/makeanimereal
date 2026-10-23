@@ -27,10 +27,11 @@ ap.add_argument('--held', action='store_true', help="only shader_nts.c's held-ou
 a = ap.parse_args()
 frames, parts, size = [], None, None
 for d in a.dirs:
+    d, _, step = d.partition('@')   # dir@n: every n-th frame of that folder (after --every)
     meta = json.loads((Path(d) / 'meta.json').read_text())
     parts = parts or len(meta['parts'])
     size = size or meta['size']
-    frames += [(Path(d) / f'{f["frame"]:04d}', f['pitch']) for f in meta['frames']][::a.every]
+    frames += [(Path(d) / f'{f["frame"]:04d}', f['pitch']) for f in meta['frames']][::a.every][::int(step or 1)]
 if a.held:
     frames = frames[5::10]
 if a.limit:

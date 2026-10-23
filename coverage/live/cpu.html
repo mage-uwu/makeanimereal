@@ -1,0 +1,381 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tree-SSM CPU Shader</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Shippori+Mincho:wght@600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* One full-height stage with the live drawing, a scrolling strip of pose chips and a readout at the foot. */
+:root {
+  --stage-top: #eef0fb; --stage-bottom: #d9dcf2;
+  --ink: #1d2150; --muted: #5d6293; --gold: #a57a1f; --chip: rgba(255,255,255,.72); --line: rgba(29,33,80,.16);
+  --display: 'Shippori Mincho', 'Hiragino Mincho ProN', Georgia, serif;
+  --body: 'Zen Kaku Gothic New', 'Hiragino Sans', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --stage-top: #0e1030; --stage-bottom: #1d2052;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16); color-scheme: dark } }
+:root[data-theme="dark"] {
+  --stage-top: #0e1030; --stage-bottom: #1d2052;
+  --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16); color-scheme: dark }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--stage-bottom); color: var(--ink); font-family: var(--body); overflow: hidden; overscroll-behavior: none;
+  -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+.app { height: 100%; height: 100dvh; display: grid; grid-template-rows: auto 1fr auto; background: linear-gradient(var(--stage-top), var(--stage-bottom)); }
+header { padding: max(10px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); }
+h1 { margin: 0; font-family: var(--display); font-size: clamp(1.15rem, 4.5vw, 1.6rem); }
+.hint { margin: 2px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.35; }
+.hint a { color: inherit; }
+#stage { position: relative; min-height: 0; touch-action: none; overflow: hidden; cursor: grab; }
+#stage:active { cursor: grabbing; }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#status { position: absolute; inset: auto 16px 12px; text-align: center; color: var(--muted); font-size: .8rem; font-family: var(--mono); }
+footer { padding: 8px 0 max(10px, env(safe-area-inset-bottom, 0px)); display: grid; gap: 6px; }
+.chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  padding: 2px max(16px, env(safe-area-inset-right, 0px)) 2px max(16px, env(safe-area-inset-left, 0px)); }
+.chips::-webkit-scrollbar { display: none; }
+.sep { flex: 0 0 1px; background: var(--line); margin: 4px 4px; }
+button { flex: 0 0 auto; font: inherit; font-size: .85rem; color: var(--ink); background: var(--chip); border: 1px solid var(--line);
+  border-radius: 999px; padding: 8px 14px; min-height: 36px; cursor: pointer; touch-action: manipulation; }
+button[aria-pressed="true"] { border-color: var(--gold); color: var(--gold); }
+button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.readout { font-family: var(--mono); font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  padding: 0 max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+
+<div class="app">
+  <header>
+    <h1>Tree-SSM CPU Shader</h1>
+    <p class="hint">Drawn every frame by the nanotss shader on your CPU (WebAssembly), no GPU compute. Drag to orbit, pinch to zoom, double-tap to reset.
+      Motion: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset">Bandai Namco Research</a> (CC BY-NC 4.0).</p>
+  </header>
+  <div id="stage" aria-label="Live character view; drag to orbit">
+    <canvas id="view"></canvas>
+    <div id="status">loading model and shader…</div>
+  </div>
+  <footer>
+    <div class="chips" id="chips" role="group" aria-label="Pose and view">
+      <button data-pose="stand" aria-pressed="true">Stand</button>
+      <span class="sep" id="clip-end"></span>
+      <button id="m-raw" aria-pressed="false">Raw 3D</button>
+    </div>
+    <div class="readout" id="readout" aria-live="polite">–</div>
+  </footer>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+} }
+</script>
+<script type="module">
+// The CPU shader on its own: three.js draws the G-buffer (colour, normal, depth, UV and part) in WebGL
+// into a hidden canvas, the tiles are read back, and the nanotss shader (coverage/shader/nts, run in
+// WebAssembly workers by nts.js) draws her; a 2D canvas shows the result. Nothing else touches the
+// GPU, so it behaves the same on phones. Same model, camera, mocap and encodings as index.html.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { createMotion } from './motion.js';
+import { createCpuShader } from './nts.js';
+
+// The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
+const TRAIN_H = 640, NW = 720, NH = 800, FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
+const CROP_PAD = 32;
+const status = document.getElementById('status'), readout = document.getElementById('readout');
+const stage = document.getElementById('stage'), view = document.getElementById('view');
+const ctx = view.getContext('2d');
+
+const glCanvas = document.createElement('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.setSize(NW * 5, NH, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const gl = renderer.getContext();
+glCanvas.addEventListener('webglcontextlost', e => { e.preventDefault(); status.hidden = false; status.textContent = 'graphics context lost: reloading…'; });
+glCanvas.addEventListener('webglcontextrestored', () => location.reload());
+
+// ---------- the model, lit as in the coverage renders ----------
+const scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 3, 2);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(VIEW_FOV, NW / NH, 0.01, 100);
+let vrm, target, radius, bones = [], motions = null, motion = null;
+
+// The model ships as bytes packed into an opaque RGB PNG: 3 bytes a pixel after a 4-byte length.
+async function unpackPng(url) {
+  const bmp = await createImageBitmap(await (await fetch(url)).blob());
+  const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(bmp, 0, 0);
+  const px = g.getImageData(0, 0, bmp.width, bmp.height).data, rgb = new Uint8Array(bmp.width * bmp.height * 3);
+  for (let i = 0, j = 0; i < px.length; i += 4) { rgb[j++] = px[i]; rgb[j++] = px[i + 1]; rgb[j++] = px[i + 2]; }
+  const n = rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (rgb[3] << 24);
+  return rgb.buffer.slice(4, 4 + n);
+}
+async function loadModel() {
+  const loader = new GLTFLoader();
+  loader.register(p => new VRMLoaderPlugin(p));
+  const [gltf, m] = await Promise.all([loader.parseAsync(await unpackPng('model.vrm.png'), ''), fetch('motions.json').then(r => r.json())]);
+  vrm = gltf.userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { o.frustumCulled = false; if (o.isBone) bones.push(o); });
+  scene.add(vrm.scene);
+  motions = m;
+  motion = createMotion(THREE, vrm, motions);
+  setPose('stand', 0);
+  vrm.update(0);
+  for (let i = 0; i < 240; i++) vrm.update(1 / 60);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  addShorts();
+  target = box.getCenter(new THREE.Vector3());
+  radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
+}
+// Navy safety shorts under the dress, as in the coverage renders: colour pass only.
+const shorts = [];
+function addShorts() {
+  const hip = new THREE.Vector3(), knee = new THREE.Vector3(), legTop = new THREE.Vector3();
+  vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(hip);
+  vrm.humanoid.getNormalizedBoneNode('leftLowerLeg').getWorldPosition(knee);
+  vrm.humanoid.getNormalizedBoneNode('leftUpperLeg').getWorldPosition(legTop);
+  const bottom = legTop.y - (legTop.y - knee.y) * 0.3, top = hip.y + 0.12;
+  const meshes = [];
+  vrm.scene.traverse(o => { if (o.isSkinnedMesh && /Body_00_SKIN/.test([].concat(o.material)[0].name)) meshes.push(o); });
+  for (const o of meshes) {
+    const ids = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg'].map(n => o.skeleton.bones.indexOf(vrm.humanoid.getRawBoneNode(n)));
+    const mat = new THREE.MeshBasicMaterial({ color: 0x1c2056, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    mat.onBeforeCompile = sh => {
+      const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
+        .replace('#include <project_vertex>', `#include <project_vertex>\nvY = (modelMatrix * vec4(position, 1.0)).y;\nvW = ${own};`);
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
+        .replace('void main() {', `void main() {\n  if (vW < 0.5 || vY < ${bottom.toFixed(4)} || vY > ${top.toFixed(4)}) discard;`);
+    };
+    const s = new THREE.SkinnedMesh(o.geometry, mat);
+    s.bind(o.skeleton, o.bindMatrix);
+    s.frustumCulled = false;
+    o.parent.add(s);
+    shorts.push(s);
+  }
+}
+const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
+function setPose(name, t) {
+  if (motion?.apply(name, t)) return;
+  const d = THREE.MathUtils.degToRad, set = (n, x, y, z) => { const b = bone(n); if (b) b.rotation.set(x, y, z); };
+  vrm.humanoid.resetNormalizedPose();   // the training pose: arms relaxed down from the T-pose
+  set('leftUpperArm', 0, 0, -d(ARM_DROP)); set('rightUpperArm', 0, 0, d(ARM_DROP));
+  set('leftLowerArm', 0, 0, -0.15); set('rightLowerArm', 0, 0, 0.15);
+}
+function assignParts(names) {
+  vrm.scene.traverse(o => {
+    if (!o.isMesh) return;
+    o.userData.part = Math.max(0, names.indexOf([].concat(o.material)[0].name.replace(' (Instance)', '')));
+    o.onBeforeRender = (r, s, c, g, mat) => { if (mat.uniforms?.part) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; } };
+  });
+}
+
+// ---------- G-buffer: five side-by-side tiles in the coverage renders' 8-bit encodings ----------
+const gbufVert = `#include <common>
+  #include <uv_pars_vertex>
+  #include <skinning_pars_vertex>
+  varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+  void main() {
+    #include <uv_vertex>
+    #include <beginnormal_vertex>
+    #include <skinbase_vertex>
+    #include <skinnormal_vertex>
+    #include <defaultnormal_vertex>
+    #include <begin_vertex>
+    #include <skinning_vertex>
+    #include <project_vertex>
+    vNormal = normalize(transformedNormal); vUv0 = uv; vDepth = -mvPosition.z;
+  }`;
+const normalMat = new THREE.ShaderMaterial({ vertexShader: gbufVert, side: THREE.DoubleSide,
+  fragmentShader: `varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { vec3 n = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0); gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }` });
+const depthMat = new THREE.ShaderMaterial({ vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { near: { value: 0 }, far: { value: 1 } },
+  fragmentShader: `uniform float near, far; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    void main() { float d = 1.0 - clamp((vDepth - near) / (far - near), 0.0, 1.0); gl_FragColor = vec4(vec3(d), 1.0); }` });
+const uvSplit = which => new THREE.ShaderMaterial({ vertexShader: gbufVert, side: THREE.DoubleSide, uniforms: { part: { value: 0 } },
+  fragmentShader: `uniform float part; varying vec3 vNormal; varying vec2 vUv0; varying float vDepth;
+    vec2 split(float x) { x = fract(x) * 255.0; return vec2(floor(x) / 255.0, fract(x)); }
+    void main() {
+      vec2 u = split(vUv0.x), v = split(vUv0.y);
+      gl_FragColor = ${which === 'a' ? 'vec4(u.x, u.y, v.x, 1.0)' : 'vec4(v.y, part / 255.0, 1.0, 1.0)'};
+    }` });
+const PASSES = [[new THREE.Color(GREEN), null], [new THREE.Color(0), normalMat], [new THREE.Color(0), depthMat], [new THREE.Color(0), uvSplit('a')], [new THREE.Color(0), uvSplit('b')]];
+
+const cam = { yaw: 0, pitch: 5 }, vel = { yaw: 0, pitch: 0 };
+function placeCamera() {
+  const y = THREE.MathUtils.degToRad(cam.yaw), p = THREE.MathUtils.degToRad(cam.pitch);
+  camera.position.set(target.x + radius * Math.cos(p) * Math.sin(y), target.y + radius * Math.sin(p), target.z + radius * Math.cos(p) * Math.cos(y));
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
+}
+// The tiles, drawn only inside the crop [x0, y0, x1, y1] (network pixels, top-down).
+function renderTiles(crop) {
+  depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
+  const [x0, y0, x1, y1] = crop;
+  renderer.setScissorTest(true);
+  PASSES.forEach(([bg, mat], k) => {
+    for (const m of shorts) m.visible = !mat;
+    renderer.setViewport(k * NW, 0, NW, NH); renderer.setScissor(k * NW + x0, NH - y1, x1 - x0, y1 - y0);
+    scene.background = bg; scene.overrideMaterial = mat;
+    renderer.render(scene, camera);
+  });
+  scene.overrideMaterial = null;
+  for (const m of shorts) m.visible = true;
+  renderer.setScissorTest(false);
+}
+// Her box on screen from the bones, padded past the silhouette (index.html's cropBox), snapped to 16.
+const v3 = new THREE.Vector3();
+let lastCrop = null;
+function cropBox() {
+  let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
+  for (const b of bones) {
+    b.getWorldPosition(v3).project(camera);
+    x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y);
+  }
+  const px = x => (x * 0.5 + 0.5) * NW, py = y => (0.5 - y * 0.5) * NH;
+  let box = [px(x0) - 44 - CROP_PAD, py(y1) - 64 - CROP_PAD, px(x1) + 44 + CROP_PAD, py(y0) + 32 + CROP_PAD];
+  const now = box;
+  if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
+  lastCrop = now;
+  if (!box.every(Number.isFinite)) { lastCrop = null; return [0, 0, NW, NH]; }
+  return [Math.max(0, Math.floor(box[0] / 16) * 16), Math.max(0, Math.floor(box[1] / 16) * 16),
+    Math.min(NW, Math.ceil(box[2] / 16) * 16), Math.min(NH, Math.ceil(box[3] / 16) * 16)];
+}
+
+// ---------- display: the drawing (NW x NH, straight alpha) over the stage gradient ----------
+const net = document.createElement('canvas');
+net.width = NW; net.height = NH;
+const netCtx = net.getContext('2d');
+const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
+let fps = 0, lastShown = 0, raw = false;
+function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function paint() {
+  const dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect();
+  const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+  if (view.width !== W || view.height !== H) { view.width = W; view.height = H; }
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, css('--stage-top')); g.addColorStop(1, css('--stage-bottom'));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // Fit her height (a portrait phone shows the middle of the wide frame), then the pinch zoom.
+  const s = Math.min(H / NH, W / (NW * 0.62)) * zoom.z, w = NW * s, h = NH * s;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(net, (W - w) / 2 + zoom.tx * dpr, (H - h) / 2 + zoom.ty * dpr, w, h);
+}
+function show(rgba, crop) {
+  netCtx.clearRect(0, 0, NW, NH);
+  netCtx.putImageData(new ImageData(rgba, crop[2] - crop[0], crop[3] - crop[1]), crop[0], crop[1]);
+  paint();
+}
+
+// ---------- one frame: G-buffer, read back, CPU shader, show ----------
+let shader, tiles = null;
+function frameOnce(t) {
+  setPose(pose, t);
+  vrm.update(animated() ? Math.min(0.05, dtLast) : 0);
+  placeCamera();
+  const crop = raw ? [0, 0, NW, NH] : cropBox();
+  renderTiles(crop);
+  const [x0, y0, x1, y1] = crop, w = x1 - x0, h = y1 - y0, n = w * h * 4;
+  for (let k = 0; k < 5; k++) gl.readPixels(k * NW + x0, NH - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tiles.subarray(k * n, (k + 1) * n));
+  if (raw) {   // the raw render: the colour tile, green keyed out
+    const img = new Uint8ClampedArray(n);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const s = ((h - 1 - y) * w + x) * 4, d = (y * w + x) * 4, r = tiles[s], g = tiles[s + 1], b = tiles[s + 2];
+      img[d] = r; img[d + 1] = g; img[d + 2] = b; img[d + 3] = g - Math.max(r, b) > 64 ? 0 : 255;
+    }
+    show(img, crop);
+    return Promise.resolve();
+  }
+  return shader.frame({ tiles: tiles.subarray(0, 5 * n), w, h, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(rgba => show(rgba, crop));
+}
+
+// ---------- input: drag to orbit, pinch to zoom, double-tap to reset ----------
+const pts = new Map();
+let dirty = true, pinch = null, lastTap = 0;
+stage.addEventListener('pointerdown', e => {
+  stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), m: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] }; }
+  if (pts.size === 1) { const now = performance.now(); if (now - lastTap < 300) { zoom.z = 1; zoom.tx = zoom.ty = 0; paint(); } lastTap = now; }
+});
+stage.addEventListener('pointermove', e => {
+  const p = pts.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p[0], dy = e.clientY - p[1]; pts.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pts.size === 1) { vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true; return; }
+  if (pts.size === 2 && pinch) {
+    const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]), m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const r = stage.getBoundingClientRect(), cx = m[0] - r.left - r.width / 2, cy = m[1] - r.top - r.height / 2;
+    const z = Math.min(4, Math.max(0.6, zoom.z * d / Math.max(1, pinch.d))), k = z / zoom.z;
+    zoom.tx = cx - (cx - zoom.tx) * k + (m[0] - pinch.m[0]); zoom.ty = cy - (cy - zoom.ty) * k + (m[1] - pinch.m[1]); zoom.z = z;
+    pinch = { d, m }; vel.yaw = vel.pitch = 0; paint();
+  }
+});
+const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => stage.addEventListener(n, up));
+stage.addEventListener('wheel', e => {   // desktop: the wheel zooms about the cursor
+  e.preventDefault();
+  const r = stage.getBoundingClientRect(), cx = e.clientX - r.left - r.width / 2, cy = e.clientY - r.top - r.height / 2;
+  const z = Math.min(4, Math.max(0.6, zoom.z * Math.exp(-e.deltaY * 0.0015))), k = z / zoom.z;
+  zoom.tx = cx - (cx - zoom.tx) * k; zoom.ty = cy - (cy - zoom.ty) * k; zoom.z = z; paint();
+}, { passive: false });
+addEventListener('resize', () => paint());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => paint());
+
+// ---------- poses and the loop ----------
+const CLIPS = { bye: 'Bye', byebye: 'Bye-bye', bow: 'Bow', guide: 'This way', walk: 'Walk', run: 'Run', dance: 'Dance' };
+let pose = 'stand', poseStart = performance.now(), dtLast = 0, lastT = performance.now();
+const animated = () => pose !== 'stand';
+const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
+const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
+document.getElementById('m-raw').onclick = e => { raw = !raw; e.currentTarget.setAttribute('aria-pressed', String(raw)); dirty = true; };
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (shader.busy) return;   // one frame in flight: the next starts from the time it's actually drawn
+  if (!pts.size && (Math.abs(vel.yaw) > 0.01 || Math.abs(vel.pitch) > 0.01)) { cam.yaw += vel.yaw; cam.pitch += vel.pitch; vel.yaw *= 0.9; vel.pitch *= 0.9; dirty = true; }
+  cam.pitch = Math.max(-88, Math.min(88, cam.pitch));
+  if (!animated() && !dirty) return;
+  dtLast = (now - lastT) / 1000; lastT = now; dirty = false;
+  const t0 = performance.now();
+  frameOnce((now - poseStart) / 1000).then(() => {
+    const t1 = performance.now();
+    fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
+    readout.textContent = raw ? 'raw render'
+      : `CPU · WebAssembly ${shader.relaxed ? '8-bit' : '16-bit'} dots × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
+  }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
+}
+
+try {
+  if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
+    throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
+  const threads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+  [shader] = await Promise.all([createCpuShader({ base: 'nts/', maxPixels: NW * NH, threads }), loadModel()]);
+  tiles = new Uint8Array(5 * NW * NH * 4);
+  assignParts(shader.parts);
+  for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
+    const b = document.createElement('button');
+    b.dataset.pose = k; b.textContent = label; b.setAttribute('aria-pressed', 'false');
+    document.getElementById('clip-end').before(b);
+  }
+  document.querySelectorAll('[data-pose]').forEach(wirePose);
+  status.hidden = true;
+  window.ready = true;
+  requestAnimationFrame(loop);
+} catch (e) {
+  status.textContent = `Could not start: ${e.message}`;
+  console.error(e);
+}
+</script>

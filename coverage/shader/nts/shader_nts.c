@@ -719,6 +719,7 @@ int main(int argc, char **argv) {
         if (it % eval_every == 0 || last) {
             double e = evaluate(&d, eval_ids, neval, ews, nbf);
             printf("it %d  loss %.4f  held-out L1 %.4f  %.0fs\n", it, ema, e, wall() - t0);
+            if (!last) save_net(save);   /* a run cut short keeps its latest evaluation */
             if (profile) printf("  thread-0 ms/step: input %.1f embed %.1f stencil %.1f ffn-rows %.1f gelu %.1f | ffn-outer %.1f ffn-axpy %.1f stencil-bwd %.1f embed+tex-bwd %.1f\n",
                 1e3 * tst[0] / it, 1e3 * tst[1] / it, 1e3 * tst[2] / it, 1e3 * tst[3] / it, 1e3 * tst[4] / it, 1e3 * tst[7] / it, 1e3 * tst[8] / it, 1e3 * tst[9] / it, 1e3 * tst[10] / it);
             if (profile) printf("  ms/step: forward+backward %.1f, reduce %.1f, texture norm %.1f, adam %.1f, muon %.1f, texture adam %.1f\n",
