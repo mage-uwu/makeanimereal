@@ -44,7 +44,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 <div class="app">
   <header>
     <h1>Magical Girl Live</h1>
-    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit, scroll to zoom, double-click to reset. Motion capture: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset" style="color:inherit">Bandai Namco Research Motion Dataset</a> (CC BY-NC 4.0), retargeted.</span>
+    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit, shift-drag to move the light, scroll to zoom, double-click to reset. Motion capture: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset" style="color:inherit">Bandai Namco Research Motion Dataset</a> (CC BY-NC 4.0), retargeted.</span>
   </header>
   <div id="stage" tabindex="0" aria-label="Live character view; drag to orbit">
     <canvas id="view"></canvas>
@@ -61,13 +61,21 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span id="clip-buttons" class="group"></span>
     </div>
+    <div class="group" role="group" aria-label="Light">
+      <span class="label">Light</span>
+      <button data-light="off" aria-pressed="true">Off</button>
+      <button data-light="side" aria-pressed="false">Side</button>
+      <button data-light="sunset" aria-pressed="false">Sunset</button>
+      <button data-light="back" aria-pressed="false">Backlit</button>
+      <button data-light="night" aria-pressed="false">Night</button>
+    </div>
     <div class="group" role="group" aria-label="Detail">
       <span class="label">Detail</span>
       <button id="d-fast" aria-pressed="false">Fast</button>
-      <button id="d-sharp" aria-pressed="true">Sharp</button>
+      <button id="d-sharp" aria-pressed="false">Sharp</button>
       <button id="d-full" aria-pressed="false">Full</button>
       <button id="d-smooth" aria-pressed="false" title="Sharp, fine-tuned against flicker">Smooth</button>
-      <button id="d-crisp" aria-pressed="false" title="Smooth, with its linework crisped">Crisp</button>
+      <button id="d-crisp" aria-pressed="true" title="Smooth, with its linework crisped">Crisp</button>
     </div>
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
@@ -101,10 +109,11 @@ import { createMotion } from './motion.js';
 
 const NW = 360, NH = 640;           // network and G-buffer, as the shader was trained
 const FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
-// Three trained shaders: 'sharp' (the fast decoder at half resolution plus a full-resolution head;
-// the default where WebGPU runs it), 'fast' (channels 16/32/48/64 at 360 x 640; the WebGL engine's
-// default) and 'full' (32/48/64/96, about 4x the work). #fast and #full pick the others.
-const ASKED = location.hash.includes('full') ? 'full' : location.hash.includes('fast') ? 'fast' : location.hash.includes('smooth') ? 'smooth' : location.hash.includes('crisp') ? 'crisp' : 'sharp';
+// Trained shaders: 'crisp' (the default where WebGPU runs it: the sharp shader fine-tuned on posed
+// frames, against flicker and for crisp linework), 'smooth' (the same before the linework pass),
+// 'sharp' (half-resolution decoder plus a full-resolution head, posed frames only), 'fast' (channels
+// 16/32/48/64 at 360 x 640; the WebGL engine's default) and 'full' (32/48/64/96, about 4x the work).
+const ASKED = ['full', 'fast', 'smooth', 'sharp'].find(d => location.hash.includes(d)) || 'crisp';
 let DETAIL = ASKED;
 const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
@@ -675,6 +684,10 @@ stage.addEventListener('pointerdown', e => { dragging = true; last = [e.clientX,
 stage.addEventListener('pointermove', e => {
   if (!dragging) return;
   const dx = e.clientX - last[0], dy = e.clientY - last[1]; last = [e.clientX, e.clientY];
+  if (e.shiftKey && lightAt) {
+    lightAt.yaw -= dx * 0.6; lightAt.pitch = Math.max(-80, Math.min(85, lightAt.pitch - dy * 0.4)); dirty = true;
+    return;
+  }
   vel.yaw = -dx * 0.45; vel.pitch = dy * 0.3; cam.yaw += vel.yaw; cam.pitch += vel.pitch; dirty = true;
 });
 ['pointerup', 'pointercancel'].forEach(n => stage.addEventListener(n, () => { dragging = false; }));
@@ -727,9 +740,34 @@ function showDetail() {
 }
 for (const d of ['fast', 'sharp', 'full', 'smooth', 'crisp']) document.getElementById(`d-${d}`).onclick = () => {
   if (d === DETAIL) return;
-  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full', 'smooth', 'crisp'].includes(t)), ...(d === 'sharp' ? [] : [d])].join('-');
+  location.hash = [...location.hash.slice(1).split('-').filter(t => t && !['fast', 'full', 'smooth', 'crisp', 'sharp'].includes(t)), ...(d === 'crisp' ? [] : [d])].join('-');
   location.reload();
 };
+// Toon cross-shading (WebGPU display pass): a cel key light and a rim light from the G-buffer's
+// normals, multiplied onto the drawing. Presets set colours and where the light sits around her
+// (yaw 0 is in front of her, degrees); shift-drag moves it.
+const LIGHTS = {
+  off: null,
+  side: { yaw: -70, pitch: 25, key: [1.08, 1.04, 1.0], shade: [0.62, 0.64, 0.82], soft: 0.06, at: 0.05, rim: [0, 0, 0], fall: 4 },
+  sunset: { yaw: 60, pitch: 8, key: [1.1, 0.96, 0.84], shade: [0.56, 0.5, 0.74], soft: 0.06, at: 0.1, rim: [0.5, 0.3, 0.15], fall: 3 },
+  back: { yaw: 170, pitch: 30, key: [1.05, 1.05, 1.05], shade: [0.7, 0.72, 0.88], soft: 0.08, at: 0.0, rim: [1.1, 1.05, 1.0], fall: 2 },
+  night: { yaw: -35, pitch: 45, key: [0.78, 0.86, 1.12], shade: [0.3, 0.33, 0.55], soft: 0.06, at: 0.15, rim: [0.2, 0.3, 0.6], fall: 3 },
+};
+let lightName = 'off', lightAt = null;
+const lightBuf = new Float32Array(16), lv = new THREE.Vector3();
+function lightParams() {
+  const L = LIGHTS[lightName];
+  if (!L) return null;
+  const y = THREE.MathUtils.degToRad(lightAt.yaw), p = THREE.MathUtils.degToRad(lightAt.pitch);
+  lv.set(Math.sin(y) * Math.cos(p), Math.sin(p), Math.cos(y) * Math.cos(p)).transformDirection(camera.matrixWorldInverse);
+  lightBuf.set([lv.x, lv.y, lv.z, 1, ...L.key, L.soft, ...L.shade, L.at, ...L.rim, L.fall]);
+  return lightBuf;
+}
+document.querySelectorAll('[data-light]').forEach(b => b.onclick = () => {
+  lightName = b.dataset.light; lightAt = LIGHTS[lightName] && { yaw: LIGHTS[lightName].yaw, pitch: LIGHTS[lightName].pitch };
+  setPressed('[data-light]', b); dirty = true;
+});
+window.debugLighting = (name, at) => { lightName = name; lightAt = LIGHTS[name] && (at || { yaw: LIGHTS[name].yaw, pitch: LIGHTS[name].pitch }); };
 const wirePose = b => b.onclick = () => {
   pose = b.dataset.pose; poseStart = performance.now(); setPressed('[data-pose]', b); dirty = true;
 };
@@ -744,7 +782,7 @@ function drawFrame() {
     const W = Math.round(canvas.clientWidth * Math.min(devicePixelRatio || 1, 2)), H = Math.round(canvas.clientHeight * Math.min(devicePixelRatio || 1, 2));
     if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
     const top = css('--stage-top'), bottom = css('--stage-bottom');
-    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
+    gpu.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch), mode, light: mode === 0 ? lightParams() : null, top: [top.r, top.g, top.b], bottom: [bottom.r, bottom.g, bottom.b],
       noShow: location.hash.includes('noshow') });
     gpuMs = gpu.gpuMs;
     return crop;
@@ -819,6 +857,17 @@ window.debugFrame = async (yaw, pitch, poseName = 'stand', t = 0) => {
   const c = document.createElement('canvas'); c.width = res.w; c.height = res.h;
   const id = c.getContext('2d').createImageData(res.w, res.h);
   for (let i = 0; i < out.length; i++) id.data[i] = Math.round(Math.min(1, Math.max(0, out[i])) * 255);
+  c.getContext('2d').putImageData(id, 0, 0);
+  return c.toDataURL('image/png');
+};
+// The displayed frame (WebGPU engine, with the toon light if one is set), as a PNG data URL.
+window.debugShow = async (yaw, pitch, poseName = 'stand', t = 0) => {
+  cam.yaw = yaw; cam.pitch = pitch; pose = poseName; mode = 0; lastCrop = null;
+  setPose(poseName, t); vrm.update(0);
+  const crop = drawFrame();
+  const r = await gpu.readShow({ crop, light: lightParams() });
+  const c = document.createElement('canvas'); c.width = r.w; c.height = r.h;
+  const id = c.getContext('2d').createImageData(r.w, r.h); id.data.set(r.data);
   c.getContext('2d').putImageData(id, 0, 0);
   return c.toDataURL('image/png');
 };
