@@ -312,7 +312,7 @@ function show(rgba, crop) {
 }
 
 // ---------- VTuber: head and eyes follow the pointer, blinks, lip-sync (microphone or speech) ----------
-const face = { follow: false, ndc: null, yaw: 0, pitch: 0, blinkAt: performance.now() + 2500, mic: null, speak: null, mouth: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 } };
+const face = { follow: false, ndc: null, yaw: 0, pitch: 0, vy: 0, vp: 0, blinkAt: performance.now() + 2500, mic: null, speak: null, mouth: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 } };
 const lookTarget = new THREE.Object3D(), headPos = new THREE.Vector3(), ray = new THREE.Raycaster(), plane = new THREE.Plane(), camDir = new THREE.Vector3();
 const qa = new THREE.Quaternion(), ea = new THREE.Euler();
 // Canvas position (CSS pixels) -> the network frame's NDC, through the same box the frame is drawn in.
@@ -333,16 +333,21 @@ function applyFace(dt) {
     ray.setFromCamera(face.ndc, camera);
     if (ray.ray.intersectPlane(plane, lookTarget.position)) {
       const d = lookTarget.position.clone().sub(headPos);
-      ty = Math.max(-1.05, Math.min(1.05, Math.atan2(d.x, d.z)));
-      tp = Math.max(-0.6, Math.min(0.6, Math.atan2(d.y, Math.hypot(d.x, d.z))));
+      ty = Math.max(-0.9, Math.min(0.9, Math.atan2(d.x, d.z)));
+      tp = Math.max(-0.5, Math.min(0.5, Math.atan2(d.y, Math.hypot(d.x, d.z))));
       if (Math.abs(Math.atan2(d.x, d.z)) > 2.3) ty = tp = 0;   // pointer behind her: look ahead
     }
   }
-  const k = Math.min(1, dt * 8);
-  face.yaw += (ty - face.yaw) * k; face.pitch += (tp - face.pitch) * k;
-  for (const [n, share] of [['neck', 0.4], ['head', 0.6]]) {
+  // A critically damped spring (settles in about a second, no snap at either end); the eyes lead it.
+  const w = 4.2, h = Math.min(dt, 0.05);
+  face.vy += (w * w * (ty - face.yaw) - 2 * w * face.vy) * h; face.yaw += face.vy * h;
+  face.vp += (w * w * (tp - face.pitch) - 2 * w * face.vp) * h; face.pitch += face.vp * h;
+  // The turn shared up the body, from the spine to the head, with a lean: looking aside, the upper body
+  // tilts toward that side a little and the head cocks the other way.
+  for (const [n, sy, sp, roll] of [['spine', 0.12, 0.08, -0.06], ['chest', 0.16, 0.12, -0.05], ['upperChest', 0.12, 0.1, -0.03],
+                                   ['neck', 0.22, 0.28, 0], ['head', 0.38, 0.42, 0.16]]) {
     const b = bone(n); if (!b) continue;
-    b.quaternion.multiply(qa.setFromEuler(ea.set(-face.pitch * share, face.yaw * share, 0, 'YXZ')));
+    b.quaternion.multiply(qa.setFromEuler(ea.set(-face.pitch * sp, face.yaw * sy, face.yaw * roll, 'YXZ')));
   }
   if (!(face.follow && face.ndc)) { bone('head').getWorldPosition(lookTarget.position); lookTarget.position.z += 2; }   // straight ahead
   if (vrm.lookAt) vrm.lookAt.target = lookTarget;
@@ -356,7 +361,7 @@ function applyFace(dt) {
   if (face.mic) Object.assign(want, micVowels());
   else if (face.speak) Object.assign(want, speechVowels(now));
   for (const v in want) { face.mouth[v] += (want[v] - face.mouth[v]) * Math.min(1, dt * 18); em?.setValue(v, face.mouth[v]); }
-  const moving = Math.abs(ty - face.yaw) > 0.002 || Math.abs(tp - face.pitch) > 0.002 || (bt > -40 && bt < 200)
+  const moving = Math.abs(ty - face.yaw) > 0.002 || Math.abs(tp - face.pitch) > 0.002 || Math.abs(face.vy) + Math.abs(face.vp) > 0.002 || (bt > -40 && bt < 200)
     || Object.values(face.mouth).some(x => x > 0.01) || !!face.mic || !!face.speak;
   return moving;
 }
