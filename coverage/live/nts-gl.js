@@ -17,6 +17,8 @@
 // whose receptive field holds only background has a per-block constant (computed here in JS from
 // the weights, per frame since the camera pitch is an input) and isn't drawn.
 
+import { BACKDROP_GLSL, setBackdropUniforms } from './backdrop.js';
+
 // net.png: export_nts.py's net.bin packed 3 bytes a pixel into an opaque RGB PNG after a 4-byte length.
 async function loadImage(url) {
   const img = new Image();
@@ -369,6 +371,8 @@ void main() {
 const SHOW = `#version 300 es
 precision highp float;
 uniform sampler2D R, K, T0, TT, TD; uniform vec4 box; uniform vec3 top, bottom; uniform vec2 view; uniform int raw, ink, toon;
+uniform int bgOn;   // the backdrop (backdrop.js) instead of the stage gradient
+${BACKDROP_GLSL}
 uniform vec3 toonP;   // near, far, line width (canvas pixels)
 uniform sampler2D G, T1, T2, T4; uniform int sharp; uniform vec2 lowRes;
 out vec4 o;
@@ -438,7 +442,7 @@ vec4 toonOver(vec4 c) {
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
   vec2 q = vec2(gl_FragCoord.x, view.y - gl_FragCoord.y);   // canvas pixels, top-down
-  vec3 bg = mix(top, bottom, q.y / view.y);
+  vec3 bg = bgOn == 1 ? backdrop((q - box.xy) / box.zw) : mix(top, bottom, q.y / view.y);
   vec2 p = (q - box.xy) / box.zw;
   if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = toonOver(vec4(bg, 1.0)); return; }
   vec2 uv = vec2(p.x, 1.0 - p.y);
@@ -698,6 +702,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
+    gl.uniform1i(s.u.bgOn, view.backdrop ? 1 : 0);
+    if (view.backdrop) setBackdropUniforms(gl, s.u, view.backdrop);
     gl.uniform1i(s.u.sharp, view.guide && !view.raw ? 1 : 0);
     if (view.guide) {
       bindTex(5, gl.TEXTURE_2D, view.guide, null, s.u.G);

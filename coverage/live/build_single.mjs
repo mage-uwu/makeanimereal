@@ -20,7 +20,7 @@ const must = (s, a, b) => { if (!s.includes(a)) throw new Error(`build_single: '
 const worker = read('nts-worker.js').toString();
 // the modules, bundled into the page's own module script: each in a function scope, its exports
 // returned (an artifact page loads scripts only from its allowed CDNs, so no data: modules)
-const mods = ['motion.js', 'nts.js', 'nts-gl.js', 'toon.js', 'guide.js', 'sword.js', 'gpu-nts.js'];   // dependencies first
+const mods = ['motion.js', 'nts.js', 'backdrop.js', 'nts-gl.js', 'toon.js', 'guide.js', 'sword.js', 'gpu-nts.js'];   // dependencies first
 const exported = {};
 const bundle = mods.map(m => {
   let code = read(m).toString();
@@ -31,8 +31,8 @@ const bundle = mods.map(m => {
     if (!exported[from]) throw new Error(`build_single: ${m} imports ${from} before it is bundled`);
     return `const {${names}} = ${exported[from]};`;
   });
-  const names = [...code.matchAll(/^export (?:async )?function (\w+)/gm)].map(x => x[1]);
-  code = code.replace(/^export (async )?function/gm, '$1function');
+  const names = [...code.matchAll(/^export (?:async )?(?:function|const) (\w+)/gm)].map(x => x[1]);
+  code = code.replace(/^export (async )?function/gm, '$1function').replace(/^export const /gm, 'const ');
   if (/^(export|import) /m.test(code) || /import\.meta/.test(code)) throw new Error(`build_single: ${m} has an import or export the bundler doesn't handle`);
   exported[m] = `bundled[${JSON.stringify(m)}]`;
   return `// ---- ${m} ----\nbundled[${JSON.stringify(m)}] = (() => {\n${code}\nreturn { ${names.join(', ')} };\n})();\n`;

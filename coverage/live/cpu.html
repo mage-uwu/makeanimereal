@@ -70,6 +70,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     <div class="chips" id="chips" role="group" aria-label="Pose and view">
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span class="sep" id="clip-end"></span>
+      <button id="v-bg" aria-pressed="false" title="An anime backdrop and ground: off, a pastel day, or an idol stage at night">Backdrop: Off</button>
       <button id="v-sword" aria-pressed="false" title="Her longsword, in her right hand (Slash draws it)">Sword</button>
       <button id="v-follow" aria-pressed="false" title="Her head and eyes follow your pointer or finger">Follow</button>
       <button id="v-mic" aria-pressed="false" title="Lip-sync to your microphone">Mic</button>
@@ -122,6 +123,7 @@ import { createGlShader } from './nts-gl.js';
 import { createToon } from './toon.js';
 import { createGuide } from './guide.js';
 import { createSword } from './sword.js';
+import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 
 // The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
 // #tight: the training frame itself (the checks compare against it).
@@ -340,14 +342,27 @@ function glView(extra = {}) {
   const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(8, Math.max(1, fb.box[3] * 0.0019))) : null;
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
-  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines === 'neural', toon: toonTex, guide: guideTex, ...extra };
+  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
+}
+// The backdrop (backdrop.js): 0 off (the stage gradient), 1 a pastel day, 2 an idol stage; under her hips, on the floor.
+const BACKDROPS = ['Off', 'Sky', 'Stage'];
+let backdrop = 0, bgCanvas = null;
+const hipsAt = new THREE.Vector3();
+function backdropNow() {
+  if (!backdrop || raw || !vrm) return null;
+  vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(hipsAt);
+  return backdropUniforms(THREE, camera, hipsAt.setY(0), backdrop, performance.now() / 1000);
 }
 function paint() {
   if (ENGINE === 'gpu') { if (gls) gls.frame({ pitch: THREE.MathUtils.degToRad(cam.pitch), view: glView({ showOnly: true }) }); return; }
   const { W, H, box } = frameBox();
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, css('--stage-top')); g.addColorStop(1, css('--stage-bottom'));
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const b = backdropNow();
+  if (b && (bgCanvas ||= createBackdropCanvas())) ctx.drawImage(bgCanvas.render(W, H, box, b), 0, 0);
+  else {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, css('--stage-top')); g.addColorStop(1, css('--stage-bottom'));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(net, ...box);
 }
@@ -543,6 +558,11 @@ const wirePose = b => b.onclick = () => {
 };
 function showSword(on) { sword?.show(on); document.getElementById('v-sword').setAttribute('aria-pressed', String(on)); lastCrop = null; dirty = true; }
 document.getElementById('v-sword').onclick = () => showSword(!sword?.shown);
+document.getElementById('v-bg').onclick = e => {
+  backdrop = (backdrop + 1) % BACKDROPS.length;
+  e.currentTarget.textContent = `Backdrop: ${BACKDROPS[backdrop]}`;
+  e.currentTarget.setAttribute('aria-pressed', String(backdrop > 0)); dirty = true;
+};
 document.getElementById('m-sharp').onclick = e => { sharp = !sharp; e.currentTarget.setAttribute('aria-pressed', String(sharp)); dirty = true; };
 document.getElementById('m-lines').onclick = e => {
   const modes = ['toon', ...(gls?.ink ? ['neural'] : []), 'off'];
