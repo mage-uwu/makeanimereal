@@ -70,6 +70,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     <div class="chips" id="chips" role="group" aria-label="Pose and view">
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span class="sep" id="clip-end"></span>
+      <button id="v-sword" aria-pressed="false" title="Her longsword, in her right hand (Slash draws it)">Sword</button>
       <button id="v-follow" aria-pressed="false" title="Her head and eyes follow your pointer or finger">Follow</button>
       <button id="v-mic" aria-pressed="false" title="Lip-sync to your microphone">Mic</button>
       <button id="v-speak" aria-pressed="false" title="Type a line for her to say">Speak</button>
@@ -117,6 +118,7 @@ import { createGpuShader } from './gpu-nts.js';
 import { createGlShader } from './nts-gl.js';
 import { createToon } from './toon.js';
 import { createGuide } from './guide.js';
+import { createSword } from './sword.js';
 
 // The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
 // #tight: the training frame itself (the checks compare against it).
@@ -148,7 +150,7 @@ const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(1, 3, 2);
 scene.add(sun);
 const camera = new THREE.PerspectiveCamera(VIEW_FOV, NW / NH, 0.01, 100);
-let vrm, target, radius, bones = [], motions = null, motion = null;
+let vrm, target, radius, bones = [], motions = null, motion = null, sword = null;
 
 // The model ships as bytes packed into an opaque RGB PNG: 3 bytes a pixel after a 4-byte length.
 async function unpackPng(url) {
@@ -176,6 +178,7 @@ async function loadModel() {
   for (let i = 0; i < 240; i++) vrm.update(1 / 60);
   const box = new THREE.Box3().setFromObject(vrm.scene);
   addShorts();
+  sword = createSword({ THREE, vrm });   // after the box: her framing doesn't change when she draws it
   target = box.getCenter(new THREE.Vector3());
   radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
 }
@@ -208,6 +211,10 @@ function addShorts() {
 }
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
 function setPose(name, t) {
+  posePose(name, t);
+  sword?.grip();   // with the sword out, her right hand closes round its grip
+}
+function posePose(name, t) {
   if (motion?.apply(name, t)) return;
   const d = THREE.MathUtils.degToRad, set = (n, x, y, z) => { const b = bone(n); if (b) b.rotation.set(x, y, z); };
   vrm.humanoid.resetNormalizedPose();   // the training pose: arms relaxed down from the T-pose
@@ -217,7 +224,7 @@ function setPose(name, t) {
 function assignParts(names) {
   vrm.scene.traverse(o => {
     if (!o.isMesh) return;
-    o.userData.part = Math.max(0, names.indexOf([].concat(o.material)[0].name.replace(' (Instance)', '')));
+    o.userData.part = Math.max(0, names.indexOf(o.userData.partName ?? [].concat(o.material)[0].name.replace(' (Instance)', '')));   // partName: the sword's
     o.onBeforeRender = (r, s, c, g, mat) => { if (mat.uniforms?.part) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; } };
   });
 }
@@ -278,11 +285,16 @@ function renderTiles(crop) {
 // Her box on screen from the bones, padded past the silhouette (index.html's cropBox), snapped to 16.
 const v3 = new THREE.Vector3();
 let lastCrop = null;
+const swordA = new THREE.Vector3(), swordB = new THREE.Vector3();
 function cropBox() {
   let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
   for (const b of bones) {
     b.getWorldPosition(v3).project(camera);
     x0 = Math.min(x0, v3.x); x1 = Math.max(x1, v3.x); y0 = Math.min(y0, v3.y); y1 = Math.max(y1, v3.y);
+  }
+  if (sword?.shown) {   // the blade reaches well past her hand
+    sword.ends(swordA, swordB);
+    for (const p of [swordA, swordB]) { p.project(camera); x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
   }
   const px = x => (x * 0.5 + 0.5) * NW, py = y => (0.5 - y * 0.5) * NH;
   let box = [px(x0) - 44 - CROP_PAD, py(y1) - 64 - CROP_PAD, px(x1) + 44 + CROP_PAD, py(y0) + 32 + CROP_PAD];
@@ -510,11 +522,16 @@ addEventListener('resize', () => paint());
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => paint());
 
 // ---------- poses and the loop ----------
-const CLIPS = { bye: 'Bye', byebye: 'Bye-bye', bow: 'Bow', guide: 'This way', walk: 'Walk', run: 'Run', dance: 'Dance' };
+const CLIPS = { bye: 'Bye', byebye: 'Bye-bye', bow: 'Bow', guide: 'This way', walk: 'Walk', run: 'Run', dance: 'Dance', slash: 'Slash', slash2: 'Slash 2' };
 let pose = 'stand', poseStart = performance.now(), dtLast = 0, lastT = performance.now();
 const animated = () => pose !== 'stand';
 const press = (sel, el) => document.querySelectorAll(sel).forEach(b => b.setAttribute('aria-pressed', String(b === el)));
-const wirePose = b => b.onclick = () => { pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true; };
+const wirePose = b => b.onclick = () => {
+  pose = b.dataset.pose; poseStart = performance.now(); press('[data-pose]', b); dirty = true;
+  if (pose.startsWith('slash')) showSword(true);   // the sword clips draw it
+};
+function showSword(on) { sword?.show(on); document.getElementById('v-sword').setAttribute('aria-pressed', String(on)); lastCrop = null; dirty = true; }
+document.getElementById('v-sword').onclick = () => showSword(!sword?.shown);
 document.getElementById('m-sharp').onclick = e => { sharp = !sharp; e.currentTarget.setAttribute('aria-pressed', String(sharp)); dirty = true; };
 document.getElementById('m-lines').onclick = e => {
   const modes = ['toon', ...(gls?.ink ? ['neural'] : []), 'off'];
