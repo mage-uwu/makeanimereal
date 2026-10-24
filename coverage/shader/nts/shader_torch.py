@@ -532,7 +532,8 @@ def main():
 
     opt = Optim(net, a.distill)
     t0 = time.time(); ema = None
-    for it in range(1, a.iters + 1):
+    iters = 1 << 40 if a.seconds > 0 else a.iters   # a time budget sets the length (and the schedule), not --iters
+    for it in range(1, iters + 1):
         el = time.time() - t0
         prog = min(1, el / a.seconds) if a.seconds > 0 else it / a.iters
         sched = min(1, it / 300) * (.1 + .9 * .5 * (1 + math.cos(math.pi * prog)))
@@ -541,7 +542,7 @@ def main():
         opt.step(it, a.lr * sched, a.lr_tex * sched, a.batch, hits)
         loss /= a.batch
         ema = loss if ema is None else .98 * ema + .02 * loss
-        last = it == a.iters or (a.seconds > 0 and time.time() - t0 >= a.seconds)
+        last = it == iters or (a.seconds > 0 and time.time() - t0 >= a.seconds)
         if it % a.eval_every == 0 or last:
             e = evaluate(net, data, eval_ids, bool(T))
             print(f'it {it}  loss {ema:.4f}  held-out L1 {e:.4f}  {time.time() - t0:.0f}s', flush=True)
