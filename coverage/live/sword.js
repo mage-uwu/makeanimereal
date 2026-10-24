@@ -8,19 +8,22 @@
 //   sword.ends(a, b);                            // its pommel and tip, world space (for the crop box)
 //
 // The network sees it like her other meshes: colour from its own flat materials, normals, depth and
-// UVs from the geometry, and `part` (userData.partName) picks which part's neural texture it samples.
-export function createSword({ THREE, vrm, partName = 'N00_008_01_Shoes_01_CLOTH_02' }) {
+// UVs from the geometry, and `part` (userData.partName) picks which part's neural texture it samples:
+// her silver hair's for the steel, the shorts' (a colour-only part, so the network follows the colour)
+// for the gold, her dress's for the navy grip.
+const PART = { steel: 'N00_000_Hair_00_HAIR', gold: 'Shorts', navy: 'N00_010_01_Onepiece_00_CLOTH_01' };
+export function createSword({ THREE, vrm }) {
   const hand = vrm.humanoid.getNormalizedBoneNode('rightHand');
   const root = new THREE.Group();
   root.name = 'sword';
   root.visible = false;
-  const mat = (color, name) => new THREE.MeshBasicMaterial({ color, name });
-  const steel = mat(0xcfd6e2, 'SwordBlade'), edge = mat(0xf2f5fa, 'SwordEdge'), gold = mat(0xc9a24a, 'SwordGuard'), grip = mat(0x1c2056, 'SwordGrip');
+  const mat = (color, name, part) => Object.assign(new THREE.MeshBasicMaterial({ color, name }), { userData: { part } });
+  const steel = mat(0xcfd6e2, 'SwordBlade', PART.steel), edge = mat(0xf2f5fa, 'SwordEdge', PART.steel), gold = mat(0xc9a24a, 'SwordGuard', PART.gold), wrap = mat(0x1c2056, 'SwordGrip', PART.navy);
 
   // lengths in metres, along +Z from the fist's centre
-  const GRIP = 0.17, BLADE = 0.74, W = 0.042, T = 0.009;
+  const GRIP = 0.17, BLADE = 0.74, W = 0.052, T = 0.012;
   const parts = [];
-  const add = (geo, m) => { const o = new THREE.Mesh(geo, m); o.frustumCulled = false; o.userData.partName = partName; root.add(o); parts.push(o); return o; };
+  const add = (geo, m) => { const o = new THREE.Mesh(geo, m); o.frustumCulled = false; o.userData.partName = m.userData.part; root.add(o); parts.push(o); return o; };
   // blade: a flat diamond section tapering to a point, extruded along +Z
   {
     const s = new THREE.Shape();
@@ -49,7 +52,7 @@ export function createSword({ THREE, vrm, partName = 'N00_008_01_Shoes_01_CLOTH_
     for (let i = 0; i <= 24; i++) { const z = i / 24; pts.push(new THREE.Vector2(0.0145 + 0.002 * Math.abs(Math.sin(z * Math.PI * 8)), (z - 0.5) * GRIP)); }
     const g = new THREE.LatheGeometry(pts, 14);
     g.rotateX(Math.PI / 2);
-    add(g, grip);
+    add(g, wrap);
     const pommel = new THREE.SphereGeometry(0.024, 14, 10);
     pommel.scale(1, 0.8, 1.15);
     add(pommel, gold).position.z = -GRIP / 2 - 0.02;
