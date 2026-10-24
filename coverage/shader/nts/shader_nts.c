@@ -76,6 +76,7 @@ static float *gd, *gW1[MAXB], *gW2[MAXB];
 static float *TI[MAXB], *TO[MAXB], *QI[MAXB], *QO[MAXB];   /* trees: node rows w_in, w_out (Muon masters, ternary values) */
 static float *MI[MAXB], *MO[MAXB], *gTI[MAXB], *gTO[MAXB], ***gTI_t, ***gTO_t;
 static size_t o_tb[MAXB];                                   /* their node biases, in dense */
+static int8_t *QIc[MAXB]; static float *QIs[MAXB];          /* w_in's codes and row scales: s exactly as infer.c computes it */
 
 /* ---------------- narrow-row VNNI rows (d = 64) ----------------
  * qrows_dot8_batch reduces each output across 16 lanes, built for the engine's wide rows; at 64
@@ -210,7 +211,14 @@ static void requantize(void) {
         if (TREES) {
             size_t n = (size_t)TREES * TN * DW;
             if (check_mode) { memcpy(QI[b], TI[b], sizeof(float) * n); memcpy(QO[b], TO[b], sizeof(float) * n); }
-            else { tss_ternary(TI[b], QI[b], (long)TREES * TN, DW, DW); tss_ternary(TO[b], QO[b], (long)TREES * TN, DW, DW); }
+            else {
+                tss_ternary(TI[b], QI[b], (long)TREES * TN, DW, DW); tss_ternary(TO[b], QO[b], (long)TREES * TN, DW, DW);
+                for (int r = 0; r < TREES * TN; r++) {
+                    float m = 0;
+                    for (int i = 0; i < DW; i++) { float q = QI[b][r * DW + i]; QIc[b][r * DW + i] = (int8_t)((q > 0) - (q < 0)); if (fabsf(q) > m) m = fabsf(q); }
+                    QIs[b][r] = m;
+                }
+            }
         }
         tc_pack(dense + o_tc[b], TCC[b]);
     }
@@ -228,6 +236,7 @@ static void net_alloc(int threads) {
             size_t n = (size_t)TREES * TN * DW;
             TI[b] = calloc(n, 4); TO[b] = calloc(n, 4); QI[b] = calloc(n, 4); QO[b] = calloc(n, 4);
             MI[b] = calloc(n, 4); MO[b] = calloc(n, 4); gTI[b] = calloc(n, 4); gTO[b] = calloc(n, 4);
+            QIc[b] = calloc(n, 1); QIs[b] = calloc((size_t)TREES * TN, 4);
         }
     }
     codes.ok = FAST;
@@ -383,15 +392,24 @@ static void ffn_rows(const float *Q, Plane *pl, const Rows64 *R, const float *xi
 }
 
 /* ---------------- trees (fff_fwd / fff_bwd for one token) ----------------
- * x: the token's quant8 input; y += the trees' path sum. node / sv: the visited rows and their s, a
+ * x: the token's quant8 input (code, xs: its codes and scale; NULL in the gradient check's continuous
+ * mode); y += the trees' path sum. s is the integer sum of codes x w_in's row scale x xs + the bias,
+ * in that order, as infer.c and shader_torch.py compute it: a tie (an integer sum of 0 at a zero bias,
+ * common in fresh trees) then goes the same way everywhere. node / sv: the visited rows and their s, a
  * tree's V in turn; anode / as (training): below each decision but the last, the walk down the other
  * child, (V - 1) + ... + 1 rows a tree. */
-static void tree_fwd(int b, const float *x, float *y, int *node, float *sv, int *anode, float *as) {
-    const float *QIb = QI[b], *QOb = QO[b], *bias = dense + o_tb[b];
+static inline float node_s(int b, int row, const float *x, const int8_t *code, float xs) {
+    if (!code) return dotr(QI[b] + (size_t)row * DW, x, DW) + dense[o_tb[b] + row];
+    const int8_t *w = QIc[b] + (size_t)row * DW; int sum = 0;
+    for (int i = 0; i < DW; i++) sum += w[i] * code[i];
+    return (float)sum * QIs[b][row] * xs + dense[o_tb[b] + row];
+}
+static void tree_fwd(int b, const float *x, const int8_t *code, float xs, float *y, int *node, float *sv, int *anode, float *as) {
+    const float *QOb = QO[b];
     for (int tr = 0; tr < TREES; tr++) {
         int a = 0, *nd = node + tr * TV; float *sd = sv + tr * TV;
         for (int j = 0; j < TV; j++) {
-            int row = tr * TN + a; float s = dotr(QIb + (size_t)row * DW, x, DW) + bias[row];
+            int row = tr * TN + a; float s = node_s(b, row, x, code, xs);
             nd[j] = row; sd[j] = s;
             axpy(y, gelu(s), QOb + (size_t)row * DW, DW);
             a = 2 * a + 1 + (s > 0);
@@ -401,7 +419,7 @@ static void tree_fwd(int b, const float *x, float *y, int *node, float *sv, int 
         for (int j = 0; j + 1 < TV; j++) {
             int a2 = 2 * (nd[j] - tr * TN) + 2 - (sd[j] > 0);   /* the child not taken */
             for (int jj = j + 1; jj < TV; jj++, k++) {
-                int row = tr * TN + a2; float s = dotr(QIb + (size_t)row * DW, x, DW) + bias[row];
+                int row = tr * TN + a2; float s = node_s(b, row, x, code, xs);
                 anode[k] = row; as[k] = s; a2 = 2 * a2 + 1 + (s > 0);
             }
         }
@@ -468,7 +486,7 @@ static void forward(WS *w, const uint8_t *src, int Wf, int h, int wd, float pitc
                 if (check_mode) memcpy(xq, ti, sizeof(float) * DW); else quant8_64(ti, xq, w->c1[b] + (size_t)t * DW, w->xs1[b] + t);
                 for (int j = 0; j < DW; j++) ot[j] = b2[j] + ti[j];
                 size_t v = (size_t)t * TREES * TV, a = (size_t)t * TREES * TAL;
-                tree_fwd(b, xq, ot, w->tnode[b] + v, w->ts[b] + v, w->tanode[b] && !check_mode ? w->tanode[b] + a : NULL, w->tas[b] ? w->tas[b] + a : NULL);
+                tree_fwd(b, xq, check_mode ? NULL : w->c1[b] + (size_t)t * DW, w->xs1[b][t], ot, w->tnode[b] + v, w->ts[b] + v, w->tanode[b] && !check_mode ? w->tanode[b] + a : NULL, w->tas[b] ? w->tas[b] + a : NULL);
             }
             continue;
         }
@@ -596,7 +614,7 @@ static double distill_grad(WS *w, int th, int L) {
             const float *ti = w->tw[b]->out + (size_t)t * DW, *xq = w->xq1[b] + (size_t)t * DW, *xo = w->x[b + 1] + (size_t)t * DW;
             size_t v = (size_t)t * TREES * TV, a = (size_t)t * TREES * TAL;
             memset(y, 0, sizeof y);
-            tree_fwd(b, xq, y, w->tnode[b] + v, w->ts[b] + v, w->tanode[b] + a, w->tas[b] + a);
+            tree_fwd(b, xq, w->c1[b] + (size_t)t * DW, w->xs1[b][t], y, w->tnode[b] + v, w->ts[b] + v, w->tanode[b] + a, w->tas[b] + a);
             for (int j = 0; j < DW; j++) { float e = y[j] - (xo[j] - ti[j] - b2[j]); err += (double)e * e; gy[j] = 2 * e / L; }
             tree_bwd(b, th, xq, gy, NULL, w->tnode[b] + v, w->ts[b] + v, w->tanode[b] + a, w->tas[b] + a);
         }
@@ -906,7 +924,7 @@ static int run_check(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *data = NULL, *save = "model.ntsw", *prev = "preview.ppm", *load = NULL, *ref = NULL;
+    const char *data = NULL, *save = "model.ntsw", *prev = "preview.ppm", *load = NULL, *ref = NULL, *dump = NULL, *save_init = NULL;
     int tex8 = 0, eval_all = 0, lines = 0, distill = 0;
     int iters = 12000, B = 0, crop = 96, threads = 0, eval_every = 500, check = 0;
     double lr = 0.003, lr_tex = 0.01, seconds = 0;
@@ -935,6 +953,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--tex8")) tex8 = 1;                  /* the viewer's 8-bit texture */
         else if (!strcmp(a, "--eval-all")) eval_all = 1;          /* every frame is held out (a pack_data.py --held file), all evaluated */
         else if (!strcmp(a, "--ref")) { ref = v; i++; }           /* first held-out frame's input and output, for infer.c */
+        else if (!strcmp(a, "--dump-grads")) { dump = v; i++; }
+        else if (!strcmp(a, "--save-init")) { save_init = v; i++; }   /* the model as training would start it (net_init, then --load), and stop */   /* step 1's batch: its summed raw gradients, for shader_torch.py */
         else { fprintf(stderr, "unknown %s\n", a); return 2; }
     }
     if (check) return run_check();
@@ -951,6 +971,7 @@ int main(int argc, char **argv) {
     if (TREES && lines) { fprintf(stderr, "--tree with --lines is not supported\n"); return 2; }
     if (load && !load_net(load)) { fprintf(stderr, "could not load %s\n", load); return 1; }
     tree_on = TREES && !distill;
+    if (save_init) { printf(save_net(save_init) ? "initial model -> %s\n" : "could not save %s\n", save_init); return 0; }
     if (tex8) tex_to_8bit();
     int ch = crop < d.H ? crop : d.H, cw = crop < d.W ? crop : d.W;
     int *nb[MAXB], *nbf[MAXB];
@@ -983,6 +1004,30 @@ int main(int argc, char **argv) {
         }
         fwrite(frame_px(&d, fi), 17, (size_t)d.H * d.W, f); fwrite(ews[0]->p, 4, (size_t)d.H * d.W * 4, f); fclose(f);
         printf("reference frame %d -> %s\n", fi, ref);
+    }
+    if (dump) {   /* 'NTSG', B, loss, then the gradients summed over step 1's crops (as train_step draws them), before scaling */
+        tree_on = TREES && !distill; double loss = 0;
+        for (int b = 0; b < B; b++) {
+            uint64_t sd = 1 * 0x9E3779B97F4A7C15ULL + b * 7919 + 1;
+            int fi = train_ids[(int)(urand(&sd) * ntr)];
+            int cy = (int)(urand(&sd) * (d.H - ch + 1)), cx = (int)(urand(&sd) * (d.W - cw + 1));
+            const uint8_t *src = frame_px(&d, fi) + ((size_t)cy * d.W + cx) * 17;
+            forward(wss[0], src, d.W, ch, cw, d.pitch[fi], nb);
+            if (distill) loss += distill_grad(wss[0], 0, ch * cw);
+            else { loss += loss_grad(wss[0], src, d.W, ch, cw, 1); backward(wss[0], 0, ch, cw, nb); }
+        }
+        for (size_t i = 0; i < N_COARSE; i++) { gtex[tex_coarse_off(0) + i] += gcz_t[0][i]; gcz_t[0][i] = 0; }
+        FILE *f = fopen(dump, "wb"); int hd[2] = {B, TREES}; fwrite("NTSG", 1, 4, f); fwrite(hd, 4, 2, f); fwrite(&loss, 8, 1, f);
+        fwrite(gd_t[0], 4, n_dense, f);
+        for (int b = 0; b < NB; b++) {
+            if (TREES) { fwrite(gTI_t[0][b], 4, (size_t)TREES * TN * DW, f); fwrite(gTO_t[0][b], 4, (size_t)TREES * TN * DW, f); }
+            else { fwrite(gW1_t[0][b], 4, DW * DW, f); fwrite(gW2_t[0][b], 4, DW * DW, f); }
+        }
+        int nh = 0; for (size_t i = 0; i < n_tex / FCH; i++) nh += thit[i];
+        fwrite(&nh, 4, 1, f);
+        for (size_t i = 0; i < n_tex / FCH; i++) if (thit[i]) { int k = (int)i; fwrite(&k, 4, 1, f); fwrite(gtex + i * FCH, 4, FCH, f); }
+        fclose(f); printf("step 1 gradients (%d crops, loss %.6f, %d texels hit) -> %s\n", B, loss / B, nh, dump);
+        return 0;
     }
     if (iters == 0) {   /* evaluation only: the error, and the preview of up to 6 held-out frames */
         printf("held-out L1 %.4f over %d frames\n", evaluate(&d, eval_ids, neval, ews, nbf), neval);
