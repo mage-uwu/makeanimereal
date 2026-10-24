@@ -80,6 +80,9 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
       <button id="e-cpu" aria-pressed="false" title="The network in WebAssembly workers">CPU</button>
+      <span class="sep"></span>
+      <button id="n-tree" aria-pressed="false" title="Each block's FFN as fast feedforward trees: 16 of 60 nodes a pixel">Trees</button>
+      <button id="n-dense" aria-pressed="false" title="Each block's FFN dense: all 64 hidden units a pixel (run2)">Dense</button>
     </div>
     <form class="say" id="say" hidden>
       <input id="say-text" type="text" placeholder="Something for her to say" maxlength="200" autocomplete="off" enterkeyhint="send">
@@ -116,6 +119,8 @@ import { createGuide } from './guide.js';
 // #tight: the training frame itself (the checks compare against it).
 const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('cpu') ? 'cpu' : 'gpu';
+// The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
+const NET = location.hash.includes('dense') ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? 'nts/' : 'nts-tree/';
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32;
@@ -546,8 +551,9 @@ function loop(now) {
   frameOnce((now - poseStart) / 1000).then(() => {
     const t1 = performance.now();
     fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
-    readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${fps.toFixed(1)} fps`
-      : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
+    const net = NET === 'tree' ? 'tree FFNs' : 'dense FFNs';
+    readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${net} · ${fps.toFixed(1)} fps`
+      : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${net} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
     if (PROF && gls && t1 - profShown > 2000) showProf(t1);
     if (PROF_A && gls && !profADone) { profADone = true; setTimeout(showProfA, 50); }
   }).catch(e => { status.hidden = false; status.textContent = `frame failed: ${e.message}`; console.error(e); });
@@ -584,6 +590,17 @@ for (const e of ['gpu', 'cpu']) {
   b.setAttribute('aria-pressed', String(e === ENGINE));
   b.onclick = () => { if (e !== ENGINE) { location.hash = engineHash(e); location.reload(); } };
 }
+// Network buttons: switching reloads with the other model.
+for (const n of ['tree', 'dense']) {
+  const b = document.getElementById(`n-${n}`);
+  b.setAttribute('aria-pressed', String(n === NET));
+  b.onclick = () => {
+    if (n === NET) return;
+    const t = location.hash.slice(1).split('-').filter(x => x && x !== 'dense');
+    if (n === 'dense') t.push('dense');
+    location.hash = t.join('-'); location.reload();
+  };
+}
 
 // For checks (#tight): the GPU's drawing and tiles for one view, base64.
 window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
@@ -601,13 +618,13 @@ window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
 try {
   let parts;
   if (ENGINE === 'gpu') {
-    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: 'nts/' }), loadModel()]); parts = gls.parts; }
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE }), loadModel()]); parts = gls.parts; }
     catch (e) { console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
     if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
       throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
     const threads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
-    [shader] = await Promise.all([createCpuShader({ base: 'nts/', maxPixels: NW * NH, threads }), loadModel()]);
+    [shader] = await Promise.all([createCpuShader({ base: NET_BASE, maxPixels: NW * NH, threads }), loadModel()]);
     tiles = new Uint8Array(5 * NW * NH * 4);
     parts = shader.parts;
   }
