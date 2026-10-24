@@ -7,3 +7,4 @@ handoff/**/*.jpg
 handoff/**/returns/
 
 coverage/live/model.vrm
+coverage/live/single/
