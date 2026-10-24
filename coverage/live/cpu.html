@@ -652,6 +652,7 @@ for (const n of ['tree', 'dense']) {
 }
 
 // For checks (#tight): the GPU's drawing and tiles for one view, base64.
+window.debugSword = (poseName, t) => { setPose(poseName, t); return sword.stats; };   // checks: the hilt between the hands
 window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
   cam.yaw = yaw; cam.pitch = pitch; pose = poseName; lastCrop = null;
   setPose(poseName, t); vrm.update(0); placeCamera();

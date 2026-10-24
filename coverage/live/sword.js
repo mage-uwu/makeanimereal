@@ -9,10 +9,14 @@
 //
 // The hands are fitted to the hilt, not the hilt to the mocap. The right fist is measured from her
 // own finger bones (between the index and little knuckles, a little palm-ward), the grip runs through
-// it from the little finger to the index, and the fingers close round it. The left hand, when the
-// mocap brings it near the hilt (both slash clips are two-handed), is pulled onto the grip a fist
-// below the right: turned so its fist lies along the grip, and the arm solved to it (two-bone IK
-// keeping the elbow's plane). Away from the hilt it's left to the mocap, with a smooth hand-off.
+// it from the little finger to the index, and the fingers close round it. With both hands on it (the
+// mocap's fists close together, the left one below the right along the grip: both slash clips are
+// two-handed), the hilt is the line through the two fists: the right wrist turns so the sword,
+// seated in that fist, points from the left fist through the right, so its angle always agrees with
+// both hands, whatever the mocap's right wrist did (the actor's real sword forced the wrist the same way). The left hand is then pulled onto that line a fist below the right:
+// turned so its fist lies along the grip, and the arm solved to it (two-bone IK keeping the elbow's
+// plane). One-handed, the sword follows the right hand alone and the left arm the mocap, with smooth
+// hand-offs between.
 //
 // The network sees the sword like her other meshes: colour from its own flat materials, normals,
 // depth and UVs from the geometry, and `part` (userData.partPick: the first of the character's part
@@ -21,8 +25,8 @@
 const PART = { steel: [/Hair_00_HAIR/], gold: [/^Shorts$/, /Tops_01_CLOTH/], navy: [/Onepiece_00_CLOTH_01/, /CLOTH/] };
 const pick = res => names => { for (const re of res) { const i = names.findIndex(n => re.test(n)); if (i >= 0) return i; } return 0; };
 const FINGERS = ['Index', 'Middle', 'Ring', 'Little'];
-// the left hand: fully on the hilt within NEAR metres of it (where the mocap put it), free past FAR
-const NEAR = 0.16, FAR = 0.34;
+// two hands on the hilt: the mocap's fists within NEAR metres of each other fully, apart past FAR
+const NEAR = 0.14, FAR = 0.3;
 
 export function createSword({ THREE, vrm }) {
   const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
@@ -68,16 +72,6 @@ export function createSword({ THREE, vrm }) {
     add(pommel, gold).position.z = -DOWN - 0.008;
   }
 
-  // a fist's centre and its grip axis (little knuckle -> index knuckle), in the hand's own frame
-  const fistOf = side => {
-    const i = bone(`${side}IndexProximal`).position, l = bone(`${side}LittleProximal`).position, out = side === 'right' ? -1 : 1;
-    return { at: V().addVectors(i, l).multiplyScalar(0.5).add(V().set(0.012 * out, -0.028, 0)), axis: V().subVectors(i, l).normalize() };
-  };
-  const fistR = fistOf('right'), fistL = fistOf('left');
-  root.position.copy(fistR.at);
-  root.quaternion.setFromUnitVectors(V().set(0, 0, 1), fistR.axis);
-  bone('rightHand').add(root);
-
   const curl = (side, w) => {   // a fist, by w
     const s = side === 'right' ? 1 : -1;
     for (const f of FINGERS) {
@@ -89,6 +83,31 @@ export function createSword({ THREE, vrm }) {
     bone(`${side}ThumbIntermediate`)?.rotation.set(0, s * 0.5 * w, s * 0.35 * w);
     bone(`${side}ThumbDistal`)?.rotation.set(0, s * 0.4 * w, s * 0.3 * w);
   };
+  // a fist's grip axis (little knuckle -> index knuckle) and centre, in the hand's own frame: the centre
+  // of the curled fingers' joints and tips (where the grip sits in this skeleton's own fist)
+  const fistOf = side => {
+    const hand = bone(`${side}Hand`), keep = [];
+    hand.traverse(o => keep.push([o, o.quaternion.clone()]));
+    curl(side, 1);
+    hand.updateMatrixWorld(true);
+    const pts = [], at = V();
+    for (const f of FINGERS) {
+      const js = ['Proximal', 'Intermediate', 'Distal'].map(k => bone(`${side}${f}${k}`)?.getWorldPosition(V())).filter(Boolean);
+      if (js.length === 3) pts.push(...js, js[2].clone().sub(js[1]).multiplyScalar(0.8).add(js[2]));
+    }
+    for (const p of pts) at.add(hand.worldToLocal(p));
+    at.divideScalar(Math.max(1, pts.length));
+    for (const [o, q] of keep) o.quaternion.copy(q);
+    hand.updateMatrixWorld(true);
+    const i = bone(`${side}IndexProximal`).position, l = bone(`${side}LittleProximal`).position;
+    return { at, axis: V().subVectors(i, l).normalize() };
+  };
+  vrm.scene.updateMatrixWorld(true);
+  const fistR = fistOf('right'), fistL = fistOf('left');
+  root.position.copy(fistR.at);
+  root.quaternion.setFromUnitVectors(V().set(0, 0, 1), fistR.axis);
+  bone('rightHand').add(root);
+
   // turn a bone by a world-space rotation q
   const turn = (b, q) => {
     const pw = b.parent.getWorldQuaternion(Q());
@@ -112,19 +131,36 @@ export function createSword({ THREE, vrm }) {
   }
 
   const L = { up: null, fore: null, hand: null }, gripAt = V(), fistAt = V(), axisW = V(), handQ = Q(), want = V(), wrist = V(), fix = Q(), target = Q();
-  let top = null;
+  const fistRW = V(), dir = V(), turnQ = Q(), rootW = Q(), smooth = x => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+  let top = null, R = null;
   function grip() {
     if (!root.visible) return;
     curl('right', 1);
     L.up ||= bone('leftUpperArm'); L.fore ||= bone('leftLowerArm'); L.hand ||= bone('leftHand');
     if (!top) { top = L.hand; while (top.parent) top = top.parent; }
+    R ||= bone('rightHand');
     top.updateMatrixWorld(true);
-    // the left fist's place on the grip, and where the mocap has it
-    gripAt.set(0, 0, -LEFT).applyMatrix4(root.matrixWorld);
+    // two-handed when the mocap's fists are close and the left one sits below the right along the grip
+    root.getWorldPosition(fistRW);
     axisW.set(0, 0, 1).transformDirection(root.matrixWorld);
     fistAt.copy(fistL.at).applyMatrix4(L.hand.matrixWorld);
-    const dist = fistAt.distanceTo(gripAt), x = Math.min(1, Math.max(0, (FAR - dist) / (FAR - NEAR))), w = x * x * (3 - 2 * x);
-    if (w <= 0) return;   // the mocap's own hand
+    dir.subVectors(fistRW, fistAt);
+    const apart = dir.length(); dir.divideScalar(Math.max(apart, 1e-6));
+    const w = smooth((FAR - apart) / (FAR - NEAR)) * smooth(dir.dot(axisW) / 0.4);
+    stats = { w, apart, before: Math.acos(Math.min(1, Math.max(-1, dir.dot(axisW)))) * 180 / Math.PI };
+    if (w <= 0) return;   // one-handed: the right fist's hilt, the mocap's left hand
+    // the right wrist turns the hilt onto the line from the left fist through the right, as far as w
+    // (a few times: turning the wrist moves the fist, and with it the line)
+    for (let k = 0; k < 5; k++) {
+      turnQ.setFromUnitVectors(axisW, dir).slerp(Q(), 1 - w);
+      turn(R, turnQ);
+      root.getWorldPosition(fistRW);
+      axisW.set(0, 0, 1).transformDirection(root.matrixWorld);
+      dir.subVectors(fistRW, fistAt).normalize();
+    }
+    // the left fist's place on the grip
+    gripAt.set(0, 0, -LEFT).applyMatrix4(root.matrixWorld);
+    axisW.set(0, 0, 1).transformDirection(root.matrixWorld);
     // turn the hand so its fist lies along the grip (index toward the blade), as far as w
     L.hand.getWorldQuaternion(handQ);
     target.setFromUnitVectors(fistL.axis.clone().applyQuaternion(handQ), axisW).multiply(handQ);
@@ -137,8 +173,15 @@ export function createSword({ THREE, vrm }) {
     // the hand's world rotation, under the moved arm
     L.hand.quaternion.copy(L.hand.parent.getWorldQuaternion(fix).invert().multiply(handQ));
     curl('left', 0.3 + 0.7 * w);
+    // how well the hilt now sits between the hands (sword.stats, for checks)
+    L.hand.updateMatrixWorld(true);
+    want.copy(fistL.at).applyMatrix4(L.hand.matrixWorld);
+    dir.subVectors(fistRW, want).normalize();
+    stats.after = Math.acos(Math.min(1, Math.max(-1, dir.dot(axisW)))) * 180 / Math.PI;
+    stats.leftOff = want.distanceTo(gripAt);
   }
+  let stats = null;
   const pommelAt = V().set(0, 0, -DOWN - 0.035), tipAt = V().set(0, 0, UP + 0.024 + BLADE);
   function ends(p, q) { root.updateWorldMatrix(true, false); p.copy(pommelAt).applyMatrix4(root.matrixWorld); q.copy(tipAt).applyMatrix4(root.matrixWorld); }
-  return { root, grip, ends, show(on) { root.visible = on; }, get shown() { return root.visible; } };
+  return { root, grip, ends, show(on) { root.visible = on; }, get shown() { return root.visible; }, get stats() { return stats; } };
 }
