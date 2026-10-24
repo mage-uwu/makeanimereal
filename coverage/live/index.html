@@ -20,7 +20,7 @@
   --ink: #eef0ff; --muted: #a3a8dc; --gold: #e2bd62; --chip: rgba(20,22,60,.72); --line: rgba(238,240,255,.16); color-scheme: dark }
 html, body { height: 100%; }
 body { background: var(--stage-bottom); color: var(--ink); font-family: var(--body); overflow: hidden; }
-.app { height: 100%; display: grid; grid-template-rows: auto 1fr auto; background: linear-gradient(var(--stage-top), var(--stage-bottom)); }
+.app { height: 100%; display: grid; grid-template-rows: 1fr auto; background: linear-gradient(var(--stage-top), var(--stage-bottom)); }
 header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   padding-block: 14px 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 h1 { margin: 0; font-family: var(--display); font-size: clamp(1.25rem, 3.5vw, 1.7rem); text-wrap: balance; }
@@ -46,10 +46,6 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 </style>
 
 <div class="app">
-  <header>
-    <h1>Magical Girl Live</h1>
-    <span class="hint">The 3D model, drawn every frame by the learned shader. Drag to orbit, shift-drag to move the light, scroll to zoom, double-click to reset. Motion capture: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset" style="color:inherit">Bandai Namco Research Motion Dataset</a> (CC BY-NC 4.0), retargeted.</span>
-  </header>
   <div id="stage" tabindex="0" aria-label="Live character view; drag to orbit">
     <canvas id="view"></canvas>
     <div id="status">loading model and shader…</div>
@@ -88,6 +84,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
       <span id="r-time">shader –</span>
+      <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset" style="color:inherit">motion: Bandai Namco Research, CC BY-NC 4.0</a>
     </div>
     <details class="note">
       <summary>nanotss GPU: gpu-nts.js (WebGPU compute)</summary>
