@@ -129,10 +129,11 @@ const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [
 const ENGINE = location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
 // The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
 // The characters: each its own model and its own trained network(s) (coverage/asset/README.md).
-// #bunny picks the second; shorts: the navy safety shorts the first one's training renders had.
+// #bunny picks the second; shorts: the colour of the safety shorts its training renders had (render-orbit.mjs
+// --shorts-color), drawn here too.
 const CHARS = {
-  girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: true },
-  bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: false },
+  girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
+  bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
 const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? CH.dense : CH.tree;
@@ -192,7 +193,7 @@ async function loadModel() {
   target = box.getCenter(new THREE.Vector3());
   radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
 }
-// Navy safety shorts under the dress, as in the coverage renders: colour pass only.
+// Safety shorts under the skirt, as in the coverage renders (CH.shorts, their colour): colour pass only.
 const shorts = [];
 function addShorts() {
   const hip = new THREE.Vector3(), knee = new THREE.Vector3(), legTop = new THREE.Vector3();
@@ -204,7 +205,7 @@ function addShorts() {
   vrm.scene.traverse(o => { if (o.isSkinnedMesh && /Body_00_SKIN/.test([].concat(o.material)[0].name)) meshes.push(o); });
   for (const o of meshes) {
     const ids = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg'].map(n => o.skeleton.bones.indexOf(vrm.humanoid.getRawBoneNode(n)));
-    const mat = new THREE.MeshBasicMaterial({ color: 0x1c2056, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    const mat = new THREE.MeshBasicMaterial({ color: CH.shorts, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     mat.onBeforeCompile = sh => {
       const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
       sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
