@@ -30,6 +30,9 @@ Training (as shader_torch.py: --net-from, --tree, --seconds ...), with:
                    texels the frames read (edge-preserving: differences above --smooth-edge stay)
   --tex-decay d    the fine level's texels decay toward zero by d a step where they were read: detail
                    survives only where many frames keep asking for it
+  --lines w        the target's ink (pixels clearly darker than their 7 x 7 neighbourhood, over white)
+                   weighs w extra in the colour loss, and around it the drawing's gradients are matched
+                   to the target's: lines as crisp as the film's, where the alignment put them
 
     python3 denoise_torch.py --data data.ntsd --metrics c2.ntst
     python3 denoise_torch.py --data data.ntsd --tree 4,4 --net-from tree1.ntst --seconds 1800 --save dn.ntst \\
@@ -160,10 +163,28 @@ class Nuisance:
         return r
 
 
-def loss_to(p, tgt):
-    """loss_of against a given target (B, h, w, 4): alpha L1 plus colour L1 where covered."""
+def loss_to(p, tgt, lines=0.0):
+    """loss_of against a given target (B, h, w, 4): alpha L1 plus colour L1 where covered; with lines,
+    the target's ink weighs extra and the drawing's gradients near it follow the target's."""
     ta = tgt[..., 3:4]
-    return (p[..., 3:4] - ta).abs().flatten(1).mean(1) + ((p[..., :3] - tgt[..., :3]) * ta).abs().flatten(1).mean(1)
+    l = (p[..., 3:4] - ta).abs().flatten(1).mean(1) + ((p[..., :3] - tgt[..., :3]) * ta).abs().flatten(1).mean(1)
+    if lines > 0:
+        ink = ink_of(tgt)
+        l = l + lines * ((p[..., :3] - tgt[..., :3]).abs().mean(-1) * ink).flatten(1).mean(1)
+        near = F.max_pool2d(ink[:, None], 5, 1, 2)[:, 0]
+        po, to = over_white(p), over_white(tgt)
+        gx = lambda x: x[:, :, 1:] - x[:, :, :-1]
+        gy = lambda x: x[:, 1:] - x[:, :-1]
+        e = ((gx(po) - gx(to)).abs().mean(-1) * near[:, :, 1:]).flatten(1).mean(1) + ((gy(po) - gy(to)).abs().mean(-1) * near[:, 1:]).flatten(1).mean(1)
+        l = l + lines * e
+    return l
+
+
+def ink_of(tgt):
+    """(B, h, w) in [0, 1]: how clearly each pixel is ink, darker than its neighbourhood (over white)."""
+    lum = over_white(tgt).mean(-1)[:, None]
+    local = F.avg_pool2d(lum, 7, 1, 3, count_include_pad=False)
+    return ((local - lum - 0.04) / 0.08).clamp(0, 1)[:, 0] * tgt[..., 3]
 
 
 @torch.no_grad()
@@ -197,6 +218,7 @@ def main():
     ap.add_argument('--tex-smooth', type=float, default=0); ap.add_argument('--smooth-every', type=int, default=10)
     ap.add_argument('--smooth-edge', type=float, default=0.05)
     ap.add_argument('--tex-decay', type=float, default=0)
+    ap.add_argument('--lines', type=float, default=0)
     ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     a = ap.parse_args()
     dev = torch.device(a.device)
@@ -226,7 +248,7 @@ def main():
     if a.tex_smooth > 0:
         _, seen = texture_stats(net, data, train_ids[::3], True)
     print(f'{data.N} frames {data.W}x{data.H}, {P} parts; appearance {a.appearance} align {a.align} '
-          f'coarse-first {a.coarse_first} smooth {a.tex_smooth} decay {a.tex_decay}', flush=True)
+          f'coarse-first {a.coarse_first} smooth {a.tex_smooth} decay {a.tex_decay} lines {a.lines}', flush=True)
 
     leaves = net.leaves(); opt = Optim(net)
     t0 = time.time(); ema = None; it = 0
@@ -245,10 +267,10 @@ def main():
             nui.opt.zero_grad()
             tgt = nui.target(data, fis, cs, ch, cw) if a.align else px[..., 13:17].float() / 255
             pc = nui.colour(p, fis) if a.appearance else p
-            l = loss_to(pc, tgt)
+            l = loss_to(pc, tgt, a.lines)
             (l.sum() + nui.reg(fis, a.appearance, a.align)).backward()
         else:
-            l = loss_to(p, px[..., 13:17].float() / 255)
+            l = loss_to(p, px[..., 13:17].float() / 255, a.lines)
             l.sum().backward()
         for t in leaves: t.requires_grad_(False)
         if prog < a.coarse_first:
