@@ -30,9 +30,10 @@ def lum(rgb):
 
 def flatten(color, target, uvb, amount, radius):
     """color (h, w, 3) render, target (h, w, 4) drawing, uvb (h, w, 3): -> flattened target (h, w, 4)."""
-    c = torch.from_numpy(color).float() / 255
-    t = torch.from_numpy(target).float() / 255
-    part = torch.from_numpy(uvb[..., 1].astype(np.int64))
+    dev = 'cuda' if torch.cuda.is_available() else 'cpu'   # ~20 frames a minute on CPU, far faster on a GPU
+    c = torch.tensor(color, device=dev).float() / 255
+    t = torch.tensor(target, device=dev).float() / 255
+    part = torch.tensor(uvb[..., 1].astype(np.int64), device=dev)
     a = t[..., 3]
     lc, lt = lum(c).clamp_min(.03), lum(t[..., :3])
     ratio = (lt / lc).clamp(0, 4)
@@ -52,7 +53,7 @@ def flatten(color, target, uvb, amount, radius):
         corr = (med / light.clamp_min(.05)) ** amount
         sel = (part == p) & (a > .5) & (den > .05)
         out[..., :3][sel] = (t[..., :3][sel] * corr[sel][:, None]).clamp(0, 1)
-    return (out * 255 + .5).byte().numpy()
+    return (out * 255 + .5).byte().cpu().numpy()
 
 
 def main():
