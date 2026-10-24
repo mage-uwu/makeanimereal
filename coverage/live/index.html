@@ -25,6 +25,10 @@ header { display: flex; align-items: baseline; justify-content: space-between; g
   padding-block: 14px 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 h1 { margin: 0; font-family: var(--display); font-size: clamp(1.25rem, 3.5vw, 1.7rem); text-wrap: balance; }
 .hint { color: var(--muted); font-size: .85rem; }
+.note { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+.note summary { cursor: pointer; color: var(--ink); }
+.note p, .note pre { margin: 6px 0; line-height: 1.45; }
+.note pre { font-family: var(--mono); font-size: .72rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 #stage { position: relative; min-height: 0; touch-action: none; cursor: grab; overflow: hidden; }
 #stage:active { cursor: grabbing; }
 #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; transform-origin: 0 0; }
@@ -79,11 +83,23 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="d-smooth" aria-pressed="false" title="Sharp, fine-tuned against flicker">Smooth</button>
       <button id="d-crisp" aria-pressed="true" title="Smooth, with its linework crisped">Crisp</button>
       <button id="d-cpu" aria-pressed="false" title="The nanotss shader, trained on the CPU, run on the CPU (WebAssembly)">CPU</button>
+      <button id="d-ntsgpu" aria-pressed="false" title="The same nanotss shader in WebGPU compute (gpu-nts.js); the CPU's WebAssembly where WebGPU is missing">nanotss GPU</button>
     </div>
     <div class="readout" aria-live="polite">
       <span id="r-angle">yaw 0° · pitch 0°</span>
       <span id="r-time">shader –</span>
     </div>
+    <details class="note">
+      <summary>nanotss GPU: gpu-nts.js (WebGPU compute)</summary>
+      <p>The nanotss shader (coverage/shader/nts/infer.c) in WebGPU compute, with nts.js's interface and its CPU path as the fallback when WebGPU is missing.</p>
+      <pre>import { createGpuShader } from './gpu-nts.js';
+const s = await createGpuShader({ base: 'nts/', maxPixels: w * h });
+const rgba = await s.frame({ tiles, w, h, pitch });</pre>
+      <p><b>In:</b> tiles, the five G-buffer tiles (colour, normal, depth, uv-a, uv-b) as one Uint8Array, each w × h RGBA with rows bottom-up as readPixels gives them; pitch in radians. Net files: net.png, fine0–2.png, meta.json (dense or tree models).</p>
+      <p><b>Out:</b> straight RGBA bytes, w × h, rows top-down, valid until the next frame. Also s.parts, s.busy, s.gpu (false: running on nts.js), s.ms (wall, upload to readback) and s.gpuMs (GPU timestamps, where supported).</p>
+      <p><b>Match:</b> against shader_nts.c on its reference frame (check_gpu.mjs, check_infer.mjs's measures): dense 0 values off by &gt; 2/255 (infer.wasm: 0); trees 41 (infer.wasm: 39, route ties); against infer.wasm's bytes, none off by more than 1 (dense).</p>
+      <p><b>Timing:</b> measured only on SwiftShader (no GPU here): 7.5 s dense, 4.6 s trees for 360 × 640, which is CPU emulation, not a GPU figure. On a real GPU the readout shows ms and GPU ms.</p>
+    </details>
   </footer>
 </div>
 
@@ -123,12 +139,13 @@ const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils
 // 'sharp' (half-resolution decoder plus a full-resolution head, posed frames only), 'fast' (channels
 // 16/32/48/64 at 360 x 640; the WebGL engine's default) and 'full' (32/48/64/96, about 4x the work).
 // 'cpu': the nanotss shader (coverage/shader/nts: ternary stencil and FFN blocks, trained on the CPU
-// with the nanotss engine) run on the CPU in WebAssembly workers (nts.js), whatever the GPU.
-const DETAILS = ['fast', 'sharp', 'full', 'smooth', 'crisp', 'cpu'];
-const ASKED = ['full', 'fast', 'smooth', 'sharp', 'cpu'].find(d => location.hash.includes(d)) || 'crisp';
+// with the nanotss engine) run on the CPU in WebAssembly workers (nts.js), whatever the GPU; 'ntsgpu':
+// the same net in WebGPU compute (gpu-nts.js, the same frame() interface), nts.js where WebGPU is missing.
+const DETAILS = ['fast', 'sharp', 'full', 'smooth', 'crisp', 'cpu', 'ntsgpu'];
+const ASKED = ['full', 'fast', 'smooth', 'sharp', 'ntsgpu', 'cpu'].find(d => location.hash.includes(d)) || 'crisp';
 let DETAIL = ASKED;
-const CPU = DETAIL === 'cpu';
-const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/', cpu: 'nts/' })[DETAIL];
+const CPU = DETAIL === 'cpu' || DETAIL === 'ntsgpu';   // the nanotss path: tiles read back, the drawing put on a 2D canvas
+const modelDir = () => ({ full: '', fast: 'fast/', sharp: 'sharp/', smooth: 'equi/', crisp: 'crisp/', cpu: 'nts/', ntsgpu: 'nts/' })[DETAIL];
 let GBW = NW, GBH = NH;  // G-buffer size: full resolution for the sharp shader
 const CROP_PAD = 32;  // past her silhouette: the drawing inside matches computing the whole frame (debugReach, #nocrop)
 const status = document.getElementById('status');
@@ -894,9 +911,14 @@ function paintCpu() {
   ctx2d.drawImage(netCanvas, (vx + z * (1 - bw) / 2) * W, (vy + z * (1 - bh) / 2) * H, z * bw * W, z * bh * H);
 }
 async function loadCpu() {
-  const { createCpuShader } = await import('./nts.js');
   const threads = +(location.hash.match(/threads(\d+)/)?.[1] || 0) || undefined;
-  cpu = await createCpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
+  if (DETAIL === 'ntsgpu') {   // WebGPU compute, or nts.js when WebGPU is missing (cpu.gpu says which)
+    const { createGpuShader } = await import('./gpu-nts.js');
+    cpu = await createGpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
+  } else {
+    const { createCpuShader } = await import('./nts.js');
+    cpu = await createCpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
+  }
   parts = cpu.parts;
   ctx2d = canvas.getContext('2d');
   renderer.setPixelRatio(1);
@@ -950,7 +972,7 @@ function frame(now) {
     window.framesDrawn = (window.framesDrawn || 0) + 1;
     if (stats) { stats.drawn++; if (gpuMs != null) stats.gpu.push(gpuMs); }
     document.getElementById('r-angle').textContent = `yaw ${String(Math.round(((cam.yaw % 360) + 360) % 360)).padStart(3)}° · pitch ${Math.round(cam.pitch)}° · ${view.zoom.toFixed(1)}×`;
-    const engine = cpu ? `CPU WebAssembly ${cpu.relaxed ? 'relaxed ' : ''}SIMD ${cpu.kernel} × ${cpu.threads} · nanotss`
+    const engine = cpu ? (cpu.gpu ? `${cpu.kernel} · nanotss${cpu.gpuMs != null ? ` · ${cpu.gpuMs.toFixed(1)} ms GPU` : ''}` : `CPU WebAssembly ${cpu.relaxed ? 'relaxed ' : ''}SIMD ${cpu.kernel} × ${cpu.threads} · nanotss`)
       : `${gpu ? `WebGPU ${gpu.f16 ? 'f16' : 'f32'}${gpu.math === 'f16' ? ' maths' : ''}` : 'WebGL'} · ${DETAIL}`;
     document.getElementById('r-time').textContent = mode === 1 ? 'raw render'
       : cpu?.ms != null ? `${engine} · ${cpu.ms.toFixed(0)} ms · ${Math.round(fps)} fps`
@@ -1143,7 +1165,7 @@ try {
   }
   if (gpu) await checkMath();
   window.__gpu = gpu; window.__cpu = cpu; window.__glCanvas = glCanvas; window.__tiles = () => { placeCamera(); renderGBufferTiles(); };
-  window.engine = cpu ? 'cpu' : gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
+  window.engine = cpu ? (cpu.gpu ? 'webgpu-nts' : 'cpu') : gpu ? `webgpu${gpu.f16 ? ' f16' : ' f32'}` : 'webgl';
   showDetail();
   assignParts(parts);
   status.hidden = true;
