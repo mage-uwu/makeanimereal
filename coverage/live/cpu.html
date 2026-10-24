@@ -85,6 +85,9 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <span class="sep"></span>
       <button id="n-tree" aria-pressed="false" title="Each block's FFN as fast feedforward trees: 16 of 60 nodes a pixel">Trees</button>
       <button id="n-dense" aria-pressed="false" title="Each block's FFN dense: all 64 hidden units a pixel (run2)">Dense</button>
+      <span class="sep"></span>
+      <button id="c-girl" aria-pressed="false" title="The magical girl (the first character)">Magical Girl</button>
+      <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
     </div>
     <form class="say" id="say" hidden>
       <input id="say-text" type="text" placeholder="Something for her to say" maxlength="200" autocomplete="off" enterkeyhint="send">
@@ -125,7 +128,14 @@ import { createSword } from './sword.js';
 const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
 // The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
-const NET = location.hash.includes('dense') ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? 'nts/' : 'nts-tree/';
+// The characters: each its own model and its own trained network(s) (coverage/asset/README.md).
+// #bunny picks the second; shorts: the navy safety shorts the first one's training renders had.
+const CHARS = {
+  girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: true },
+  bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: false },
+};
+const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
+const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? CH.dense : CH.tree;
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32;
@@ -166,7 +176,7 @@ async function unpackPng(url) {
 async function loadModel() {
   const loader = new GLTFLoader();
   loader.register(p => new VRMLoaderPlugin(p));
-  const [gltf, m] = await Promise.all([loader.parseAsync(await unpackPng('model.vrm.png'), ''), fetch('motions.json').then(r => r.json())]);
+  const [gltf, m] = await Promise.all([loader.parseAsync(await unpackPng(CH.model), ''), fetch('motions.json').then(r => r.json())]);
   vrm = gltf.userData.vrm;
   VRMUtils.rotateVRM0(vrm);
   vrm.scene.traverse(o => { o.frustumCulled = false; if (o.isBone) bones.push(o); });
@@ -177,7 +187,7 @@ async function loadModel() {
   vrm.update(0);
   for (let i = 0; i < 240; i++) vrm.update(1 / 60);
   const box = new THREE.Box3().setFromObject(vrm.scene);
-  addShorts();
+  if (CH.shorts) addShorts();
   sword = createSword({ THREE, vrm });   // after the box: her framing doesn't change when she draws it
   target = box.getCenter(new THREE.Vector3());
   radius = box.getSize(new THREE.Vector3()).y * 0.58 / Math.tan(THREE.MathUtils.degToRad(FOV) / 2);
@@ -224,7 +234,7 @@ function posePose(name, t) {
 function assignParts(names) {
   vrm.scene.traverse(o => {
     if (!o.isMesh) return;
-    o.userData.part = Math.max(0, names.indexOf(o.userData.partName ?? [].concat(o.material)[0].name.replace(' (Instance)', '')));   // partName: the sword's
+    o.userData.part = Math.max(0, o.userData.partPick ? o.userData.partPick(names) : names.indexOf([].concat(o.material)[0].name.replace(' (Instance)', '')));   // partPick: the sword's
     o.onBeforeRender = (r, s, c, g, mat) => { if (mat.uniforms?.part) { mat.uniforms.part.value = o.userData.part; mat.uniformsNeedUpdate = true; } };
   });
 }
@@ -616,6 +626,18 @@ for (const e of ['gpu', 'webgpu', 'cpu']) {
   b.setAttribute('aria-pressed', String(e === ENGINE));
   b.onclick = () => { if (e !== ENGINE) { location.hash = engineHash(e); location.reload(); } };
 }
+// Character buttons: switching reloads with the other model and its network.
+for (const c of Object.keys(CHARS)) {
+  const b = document.getElementById(`c-${c}`);
+  b.setAttribute('aria-pressed', String(c === CHAR));
+  b.onclick = () => {
+    if (c === CHAR) return;
+    const t = location.hash.slice(1).split('-').filter(x => x && !(x in CHARS) && x !== 'dense');
+    if (c !== 'girl') t.push(c);
+    location.hash = t.join('-'); location.reload();
+  };
+}
+document.getElementById('n-dense').hidden = !CH.dense;
 // Network buttons: switching reloads with the other model.
 for (const n of ['tree', 'dense']) {
   const b = document.getElementById(`n-${n}`);

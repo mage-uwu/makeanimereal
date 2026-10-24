@@ -1,12 +1,13 @@
 // cpu.html (the Tree-SSM page) as one HTML file: every module, the worker, the wasm kernels and the
 // networks' small files (meta.json, net.png) inlined. Only the big binaries stay beside it, at the
-// paths the page already uses: model.vrm.png, motions.json, nts/fine0..2.png, nts-tree/fine0..2.png
-// (an artifact page is capped at 16 MB; those are ~35 MB).
+// paths the page already uses: model.vrm.png, motions.json, nts/fine0..2.png, nts-tree/fine0..2.png and
+// each further character's <name>/model.vrm.png and <name>/nts-tree/fine0..2.png (an artifact page is
+// capped at 16 MB; those are ~35 MB a character).
 //   node build_single.mjs [out.html]   (default: single/index.html)
 // The modules are bundled into the page's module script; fetch() and the network's <img> loads are
 // served from the inlined bytes first, so the sources run unchanged apart from the worker's URL and
 // nts-gl.js's image loader, rewritten here.
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
@@ -39,7 +40,9 @@ const bundle = mods.map(m => {
 
 // the inlined files, by the paths the page fetches; the wasm is the same for both networks
 const files = {};
-for (const net of ['nts/', 'nts-tree/']) {
+// every character's network folders (the page's CHARS): nts/, nts-tree/, and <character>/nts-tree/
+const nets = ['nts/', 'nts-tree/', ...readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory() && existsSync(path.join(dir, d.name, 'nts-tree/meta.json'))).map(d => `${d.name}/nts-tree/`)];
+for (const net of nets) {
   for (const f of ['meta.json', 'net.png', 'infer.wasm', 'infer-dot.wasm', 'infer-relaxed.wasm', 'infer-relaxed-dot.wasm']) files[net + f] = read(net + f);
 }
 const types = { '.json': 'application/json', '.png': 'image/png', '.wasm': 'application/wasm' };
@@ -53,7 +56,8 @@ const shim = `<script>
 // The inlined files (build_single.mjs): fetch() and inlineUrl() serve these paths from the page itself.
 (() => {
   const F = ${JSON.stringify(blobs)}, cache = {};
-  const key = u => { try { const x = new URL(u, location.href); return x.origin === location.origin ? x.pathname.replace(/^.*?\\/(nts(-tree)?\\/[^/]+)$/, '$1') : null; } catch { return null; } };
+  const base = new URL('.', location.href).pathname;   // paths relative to the page, as the page asks for them
+  const key = u => { try { const x = new URL(u, location.href); return x.origin === location.origin && x.pathname.startsWith(base) ? x.pathname.slice(base.length) : null; } catch { return null; } };
   const blob = k => {
     if (!(k in F)) return null;
     const e = F[k].same ? F[F[k].same] : F[k];

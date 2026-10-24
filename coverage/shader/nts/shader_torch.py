@@ -108,10 +108,11 @@ class Net:
         return out
 
     # -- checkpoints (shader_nts.c save_net / load_net) --
-    def load(self, path):
+    def load(self, path, tex=True):
+        """tex=False: the network only (another character's model, any number of parts; the texture stays)."""
         raw = open(path, 'rb').read()
         mg = raw[:4]; NB, dw, P, kt = struct.unpack_from('<4i', raw, 4)
-        assert (NB, dw, P, kt) == (self.NB, DW, self.P, KT), f'{path}: other shape'
+        assert (NB, dw, P if tex else self.P, kt) == (self.NB, DW, self.P, KT), f'{path}: other shape'
         dil = list(struct.unpack_from(f'<{MAXB}i', raw, 20))[:NB]
         assert dil == self.DIL, f'{path}: other dilations'
         off = 20 + 4 * MAXB
@@ -133,7 +134,9 @@ class Net:
                 self.W2[b] = f32(DW * DW).view(DW, DW); off += 4 * DW * DW
         else:
             raise SystemExit(f'{path}: not NTSW or NTST')
-        self.tex.copy_(f32(self.n_tex)); off += 4 * self.n_tex
+        n_tex = P * (FINE * FINE + COARSE * COARSE) * FCH
+        if tex: self.tex.copy_(f32(self.n_tex))
+        off += 4 * n_tex
         assert off == len(raw)
 
     def save(self, path):
@@ -425,6 +428,8 @@ def main():
     ap.add_argument('--tree', help='T,V: the fast feedforward trees'); ap.add_argument('--distill', action='store_true')
     ap.add_argument('--tree-temp', type=float, default=1.0)
     ap.add_argument('--trees-from', help="an NTST whose trees (w_in, w_out, node biases) replace --load's, e.g. shader_nts --save-init's for --distill")
+    ap.add_argument('--net-from', help="another character's model: its network (embed, stencils, FFNs or trees, head) to start "
+                    'from, with this one\'s neural texture fresh (a new asset trains far faster than from nothing)')
     ap.add_argument('--blocks', type=int, default=8)
     ap.add_argument('--iters', type=int, default=12000); ap.add_argument('--seconds', type=float, default=0)
     ap.add_argument('--batch', type=int, default=8); ap.add_argument('--crop', type=int, default=96)
@@ -442,6 +447,7 @@ def main():
     net = Net(a.blocks, data.P, DIL_DEFAULT, T, V, dev)
     net.init(a.seed)   # as net_init() then load_net(): what the file doesn't hold (a dense model's trees) starts random
     if a.load: net.load(a.load)
+    if a.net_from: net.load(a.net_from, tex=False)
     if a.trees_from:
         other = Net(net.NB, net.P, net.DIL, T, V, dev); other.load(a.trees_from)
         net.TI.copy_(other.TI); net.TO.copy_(other.TO)

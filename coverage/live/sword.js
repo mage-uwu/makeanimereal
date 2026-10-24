@@ -15,10 +15,11 @@
 // keeping the elbow's plane). Away from the hilt it's left to the mocap, with a smooth hand-off.
 //
 // The network sees the sword like her other meshes: colour from its own flat materials, normals,
-// depth and UVs from the geometry, and `part` (userData.partName) picks which part's neural texture it
-// samples: her silver hair's for the steel, the shorts' (a colour-only part, so the network follows
-// the colour) for the gold, her dress's for the navy grip.
-const PART = { steel: 'N00_000_Hair_00_HAIR', gold: 'Shorts', navy: 'N00_010_01_Onepiece_00_CLOTH_01' };
+// depth and UVs from the geometry, and `part` (userData.partPick: the first of the character's part
+// names to match) picks which part's neural texture it samples: her front hair's for the steel, the
+// shorts' (a colour-only part, so the network follows the colour) for the gold, her dress's for the grip.
+const PART = { steel: [/Hair_00_HAIR/], gold: [/^Shorts$/, /Tops_01_CLOTH/], navy: [/Onepiece_00_CLOTH_01/, /CLOTH/] };
+const pick = res => names => { for (const re of res) { const i = names.findIndex(n => re.test(n)); if (i >= 0) return i; } return 0; };
 const FINGERS = ['Index', 'Middle', 'Ring', 'Little'];
 // the left hand: fully on the hilt within NEAR metres of it (where the mocap put it), free past FAR
 const NEAR = 0.16, FAR = 0.34;
@@ -35,7 +36,7 @@ export function createSword({ THREE, vrm }) {
   // lengths in metres along the grip (+Z, toward the blade), from the right fist's centre: UP to the
   // guard, DOWN to the pommel (room for the left fist at -LEFT)
   const UP = 0.05, DOWN = 0.19, LEFT = 0.092, BLADE = 0.74, W = 0.052, T = 0.012;
-  const add = (geo, m) => { const o = new THREE.Mesh(geo, m); o.frustumCulled = false; o.userData.partName = m.userData.part; root.add(o); return o; };
+  const add = (geo, m) => { const o = new THREE.Mesh(geo, m); o.frustumCulled = false; o.userData.partPick = pick(m.userData.part); root.add(o); return o; };
   // blade: a flat diamond section tapering to a point, extruded along +Z
   {
     const s = new THREE.Shape();

@@ -112,16 +112,22 @@ def main():
     p.add_argument('--overlap', type=int, default=17)
     p.add_argument('--shift', type=float, default=5.0)
     p.add_argument('--seed', type=int, default=7)
-    p.add_argument('--only', type=int, help='make just this chunk (a test)')
+    p.add_argument('--only', help='make just these chunks, e.g. 3 or 0,1,2 (a test, or a film whose render is still being drawn)')
     p.add_argument('--seed-frames', help='finished frames (a video) that open the film: held fixed, so this film continues that one')
     p.add_argument('--anchors', help='a folder of finished keyframes NNNN.png: held fixed wherever they fall (use with --overlap 1)')
     p.add_argument('--render', help='the raw render of this film (a video): turns on cleaning of the carried-over frames')
     p.add_argument('--calib', default='0:80', help='finished frames a:b that set the look the cleaning holds to')
+    p.add_argument('--prompt', help='the character, in place of the built-in one (magical_girl_02): '
+                   'what she looks like and wears, e.g. "a girl with long pink hair and white rabbit ears, wearing ..."')
     p.add_argument('--fp8', action='store_true', help='store the transformer weights in fp8 (half the memory)')
     a = p.parse_args()
     w, h = map(int, a.size.split('x'))
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    prompt = PROMPT if not a.prompt else (
+        f'Hand-drawn 2D anime cel animation of {a.prompt}, standing still with her arms relaxed, as the camera '
+        'circles slowly around her. Clean confident lineart, flat cel shading with one crisp shadow tone, '
+        'consistent character design, plain flat green background.')
 
     depth = [Image.fromarray(f).convert('RGB').resize((w, h), Image.BICUBIC) for f in iio.imread(a.depth)]
     n = len(depth)
@@ -141,7 +147,7 @@ def main():
     pipe.text_encoder.to('cuda')
     pipe.vae.to('cuda')
     with torch.no_grad():
-        embeds, _ = pipe.encode_prompt(PROMPT, do_classifier_free_guidance=False, device='cuda')
+        embeds, _ = pipe.encode_prompt(prompt, do_classifier_free_guidance=False, device='cuda')
     # The text encoder is done with: drop it so the pipeline runs (and places tensors) on the GPU.
     pipe.register_modules(text_encoder=None)
     gc.collect()
@@ -172,7 +178,7 @@ def main():
                 frames[s + j] = f
             print(f'chunk {k}: reused {path}', flush=True)
             continue
-        if a.only is not None and k != a.only:
+        if a.only is not None and k not in {int(x) for x in a.only.split(',')}:
             continue
         # Every frame of this window that is already finished (anchors, the last chunk's frames) is
         # held fixed; the rest is generated from the rendered depth.

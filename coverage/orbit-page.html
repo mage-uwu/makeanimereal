@@ -79,7 +79,7 @@ const PARTS = [];
 // Safety shorts for the views from below: the body is drawn again in the dress's navy over the band
 // from mid-thigh to the waist. The dress covers that band from every other angle, so only views
 // from under the hem see it (clothing, not underwear).
-function addShorts() {
+function addShorts(color = '#1c2056') {
   const hip = new THREE.Vector3(), knee = new THREE.Vector3();
   vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(hip);
   vrm.humanoid.getNormalizedBoneNode('leftLowerLeg').getWorldPosition(knee);
@@ -91,7 +91,7 @@ function addShorts() {
     if (!o.isSkinnedMesh || !/Body_00_SKIN/.test([].concat(o.material)[0].name)) return;
     // Only skin the hips and thighs move (not the hands, which hang at the same height).
     const ids = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg'].map(n => o.skeleton.bones.indexOf(vrm.humanoid.getRawBoneNode(n)));
-    const mat = new THREE.MeshBasicMaterial({ color: 0x1c2056, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
     mat.onBeforeCompile = sh => {
       const own = ids.map(i => `float(skinIndex.x == ${i}.0) * skinWeight.x + float(skinIndex.y == ${i}.0) * skinWeight.y + float(skinIndex.z == ${i}.0) * skinWeight.z + float(skinIndex.w == ${i}.0) * skinWeight.w`).join(' + ');
       sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying float vY;\nvarying float vW;')
@@ -107,7 +107,7 @@ function addShorts() {
   });
 }
 
-window.setup = async ({ model, width, height, fov, background, armDrop, shorts, motions }) => {
+window.setup = async ({ model, width, height, fov, background, armDrop, shorts, shortsColor, motions }) => {
   renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(1);
   renderer.setSize(width, height);
@@ -149,7 +149,7 @@ window.setup = async ({ model, width, height, fov, background, armDrop, shorts, 
   const box = new THREE.Box3().setFromObject(vrm.scene);
   target = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
-  if (shorts) addShorts();
+  if (shorts) addShorts(shortsColor);
   camera = new THREE.PerspectiveCamera(fov, width / height, 0.01, 100);
   // Distance that keeps her whole height (plus a small margin) in frame; at high pitch she only
   // gets shorter on screen, and her width is well inside the portrait frame.

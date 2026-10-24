@@ -6,6 +6,7 @@
 //        [--seconds 60] [--fps 16] [--turns 4] [--pitch=-20:70] [--size 720x1280] [--fov 30]
 //        [--background "#00b140"] [--only 0,240,480]   (render just these frames, for a preview)
 //        [--yaw0 0] [--skip-first] [--shorts] [--gbuffer]   (continue another spiral: start at its end yaw, without repeating that frame)
+//        [--resume]   (keep the frames a stopped run already wrote: cameras.json then has their yaw and pitch only)
 //        [--poses poses.json]   (instead of the spiral: [{clip, t, yaw, pitch[, light]}, ...] per frame, posed with
 //                                the mocap clips in coverage/live/motions.json; clip 'stand' is the plain stand;
 //                                light is {dir, color, intensity, amb, ambColor} for orbit-page's window.light)
@@ -31,6 +32,7 @@ const { values: opt } = parseArgs({
     'skip-first': { type: 'boolean', default: false },
     gbuffer: { type: 'boolean', default: false }, // also write normal/, uva/, uvb/ for the learned shader
     shorts: { type: 'boolean', default: false }, // navy safety shorts under the dress, for views from below
+    'shorts-color': { type: 'string', default: '#1c2056' }, // their colour: the outfit's (the first character's navy)
     pitch: { type: 'string', default: '-20:70' },
     size: { type: 'string', default: '720x1280' },
     fov: { type: 'string', default: '30' },
@@ -38,6 +40,7 @@ const { values: opt } = parseArgs({
     'arm-drop': { type: 'string', default: '68' },
     only: { type: 'string' },
     poses: { type: 'string' },
+    resume: { type: 'boolean', default: false }, // keep frames already rendered (all of their files), render the rest
   },
 });
 const [width, height] = opt.size.split('x').map(Number);
@@ -71,15 +74,18 @@ try {
   await page.waitForFunction(() => window.setup);
   const info = await page.evaluate(a => window.setup(a), {
     model: `/${path.relative(root, path.resolve(opt.model))}`, width, height,
-    fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']), shorts: opt.shorts,
+    fov: Number(opt.fov), background: opt.background, armDrop: Number(opt['arm-drop']), shorts: opt.shorts, shortsColor: opt['shorts-color'],
     motions: poses ? '/coverage/live/motions.json' : null,
   });
   console.log('model', info);
   const which = opt.only ? opt.only.split(',').map(Number) : [...Array(n).keys()];
   const cameras = [];
   let parts = null;
+  const dirs = ['frames', 'depth', ...(opt.gbuffer ? ['normal', 'uva', 'uvb'] : [])];
+  const have = async i => { for (const d of dirs) { try { await fs.access(path.join(outDir, d, `${String(i).padStart(4, '0')}.png`)); } catch { return false; } } return true; };
   for (const i of which) {
     const c = cam(i);
+    if (opt.resume && !poses && await have(i)) { cameras.push({ frame: i, time: +(i / fps).toFixed(4), ...c }); continue; }
     if (poses) await page.evaluate(([clip, t, light]) => { window.pose(clip, t); window.light(light || undefined); }, [poses[i].clip, poses[i].t, poses[i].light || null]);
     const s = await page.evaluate(([y, p]) => window.shot(y, p), [c.yaw, c.pitch]);
     const name = `${String(i).padStart(4, '0')}.png`;
