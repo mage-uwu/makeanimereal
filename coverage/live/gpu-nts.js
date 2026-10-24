@@ -212,10 +212,12 @@ fn head(v: array<f32, 64>) -> vec4<f32> {   // four lanes of partial sums, then 
   return { quant, token, embed, head };
 }
 
-export async function createGpuShader({ base = 'nts/', maxPixels, threads, fallback = true } = {}) {
+// stats: per frame, the crop, the pixels each pass computes (the distance buffer read back) and each
+// pass's GPU time, in .stats (diagnostics; it costs a readback a frame).
+export async function createGpuShader({ base = 'nts/', maxPixels, threads, fallback = true, stats = false } = {}) {
   try {
     if (!navigator.gpu) throw new Error('no WebGPU');
-    return await create(base, maxPixels);
+    return await create(base, maxPixels, stats);
   } catch (e) {
     if (!fallback) throw e;
     console.warn('[gpu-nts] using the CPU shader (nts.js):', e.message);
@@ -224,7 +226,7 @@ export async function createGpuShader({ base = 'nts/', maxPixels, threads, fallb
   }
 }
 
-async function create(base, maxPixels) {
+async function create(base, maxPixels, wantStats) {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('no WebGPU adapter');
   const get = async f => { const r = await fetch(base + f); if (!r.ok) throw new Error(`${base}${f}: ${r.status}`); return r; };
@@ -279,8 +281,9 @@ async function create(base, maxPixels) {
   const X = [buffer(maxPixels * DW * 4, ST), buffer(maxPixels * DW * 4, ST)];
   const bgBuf = buffer((NB + 1) * DW * 4, ST), outBuf = buffer(maxPixels * 4, ST | CS), readBuf = buffer(maxPixels * 4, GPUBufferUsage.MAP_READ | CD);
   const frameBuf = buffer(32, GPUBufferUsage.UNIFORM | CD);
-  const qs = ts ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
-  const qBuf = ts ? buffer(16, GPUBufferUsage.QUERY_RESOLVE | CS) : null, qRead = ts ? buffer(16, GPUBufferUsage.MAP_READ | CD) : null;
+  const NQ = 2 * (NB + 8);   // stats: a pair of timestamps a pass
+  const qs = ts ? device.createQuerySet({ type: 'timestamp', count: NQ }) : null;
+  const qBuf = ts ? buffer(8 * NQ, GPUBufferUsage.QUERY_RESOLVE | CS) : null, qRead = ts ? buffer(8 * NQ, GPUBufferUsage.MAP_READ | CD) : null;
   const blkBufs = Array.from({ length: NB }, (_, b) => buffer(16, GPUBufferUsage.UNIFORM, new Uint32Array([b, DIL[b], need[b], b ? need[b - 1] : 0])));
 
   // ---- kernels ----
@@ -409,7 +412,8 @@ fn texOne(base: u32, S: u32, lev: u32, u: f32, v: f32, f: ptr<function, array<f3
     head: group('head', [frameBuf, pBuf, bgBuf, distBuf, X[NB % 2], outBuf]),
   };
 
-  let busy = false, ms = null, gpuMs = null, out = new Uint8ClampedArray(0);
+  let busy = false, ms = null, gpuMs = null, out = new Uint8ClampedArray(0), stats = null;
+  const distRead = wantStats ? buffer(maxPixels * 4, GPUBufferUsage.MAP_READ | CD) : null;
   async function frame({ tiles, w, h, pitch }) {
     busy = true;
     const t0 = performance.now(), np = w * h;
@@ -418,22 +422,39 @@ fn texOne(base: u32, S: u32, lev: u32, u: f32, v: f32, f: ptr<function, array<f3
     fu[0] = w; fu[1] = h; fu[2] = np; fu[3] = P; ff[4] = Math.sin(pitch); ff[5] = Math.cos(pitch);
     device.queue.writeBuffer(frameBuf, 0, fr);
     const enc = device.createCommandEncoder(), groups = Math.ceil(np / 64);
-    const run = (name, bg, n = groups, stamp) => {
-      const p = enc.beginComputePass(ts && stamp ? { timestampWrites: { querySet: qs, ...stamp } } : {});
+    // timestamps: the first pass's start and the last's end; with stats, every pass's
+    const names = [];
+    const run = (name, bg, n = groups) => {
+      const i = names.length, first = i === 0, last = name === 'head', each = ts && wantStats;
+      names.push(name);
+      const tw = each ? { querySet: qs, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 }
+        : ts && first ? { querySet: qs, beginningOfPassWriteIndex: 0 } : ts && last ? { querySet: qs, endOfPassWriteIndex: 1 } : null;
+      const p = enc.beginComputePass(tw ? { timestampWrites: tw } : {});
       p.setPipeline(pipes[name]); p.setBindGroup(0, bg); p.dispatchWorkgroups(n); p.end();
     };
-    run('prepare', g.prepare, groups, { beginningOfPassWriteIndex: 0 }); run('mask', g.mask); run('distH', g.distH); run('distV', g.distV);
+    run('prepare', g.prepare); run('mask', g.mask); run('distH', g.distH); run('distV', g.distV);
     run('chain', g.chain, 1); run('embed', g.embed);
     for (let b = 0; b < NB; b++) run('block', g.blocks[b]);
-    run('head', g.head, groups, { endOfPassWriteIndex: 1 });
+    run('head', g.head);
     enc.copyBufferToBuffer(outBuf, 0, readBuf, 0, np * 4);
-    if (ts) { enc.resolveQuerySet(qs, 0, 2, qBuf, 0); enc.copyBufferToBuffer(qBuf, 0, qRead, 0, 16); }
+    const nq = ts && wantStats ? 2 * names.length : 2;
+    if (ts) { enc.resolveQuerySet(qs, 0, nq, qBuf, 0); enc.copyBufferToBuffer(qBuf, 0, qRead, 0, 8 * nq); }
+    if (wantStats) enc.copyBufferToBuffer(distBuf, 0, distRead, 0, np * 4);
     device.queue.submit([enc.finish()]);
-    await Promise.all([readBuf.mapAsync(GPUMapMode.READ, 0, np * 4), ts ? qRead.mapAsync(GPUMapMode.READ) : null]);
+    await Promise.all([readBuf.mapAsync(GPUMapMode.READ, 0, np * 4), ts ? qRead.mapAsync(GPUMapMode.READ, 0, 8 * nq) : null,
+      wantStats ? distRead.mapAsync(GPUMapMode.READ, 0, np * 4) : null]);
     if (ts) {
-      const [a, b] = new BigUint64Array(qRead.getMappedRange()); qRead.unmap();
-      const g = Number(b - a) / 1e6;
+      const q = new BigUint64Array(qRead.getMappedRange(0, 8 * nq).slice(0)); qRead.unmap();
+      const g = Number((wantStats ? q[nq - 1] : q[1]) - q[0]) / 1e6;
       if (g > 0 && g < 1e4) gpuMs = gpuMs == null ? g : gpuMs * 0.8 + g * 0.2;
+      if (wantStats) stats = { ...stats, gpuMs: g, passMs: names.map((n, i) => [n === 'block' ? `block ${i - 6}` : n, Number(q[2 * i + 1] - q[2 * i]) / 1e6]) };
+    }
+    if (wantStats) {   // how many pixels each pass computed: the distance against each block's reach
+      const d = new Uint32Array(distRead.getMappedRange(0, np * 4)), hist = new Uint32Array(257);
+      for (let i = 0; i < np; i++) hist[Math.min(d[i], 256)]++;
+      distRead.unmap();
+      const upto = n => { let c = 0; for (let k = 0; k <= n; k++) c += hist[k]; return c; };
+      stats = { ...stats, w, h, np, her: hist[0], active: need.map(upto), corner: hist[0] === np ? 'on her' : 'background' };
     }
     if (out.length < np * 4) out = new Uint8ClampedArray(Math.ceil(np * 4 * 1.3));
     out.set(new Uint8Array(readBuf.getMappedRange(0, np * 4)));
@@ -450,5 +471,6 @@ fn texOne(base: u32, S: u32, lev: u32, u: f32, v: f32, f: ptr<function, array<f3
     adapter: adapter.info ? `${adapter.info.vendor} ${adapter.info.architecture}`.trim() : '',
     get busy() { return busy; }, get ms() { return ms; },   // ms: wall time a frame (upload to readback)
     get gpuMs() { return gpuMs; },                           // the passes on the GPU's clock (timestamp queries), or null
+    get stats() { return stats; },                           // with stats: the last frame's crop, pixels a block and pass times
   };
 }

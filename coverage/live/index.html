@@ -887,7 +887,10 @@ function drawCpu() {
     putCpu(img, crop);
     return crop;
   }
-  cpu.frame({ tiles, w, h, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(rgba => putCpu(rgba, crop));
+  cpu.frame({ tiles, w, h, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(rgba => {
+    putCpu(rgba, crop);
+    if (cpu.stats) (window.ntsLog ||= []).push({ t: performance.now(), pose, crop, ...cpu.stats });   // #ntsstats: the frame's workload
+  });
   return crop;
 }
 function putCpu(rgba, crop) {
@@ -911,7 +914,7 @@ async function loadCpu() {
   const threads = +(location.hash.match(/threads(\d+)/)?.[1] || 0) || undefined;
   if (DETAIL === 'ntsgpu') {   // WebGPU compute, or nts.js when WebGPU is missing (cpu.gpu says which)
     const { createGpuShader } = await import('./gpu-nts.js');
-    cpu = await createGpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
+    cpu = await createGpuShader({ base: modelDir(), maxPixels: NW * NH, threads, stats: location.hash.includes('ntsstats') });
   } else {
     const { createCpuShader } = await import('./nts.js');
     cpu = await createCpuShader({ base: modelDir(), maxPixels: NW * NH, threads });
