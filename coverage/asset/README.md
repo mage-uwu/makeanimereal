@@ -120,3 +120,17 @@ of the same surface point between frames, 0.0200 for the film itself and 0.0049 
 models reach 0.55 → 0.47 of its edge strength, and in flat areas their gradient went 0.0186 → 0.0093
 (the film: 0.0041). `--lines` (ink-weighted loss, gradient matching) did not sharpen them: the film's
 lines sit a little differently in every frame, so fitting them harder only averages them.
+
+## 8. Flat lighting (`coverage/shader/nts/flatten_shading.py`)
+
+The film's frames weren't drawn under one light, and the shader averages their shadows into soft
+splotches. Before packing, flatten each target's lighting against the raw render (lit the same in
+every frame), then train as in step 7:
+
+    python3 flatten_shading.py data/top data/bottom --out-suffix _f6 --amount .6
+    python3 pack_data.py data/top_f6 data/bottom_f6 --out f6.ntsd
+
+On the bunny (shipped with `--amount .6`): the skirt and frosting read as even cel colour and the
+back's blotchy shading calms, at the same flicker and texture noise; its L1 against the unflattened
+film rises (0.0125 → 0.0139), as it should. Shadows wider than `--radius` (the skirt's on her thighs,
+drawn in every frame) count as real shading and stay. Run it on the pod: ~20 frames a minute on CPU.
