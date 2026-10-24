@@ -93,3 +93,30 @@ from a random network: a head start, not a different end point. On the RTX PRO 6
 Add the character to `CHARS` in `coverage/live/cpu.html` (model, network folder, shorts), pack its
 VRM with `coverage/live/slim_vrm.py`, rebuild `build_single.mjs` and publish the model and network
 files beside the page.
+
+## 7. Denoise (`coverage/shader/nts/denoise_torch.py`)
+
+A film drawn by a video model disagrees with itself a little from frame to frame, and plain L1 lets
+each texel of the neural texture absorb the error of the few frames that saw it: splotches, which
+slide over her as the camera moves (jitter). Train with the denoising objective instead of
+`shader_torch.py`:
+
+    python3 denoise_torch.py --data data.ntsd --net-from tree1.ntst --seconds 1800 --batch 16 --save c2.ntst \
+        --appearance 1 --align 1 --coarse-first .3 --tex-smooth .2 --tex-decay 1e-4
+    python3 denoise_torch.py --data data.ntsd --metrics c2.ntst     # L1, flicker, texture noise, lines
+
+Measured on the bunny (144 held-out frames, 36 consecutive-frame pairs; flicker is the colour change
+of the same surface point between frames, 0.0200 for the film itself and 0.0049 for the raw render):
+
+| | L1 | flicker | texture noise | lines |
+|---|---|---|---|---|
+| plain L1, 40k steps (first ship) | 0.0128 | 0.0180 | 1.15 | 0.70 |
+| plain L1, 9k steps | 0.0122 | 0.0115 | 0.75 | 0.64 |
+| + per-frame colour and offsets | 0.0123 | 0.0109 | 0.69 | 0.63 |
+| + coarse-first, smoothing, decay | 0.0122 | 0.0090 | 0.090 | 0.59 |
+| both (shipped) | 0.0125 | 0.0083 | 0.086 | 0.58 |
+
+"Lines" (edge energy against the film's) counts noise as edges. At the film's ink only, the shipped
+models reach 0.55 → 0.47 of its edge strength, and in flat areas their gradient went 0.0186 → 0.0093
+(the film: 0.0041). `--lines` (ink-weighted loss, gradient matching) did not sharpen them: the film's
+lines sit a little differently in every frame, so fitting them harder only averages them.
