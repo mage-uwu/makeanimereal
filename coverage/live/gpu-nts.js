@@ -277,7 +277,7 @@ async function create(base, maxPixels, wantStats) {
   const pBuf = buffer(L.f.byteLength, ST, L.f), uBuf = buffer(Math.max(4, L.u.byteLength), ST, L.u.length ? L.u : new Uint32Array(1));
   const texBuf = buffer(texb.byteLength, ST, new Uint32Array(texb.buffer));
   const tilesBuf = buffer(maxPixels * 20, ST | CD), inBuf = buffer(maxPixels * CIN * 4, ST);
-  const maskBuf = buffer(maxPixels * 4, ST), hBuf = buffer(maxPixels * 4, ST), distBuf = buffer(maxPixels * 4, ST);
+  const maskBuf = buffer(maxPixels * 4, ST), hBuf = buffer(maxPixels * 4, ST), distBuf = buffer(maxPixels * 4, ST | CS);   // CS: the stats read the distance back
   const X = [buffer(maxPixels * DW * 4, ST), buffer(maxPixels * DW * 4, ST)];
   const bgBuf = buffer((NB + 1) * DW * 4, ST), outBuf = buffer(maxPixels * 4, ST | CS), readBuf = buffer(maxPixels * 4, GPUBufferUsage.MAP_READ | CD);
   const frameBuf = buffer(32, GPUBufferUsage.UNIFORM | CD);
@@ -471,6 +471,6 @@ fn texOne(base: u32, S: u32, lev: u32, u: f32, v: f32, f: ptr<function, array<f3
     adapter: adapter.info ? `${adapter.info.vendor} ${adapter.info.architecture}`.trim() : '',
     get busy() { return busy; }, get ms() { return ms; },   // ms: wall time a frame (upload to readback)
     get gpuMs() { return gpuMs; },                           // the passes on the GPU's clock (timestamp queries), or null
-    get stats() { return stats; },                           // with stats: the last frame's crop, pixels a block and pass times
+    get stats() { return stats; },
   };
 }

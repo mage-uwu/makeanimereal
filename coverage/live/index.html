@@ -890,6 +890,10 @@ function drawCpu() {
   cpu.frame({ tiles, w, h, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(rgba => {
     putCpu(rgba, crop);
     if (cpu.stats) (window.ntsLog ||= []).push({ t: performance.now(), pose, crop, ...cpu.stats });   // #ntsstats: the frame's workload
+    if (cpu.stats?.gpuMs > 40) {   // a slow frame: what it computed and which passes took the time
+      const s = cpu.stats, top = [...s.passMs].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, t]) => `${n} ${t.toFixed(1)}`).join(', ');
+      console.warn(`nanotss slow frame: ${s.gpuMs.toFixed(1)} ms GPU, ${s.w}x${s.h} crop, ${s.her} px on her, block 1 on ${s.active[0]} px; ${top} ms`);
+    }
   });
   return crop;
 }
