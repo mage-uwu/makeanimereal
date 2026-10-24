@@ -88,6 +88,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="n-dense" aria-pressed="false" title="Each block's FFN dense: all 64 hidden units a pixel (run2)">Dense</button>
       <span class="sep"></span>
       <button id="c-girl" aria-pressed="false" title="The magical girl (the first character)">Magical Girl</button>
+      <button id="c-girlhd" aria-pressed="false" title="The magical girl trained at twice the resolution (720 x 1280): finer lines and detail, four times the work a frame">Magical Girl HD</button>
       <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
     </div>
     <form class="say" id="say" hidden>
@@ -125,23 +126,25 @@ import { createGuide } from './guide.js';
 import { createSword } from './sword.js';
 import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 
-// The network's frame: the training frames' scale (360 x 640) on a larger canvas, so raised arms fit.
-// #tight: the training frame itself (the checks compare against it).
-const TRAIN_H = 640, [NW, NH] = location.hash.includes('tight') ? [360, 640] : [720, 800], FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
-const ENGINE = location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
-// The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
 // The characters: each its own model and its own trained network(s) (coverage/asset/README.md).
-// #bunny picks the second; shorts: the colour of the safety shorts its training renders had (render-orbit.mjs
-// --shorts-color), drawn here too.
+// #bunny, #girlhd pick the others (scale 2: trained at 720 x 1280, drawn at twice the pixels); shorts:
+// the colour of the safety shorts its training renders had (render-orbit.mjs --shorts-color), drawn here too.
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
+  girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd/', shorts: 0x1c2056, scale: 2 },
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
+// The network's frame: the training frames' scale (360 x 640, or twice that for an HD character) on a
+// larger canvas, so raised arms fit. #tight: the training frame itself (the checks compare against it).
+const S = CH.scale || 1;
+const TRAIN_H = 640 * S, [NW, NH] = (location.hash.includes('tight') ? [360, 640] : [720, 800]).map(v => v * S), FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
+const ENGINE = location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
+// The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
 const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? CH.dense : CH.tree;
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
-const CROP_PAD = 32;
+const CROP_PAD = 32 * S;
 const status = document.getElementById('status'), readout = document.getElementById('readout');
 const stage = document.getElementById('stage'), view = document.getElementById('view');
 // GPU: three.js and the network share the visible canvas (the G-buffer goes to multisampled render
@@ -310,7 +313,7 @@ function cropBox() {
     for (const p of [swordA, swordB]) { p.project(camera); x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
   }
   const px = x => (x * 0.5 + 0.5) * NW, py = y => (0.5 - y * 0.5) * NH;
-  let box = [px(x0) - 44 - CROP_PAD, py(y1) - 64 - CROP_PAD, px(x1) + 44 + CROP_PAD, py(y0) + 32 + CROP_PAD];
+  let box = [px(x0) - 44 * S - CROP_PAD, py(y1) - 64 * S - CROP_PAD, px(x1) + 44 * S + CROP_PAD, py(y0) + 32 * S + CROP_PAD];
   const now = box;
   if (lastCrop) box = [Math.min(box[0], lastCrop[0]), Math.min(box[1], lastCrop[1]), Math.max(box[2], lastCrop[2]), Math.max(box[3], lastCrop[3])];
   lastCrop = now;

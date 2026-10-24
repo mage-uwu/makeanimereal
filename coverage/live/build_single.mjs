@@ -40,8 +40,10 @@ const bundle = mods.map(m => {
 
 // the inlined files, by the paths the page fetches; the wasm is the same for both networks
 const files = {};
-// every character's network folders (the page's CHARS): nts/, nts-tree/, and <character>/nts-tree/
-const nets = ['nts/', 'nts-tree/', ...readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory() && existsSync(path.join(dir, d.name, 'nts-tree/meta.json'))).map(d => `${d.name}/nts-tree/`)];
+// every character's network folders (the page's CHARS): any folder here, or <character>/nts-tree/, holding a meta.json
+const isNet = d => existsSync(path.join(dir, d, 'meta.json'));
+const nets = readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory())
+  .flatMap(d => [`${d.name}/`, `${d.name}/nts-tree/`]).filter(isNet);
 for (const net of nets) {
   for (const f of ['meta.json', 'net.png', 'infer.wasm', 'infer-dot.wasm', 'infer-relaxed.wasm', 'infer-relaxed-dot.wasm']) files[net + f] = read(net + f);
 }
