@@ -2,8 +2,22 @@
 
 The per-asset pathway: one VRM in, a trained nanotss tree shader out, as a character on the
 Tree-SSM page. Everything heavy runs on one RunPod GPU pod (`coverage/pod/`); the renders and the
-dataset are made locally. The second character (pixiv's VRoid stock avatar, "bunny") went through it
-in about 2 hours, most of it the local renders.
+dataset are made locally.
+
+The second character (pixiv's VRoid stock avatar, "bunny", `#bunny` on the page) went through it in
+about 2 hours. The pod (RTX PRO 6000, $2.49/h) was up 1.6 h, about $3.90:
+
+| Step | Where | Time |
+|---|---|---|
+| Orbit renders, 1440 frames with G-buffer | local, 4 vCPUs | ~80 min (two in parallel) |
+| Weights (editor, VACE, LoRAs) | pod | 2 min |
+| Style reference, 20 anchors | pod | ~10 s an image |
+| Film, 18 chunks at 432×768 | pod | ~45 s a chunk, 14 min (alongside the renders) |
+| Dataset, 1440 frames at 360×640 | local | 3 min |
+| Training, warm start from the first character | pod | 30 min: ~40k steps, held-out L1 0.0128 |
+
+Leave the bunny's model and trained files out of git: its VRM licence (personal non-profit, no
+redistribution) covers this private page, not a public repository.
 
 Each step below is a command; `$C` is the character's work folder (e.g. `out/c2`), `$P` is
 `coverage/pod/pod.sh` with `POD` and `POD_TOKEN` set.
@@ -68,8 +82,9 @@ second image's pose or outfit.
         --seconds 1500 --batch 16 --save c2.ntst
 
 `--net-from` starts from the first character's trained network (embed, stencils, trees, head) with a
-fresh neural texture for this one's parts: the network already knows how to draw the style, so the
-new character trains mostly its surface.
+fresh neural texture for this one's parts. After 2 minutes it was at held-out L1 0.0128 against 0.0134
+from a random network: a head start, not a different end point. On the RTX PRO 6000 the trainer runs
+~18 steps/s at batch 16 (2.6 M training pixels/s; the C trainer did 0.5 M on 16 CPU cores).
 
 ## 6. Export and view
 
