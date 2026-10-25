@@ -208,6 +208,7 @@ def main():
     ap.add_argument('--pairs', type=int, default=36, help='consecutive frame pairs for the flicker measure')
     ap.add_argument('--load'); ap.add_argument('--net-from'); ap.add_argument('--save', default='denoised.ntst')
     ap.add_argument('--tree', default='4,4'); ap.add_argument('--blocks', type=int, default=8)
+    ap.add_argument('--dil', help="the blocks' dilations, e.g. 1,3,9,27 (default: the standard 1,2,4,8,16,...)")
     ap.add_argument('--seconds', type=float, default=1800); ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--crop', type=int, default=96)
     ap.add_argument('--lr', type=float, default=0.003); ap.add_argument('--lr-tex', type=float, default=0.01)
@@ -223,6 +224,8 @@ def main():
     a = ap.parse_args()
     dev = torch.device(a.device)
     T, V = (int(v) for v in a.tree.split(','))
+    dil = [int(v) for v in a.dil.split(',')] if a.dil else DIL_DEFAULT
+    assert len(dil) >= a.blocks, '--dil: one per block'
     data = Data(a.data, dev if dev.type == 'cuda' else torch.device('cpu'))
     held = [i for i in range(data.N) if i % 10 == 5]
     # consecutive pairs in one wave (the pack is the top wave then the bottom; a jump between them is big)
@@ -230,12 +233,12 @@ def main():
 
     if a.metrics:
         for path in a.metrics:
-            net = Net(a.blocks, data.P, DIL_DEFAULT, T, V, dev); net.init(0); net.load(path)
+            net = Net(a.blocks, data.P, dil, T, V, dev); net.init(0); net.load(path)
             m = metrics(net, data, True, pairs, held[::4])
             print(f'{path}: ' + '  '.join(f'{k} {v:.4f}' for k, v in m.items()), flush=True)
         return
 
-    net = Net(a.blocks, data.P, DIL_DEFAULT, T, V, dev); net.init(0)
+    net = Net(a.blocks, data.P, dil, T, V, dev); net.init(0)
     if a.load: net.load(a.load)
     if a.net_from: net.load(a.net_from, tex=False)
     P, nfine = net.P, net.P * FINE * FINE
