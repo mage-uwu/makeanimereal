@@ -145,3 +145,15 @@ RTX PRO 6000, 12.7k steps, held-out L1 0.0142, flicker 0.0131, texture noise 0.0
 
 In `CHARS`, `scale: 2` doubles the network's frame (1440×1600, the crop margins with it): four times
 the pixels of the standard model per frame, so it is the one to try on a strong GPU.
+
+## 10. Retouch what the film drew wrong (`coverage/shader/nts/retouch_part.py`)
+
+The video model draws what it expects: the bunny's ears from behind are white in the model (their own
+back faces and UV islands) but the film drew them pink, as from the front. `retouch_part.py` moves
+only that part's neural texture (network frozen) so the region's pixels match the raw render's colour
+and every other pixel keeps the model's own output:
+
+    python3 retouch_part.py --model f6.ntst --data data/top data/bottom \
+        --part Accessory_RabbitEar_01_CLOTH --u 0:0.28 --u 0.72:1 --steps 400 --save f6e.ntst
+
+On the CPU (4 vCPUs) 400 steps took 20 min; the rest of her moved by under 0.002 (L1).
