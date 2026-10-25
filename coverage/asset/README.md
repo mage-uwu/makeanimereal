@@ -134,3 +134,14 @@ On the bunny (shipped with `--amount .6`): the skirt and frosting read as even c
 back's blotchy shading calms, at the same flicker and texture noise; its L1 against the unflattened
 film rises (0.0125 → 0.0139), as it should. Shadows wider than `--radius` (the skirt's on her thighs,
 drawn in every frame) count as real shading and stay. Run it on the pod: ~20 frames a minute on CPU.
+
+## 9. High resolution (the first character, `#girlhd` on the page)
+
+The same pipeline at twice the size: the film's frames and the G-buffer at 720×1280 (840 frames: 480
+of the top wave, 240 of the bottom, 120 mocap poses), flattened (`--amount .6 --radius 24`), and the
+denoising objective with `--crop 128` (the stencil's 38 px reach covers half as much of her at this
+size, so the crops grow with it). Warm start from the first character's network; 45 min on the
+RTX PRO 6000, 12.7k steps, held-out L1 0.0142, flicker 0.0131, texture noise 0.072.
+
+In `CHARS`, `scale: 2` doubles the network's frame (1440×1600, the crop margins with it): four times
+the pixels of the standard model per frame, so it is the one to try on a strong GPU.
