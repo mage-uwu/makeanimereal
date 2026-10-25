@@ -125,7 +125,28 @@ const VS = `#version 300 es
 void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }`;
 
 // The ternary stencil (tc_one) for one layer of 4 channels; taps in training order, rows top-down.
+// Half precision (createGlShader's precision): MP marks the blocks' arithmetic that may run in
+// mediump (16-bit floats on phone GPUs, twice the rate; desktops ignore it): the stencil and the
+// trees' outputs. The tree walk stays exact: a code (|c| <= 128) times ternary weights, four at a time,
+// is an integer below 2048, exact in a half float; the sums of those and the int8 rounding run in highp.
+// HALF_EMU rounds each MP step to a half float, to measure on a desktop what a phone would draw.
 const BLOCK_COMMON = `
+#if defined(HALF)
+#define MP mediump
+#else
+#define MP highp
+#endif
+vec4 H(vec4 x) { return vec4(unpackHalf2x16(packHalf2x16(x.xy)), unpackHalf2x16(packHalf2x16(x.zw))); }
+#if defined(HALF_EMU) || defined(HALF_EMU_S)
+#define R(x) H(x)
+#else
+#define R(x) (x)
+#endif
+#if defined(HALF_EMU) || defined(HALF_EMU_B)
+#define RB(x) H(x)
+#else
+#define RB(x) (x)
+#endif
 layout(std140) uniform Blk { vec4 Q[208]; vec4 gate[16]; vec4 b1[16]; vec4 b2[16]; vec4 s1[16]; vec4 s2[16]; vec4 bg[16]; };
 layout(std140) uniform Wt { vec4 W[1024]; };
 uniform sampler2DArray X; uniform int dil, needPrev, needCur;
@@ -136,13 +157,14 @@ ivec2 tapAt[9]; bool tapOn[9];
 void taps(ivec2 p) {
   for (int k = 0; k < 9; k++) { ivec2 q = p + ivec2(k % 3 - 1, 1 - k / 3) * dil; tapAt[k] = q - org; tapOn[k] = inCrop(q) && distAt(q) <= needPrev; }
 }
-vec4 tap(int k, int L) { return tapOn[k] ? texelFetch(X, ivec3(tapAt[k], L), 0) : bg[L]; }
-vec4 stencil(ivec2 p, int L) {   // after taps(p)
-  vec4 z = vec4(0.0);
-  for (int k = 0; k < 9; k++) z = Q[k * 16 + L] * tap(k, L) + z;
-  vec4 dw = z * (1.0 / 3.0), m = vec4(0.0);
-  m = Q[9 * 16 + L] * dw.x + m; m = Q[10 * 16 + L] * dw.y + m; m = Q[11 * 16 + L] * dw.z + m; m = Q[12 * 16 + L] * dw.w + m;
-  return gate[L] * (m * 0.5) + tap(4, L);
+MP vec4 tap(int k, int L) { return tapOn[k] ? texelFetch(X, ivec3(tapAt[k], L), 0) : R(bg[L]); }
+MP vec4 stencil(ivec2 p, int L) {   // after taps(p)
+  MP vec4 z = vec4(0.0);
+  for (int k = 0; k < 9; k++) { MP vec4 q = Q[k * 16 + L]; z = R(q * tap(k, L) + z); }
+  MP vec4 dw = R(z * (1.0 / 3.0)), m = vec4(0.0);
+  for (int j = 0; j < 4; j++) { MP vec4 q = Q[(9 + j) * 16 + L]; m = R(q * dw[j] + m); }
+  MP vec4 gt = R(gate[L]);
+  return R(gt * R(m * 0.5) + tap(4, L));
 }
 float quant(inout vec4 v[16]) {   // v := its int8 codes; returns their scale
   float mx = 0.0;
@@ -162,7 +184,11 @@ float rowdot(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a 
 // the trees' weights from a texture instead (each pixel walks its own rows: a GPU reads per-pixel
 // rows from a texture far faster than from a uniform buffer); row r of the matrix at texture row wrow + r
 uniform highp sampler2D Wtex; uniform int wrow;
-float rowdotT(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a += dot(c[k], texelFetch(Wtex, ivec2(k, wrow + r), 0)); return a; }
+float rowdotT(vec4 c[16], int r) {   // c: int8 codes, the row ternary
+  float a = 0.0;
+  for (int k = 0; k < 16; k++) { MP vec4 ck = c[k], wk = texelFetch(Wtex, ivec2(k, wrow + r), 0); a += float(dot(ck, wk)); }
+  return a;
+}
 `;
 // ablate (profiling only, benchA): steps to leave out, each replaced by the cheapest thing that keeps
 // the data flowing (so the compiler can't drop the rest): STENCIL (the pixel's own input), QUANT
@@ -242,9 +268,9 @@ void main() {
 }`;
 // cached: the stencil from St; else each pass works it out (taps(p) by prep(p))
 const STENCIL_IN = cached => cached ? `uniform highp sampler2DArray St;
-vec4 stencilAt(ivec2 p, int L) { return texelFetch(St, ivec3(p - org, L), 0); }
+MP vec4 stencilAt(ivec2 p, int L) { return texelFetch(St, ivec3(p - org, L), 0); }
 void prep(ivec2 p) {}
-` : `vec4 stencilAt(ivec2 p, int L) { return stencil(p, L); }
+` : `MP vec4 stencilAt(ivec2 p, int L) { return stencil(p, L); }
 void prep(ivec2 p) { taps(p); }
 `;
 const PASS_TA = (T, V, TN, cached) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(3, 'uvec4')}
@@ -279,18 +305,19 @@ void main() {
   if (distAt(p) > needCur) discard;
   prep(p);
   uvec4 nodes = texelFetch(C, ivec3(p - org, 0), 0), h0 = texelFetch(C, ivec3(p - org, 1), 0), h1 = texelFetch(C, ivec3(p - org, 2), 0);
-  float g[16];
+  MP float g[16];   // half floats already
   for (int i = 0; i < 4; i++) {
     vec2 a = unpackHalf2x16(h0[i]), b = unpackHalf2x16(h1[i]);
     g[2 * i] = a.x; g[2 * i + 1] = a.y; g[8 + 2 * i] = b.x; g[8 + 2 * i + 1] = b.y;
   }
-  vec4 y[${M}];
+  MP vec4 y[${M}];
   for (int j = 0; j < ${M}; j++) {
     int L = ${M} * hf + j;
-    vec4 acc = stencilAt(p, L) + b2[L];
+    MP vec4 acc = RB(stencilAt(p, L) + RB(b2[L]));
     for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
       int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
-      acc += g[tr * ${V} + k] * texelFetch(Wtex, ivec2(L, wrow + row), 0);
+      MP vec4 w = RB(texelFetch(Wtex, ivec2(L, wrow + row), 0));
+      acc = RB(g[tr * ${V} + k] * w + acc);
     }
     y[j] = acc;
   }
@@ -492,7 +519,9 @@ void main() {
 // extra rows above and below, so every strip's own rows come out exactly as from the whole crop.
 // cacheStencil: the trees' blocks work their stencil out once (pass TS, kept as half floats, 128 bytes a
 // pixel more) instead of in both of their passes.
-export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true }) {
+// precision: 'half' (the blocks' stencil and tree outputs in 16-bit floats where the GPU has them),
+// 'full', or 'emulate' (32-bit, rounding each of those steps to 16 bits: a phone's result on a desktop).
+export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true, precision = 'half' }) {
   const gl = renderer.getContext();
   if (!(gl instanceof WebGL2RenderingContext)) throw new Error('needs WebGL2');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('needs float render targets (EXT_color_buffer_float)');
@@ -505,7 +534,9 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const { NB, NBC, P, DIL } = net;
 
   // ---- programs ----
+  const defs = { half: '#define HALF\n', emulate: '#define HALF_EMU\n', emulateS: '#define HALF_EMU_S\n', emulateB: '#define HALF_EMU_B\n', full: '' }[precision];
   function program(fs) {
+    fs = fs.replace('#version 300 es\n', '#version 300 es\n' + defs);
     const p = gl.createProgram();
     for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, fs]]) {
       const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
