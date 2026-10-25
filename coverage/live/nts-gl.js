@@ -130,12 +130,19 @@ layout(std140) uniform Blk { vec4 Q[208]; vec4 gate[16]; vec4 b1[16]; vec4 b2[16
 layout(std140) uniform Wt { vec4 W[1024]; };
 uniform sampler2DArray X; uniform int dil, needPrev, needCur;
 vec4 xin(ivec2 p, int L) { return (!inCrop(p) || distAt(p) > needPrev) ? bg[L] : texelFetch(X, ivec3(p - org, L), 0); }
-vec4 stencil(ivec2 p, int L) {
+// the taps' pixels and whether each holds an activation (else the background's), found once a pixel
+// (taps(p)) rather than once a tap and layer
+ivec2 tapAt[9]; bool tapOn[9];
+void taps(ivec2 p) {
+  for (int k = 0; k < 9; k++) { ivec2 q = p + ivec2(k % 3 - 1, 1 - k / 3) * dil; tapAt[k] = q - org; tapOn[k] = inCrop(q) && distAt(q) <= needPrev; }
+}
+vec4 tap(int k, int L) { return tapOn[k] ? texelFetch(X, ivec3(tapAt[k], L), 0) : bg[L]; }
+vec4 stencil(ivec2 p, int L) {   // after taps(p)
   vec4 z = vec4(0.0);
-  for (int k = 0; k < 9; k++) z = Q[k * 16 + L] * xin(p + ivec2(k % 3 - 1, 1 - k / 3) * dil, L) + z;
+  for (int k = 0; k < 9; k++) z = Q[k * 16 + L] * tap(k, L) + z;
   vec4 dw = z * (1.0 / 3.0), m = vec4(0.0);
   m = Q[9 * 16 + L] * dw.x + m; m = Q[10 * 16 + L] * dw.y + m; m = Q[11 * 16 + L] * dw.z + m; m = Q[12 * 16 + L] * dw.w + m;
-  return gate[L] * (m * 0.5) + xin(p, L);
+  return gate[L] * (m * 0.5) + tap(4, L);
 }
 float quant(inout vec4 v[16]) {   // v := its int8 codes; returns their scale
   float mx = 0.0;
@@ -152,6 +159,10 @@ float gelu(float v) {
   return v * (0.5 * (1.0 + er));
 }
 float rowdot(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a += dot(c[k], W[r * 16 + k]); return a; }
+// the trees' weights from a texture instead (each pixel walks its own rows: a GPU reads per-pixel
+// rows from a texture far faster than from a uniform buffer); row r of the matrix at texture row wrow + r
+uniform highp sampler2D Wtex; uniform int wrow;
+float rowdotT(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a += dot(c[k], texelFetch(Wtex, ivec2(k, wrow + r), 0)); return a; }
 `;
 // ablate (profiling only, benchA): steps to leave out, each replaced by the cheapest thing that keeps
 // the data flowing (so the compiler can't drop the rest): STENCIL (the pixel's own input), QUANT
@@ -166,6 +177,7 @@ uint pack4(vec4 c) { uvec4 i = uvec4(ivec4(c) & 255); return i.x | (i.y << 8u) |
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
+  taps(p);
   vec4 v[16];
 #ifdef NO_STENCIL
   for (int L = 0; L < 16; L++) v[L] = xin(p, L);
@@ -200,6 +212,7 @@ vec4 unpack4(uint u) { ivec4 i = ivec4(int(u << 24u), int(u << 16u), int(u << 8u
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
+  taps(p);
   vec4 c[16];
   for (int j = 0; j < 4; j++) { uvec4 u = texelFetch(C, ivec3(p - org, j), 0); c[4 * j] = unpack4(u.x); c[4 * j + 1] = unpack4(u.y); c[4 * j + 2] = unpack4(u.z); c[4 * j + 3] = unpack4(u.w); }
   float xs = uintBitsToFloat(texelFetch(C, ivec3(p - org, 4), 0).x);
@@ -221,6 +234,7 @@ const PASS_TA = (T, V, TN) => HEAD + BLOCK_COMMON + `${outs(3, 'uvec4')}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
+  taps(p);
   vec4 v[16];
   for (int L = 0; L < 16; L++) v[L] = stencil(p, L);
   float xs = quant(v);
@@ -231,7 +245,7 @@ void main() {
     int a = 0;
     for (int j = 0; j < ${V}; j++) {
       int row = tr * ${TN} + a;
-      float sv = rowdot(v, row) * s1[row / 4][row % 4] * xs + b1[row / 4][row % 4];
+      float sv = rowdotT(v, row) * s1[row / 4][row % 4] * xs + b1[row / 4][row % 4];
       g[tr * ${V} + j] = gelu(sv);
       nodes[tr] |= uint(row) << (8u * uint(j));
       a = 2 * a + 1 + (sv > 0.0 ? 1 : 0);
@@ -246,6 +260,7 @@ uniform highp usampler2DArray C; uniform int hf;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
+  taps(p);
   uvec4 nodes = texelFetch(C, ivec3(p - org, 0), 0), h0 = texelFetch(C, ivec3(p - org, 1), 0), h1 = texelFetch(C, ivec3(p - org, 2), 0);
   float g[16];
   for (int i = 0; i < 4; i++) {
@@ -258,7 +273,7 @@ void main() {
     vec4 acc = stencil(p, L) + b2[L];
     for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
       int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
-      acc += g[tr * ${V} + k] * W[row * 16 + L];
+      acc += g[tr * ${V} + k] * texelFetch(Wtex, ivec2(L, wrow + row), 0);
     }
     y[j] = acc;
   }
@@ -562,6 +577,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const bgOff = 13 * DW + 5 * DW;   // floats into a block's slot: its background input
   const ubo = data => { const b = gl.createBuffer(); gl.bindBuffer(gl.UNIFORM_BUFFER, b); gl.bufferData(gl.UNIFORM_BUFFER, data, gl.DYNAMIC_DRAW); return b; };
   const blkBuf = ubo(blkData), wtBuf = ubo(wtData);
+  // the same weights as a texture for the trees: 16 texels (64 floats) a row, each matrix 64 rows (WT bytes)
+  const wTex = tex2d(16, 2 * NB * WT / 256, gl.RGBA32F, gl.RGBA, gl.FLOAT, wtData);
   const emb = new Float32Array(312 * 4);
   for (let i = 0; i < CIN; i++) for (let j = 0; j < DW; j++) emb[i * DW + j] = net.We[j * CIN + i];
   emb.set(net.be, 288 * 4); emb.set(net.lo.subarray(0, 8), 304 * 4); emb.set(net.lo.subarray(8, 16), 306 * 4);
@@ -693,10 +710,11 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
         };
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
         if (net.T) {   // trees: the walk, then the visited nodes' outputs
-          pass(prog.TA, Cq, 0, 3, common);
+          const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wtex); gl.uniform1i(u.wrow, (2 * b + m) * 64); };
+          pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); });
           mark(`block ${b} A: stencil, tree walk`);
           gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
-          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); wt(u, 1); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
           mark(`block ${b} B: tree outputs, residual`);
         } else {
           if (M >= 5) pass(prog.A, Cq, 0, 5, common);
