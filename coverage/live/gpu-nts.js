@@ -22,9 +22,9 @@
 // rounded, so an int8 rounding can rarely land the other way: within check_infer.mjs's tolerance.
 import { createCpuShader } from './nts.js';
 
-const DW = 64, KT = 9, CIN = 18, FCH = 8, FINE = 512, COARSE = 64, MARGIN = 6;
+export const DW = 64, KT = 9, CIN = 18, FCH = 8, FINE = 512, COARSE = 64, MARGIN = 6;
 
-async function unpackPng(blob) {   // net.png: the bytes 3 a pixel after a 4-byte length (as nts.js)
+export async function unpackPng(blob) {   // net.png: the bytes 3 a pixel after a 4-byte length (as nts.js)
   const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   const c = new OffscreenCanvas(bmp.width, bmp.height), ctx = c.getContext('2d');
   ctx.drawImage(bmp, 0, 0);
@@ -35,7 +35,7 @@ async function unpackPng(blob) {   // net.png: the bytes 3 a pixel after a 4-byt
 }
 
 // net.bin (export_nts.py): NTSV (dense FFNs) or NTS3 (trees).
-function parseNet(buf) {
+export function parseNet(buf) {
   const dv = new DataView(buf); let o = 4;
   const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
   if (magic !== 'NTSV' && magic !== 'NTS3') throw new Error(`gpu-nts: ${magic} nets run on the CPU`);
@@ -55,7 +55,7 @@ function parseNet(buf) {
 }
 
 // The parameters: one float array, one array of int8 rows packed 4 to a u32, with each block's offsets.
-function layout(net) {
+export function layout(net) {
   const { NB, T, TN } = net, f = [], u = [], fo = {}, uo = [];
   const put = (name, a) => { fo[name] = f.length; for (const v of a) f.push(v); };
   put('We', net.We); put('be', net.be); put('Wh', net.Wh); put('bh', net.bh); put('lo', net.lo); put('st', net.st);
@@ -70,7 +70,15 @@ function layout(net) {
       o.bias = f.length; for (const v of k.bias) f.push(v);
       o.sin = f.length; for (const v of k.sin) f.push(v);
       o.wout = f.length; for (let r = 0; r < T * TN; r++) for (let i = 0; i < DW; i++) f.push(Math.fround(k.cout[r * DW + i] * k.sout[r]));
+      o.sout = f.length; for (const v of k.sout) f.push(v);
       pack(k.cin);
+      // w_out as ternary bitmasks (fused-nts.js): per row the +1 channels (2 words), then the -1 ones
+      o.wob = u.length;
+      for (let r = 0; r < T * TN; r++) {
+        const m = [0, 0, 0, 0];
+        for (let i = 0; i < DW; i++) { const c = k.cout[r * DW + i]; if (c) m[(c < 0 ? 2 : 0) + (i >> 5)] |= 1 << (i & 31); }
+        for (const w of m) u.push(w >>> 0);
+      }
     } else {
       o.b1 = f.length; for (const v of k.b1) f.push(v);
       o.s1 = f.length; for (const v of k.s1) f.push(v);
@@ -83,7 +91,7 @@ function layout(net) {
 }
 
 // ---------------- WGSL ----------------
-function wgsl(net, L, packed) {
+export function wgsl(net, L, packed) {
   const { NB, T, V, TN } = net, B = L.blk;
   const arr = (name, key) => `const ${name} = array<u32, ${NB}>(${B.map(o => `${o[key] ?? 0}u`).join(', ')});`;
   // dot4I8Packed / pack4xI8 where the language feature is there, else the same sums by hand
@@ -120,7 +128,7 @@ fn gelu(v: f32) -> f32 {   // infer.c gelu4: Abramowitz-Stegun erf sharing one e
 }
 // The per-token network in parts: quant (quant16), token (the stencil, then the FFN or the trees),
 // embed and head; each kernel takes the parts it calls.
-function wgslParts(net) {
+export function wgslParts(net) {
   const { T, V, TN } = net;
   const ffn = T ? `
   // the trees: t + b2 + each visited node's gelu(s) w_out; s = integer sum x row scale x xs + bias
@@ -212,6 +220,31 @@ fn head(v: array<f32, 64>) -> vec4<f32> {   // four lanes of partial sums, then 
   return { quant, token, embed, head };
 }
 
+// The neural texture as one byte array: fine0..2.png hold channels 3k..3k+2, part p at tile
+// (p % cols, p / cols) -> [part][y][x][8] (nts.js), then the coarse level from net.bin.
+export async function netTexture(get, meta, net) {
+  const { P } = net;
+  const T = meta.tile, imgs = await Promise.all([0, 1, 2].map(async i => {
+    const bmp = await createImageBitmap(await (await get(`fine${i}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    const c = new OffscreenCanvas(bmp.width, bmp.height), ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0); return ctx.getImageData(0, 0, bmp.width, bmp.height);
+  }));
+  const fineN = P * T * T * FCH, coarseN = P * COARSE * COARSE * FCH;
+  const texb = new Uint8Array(Math.ceil((fineN + coarseN) / 4) * 4);
+  for (let p = 0; p < P; p++) {
+    const x0 = (p % meta.cols) * T, y0 = Math.floor(p / meta.cols) * T;
+    for (let ch = 0; ch < 8; ch++) {
+      const src = imgs[ch / 3 | 0], W = src.width, d = src.data, j = ch % 3;
+      for (let y = 0; y < T; y++) {
+        let s = ((y0 + y) * W + x0) * 4 + j, o = ((p * T + y) * T) * 8 + ch;
+        for (let x = 0; x < T; x++, s += 4, o += 8) texb[o] = d[s];
+      }
+    }
+  }
+  texb.set(net.coarse, fineN);
+  return texb;
+}
+
 // stats: per frame, the crop, the pixels each pass computes (the distance buffer read back) and each
 // pass's GPU time, in .stats (diagnostics; it costs a readback a frame).
 export async function createGpuShader({ base = 'nts/', maxPixels, threads, fallback = true, stats = false } = {}) {
@@ -232,25 +265,8 @@ async function create(base, maxPixels, wantStats) {
   const get = async f => { const r = await fetch(base + f); if (!r.ok) throw new Error(`${base}${f}: ${r.status}`); return r; };
   const [meta, raw] = await Promise.all([get('meta.json').then(r => r.json()), get('net.png').then(r => r.blob()).then(unpackPng)]);
   const net = parseNet(raw), { NB, P, DIL } = net;
-  // the fine texture: fine0..2.png hold channels 3k..3k+2, part p at tile (p % cols, p / cols) -> [part][y][x][8] (nts.js)
-  const T = meta.tile, imgs = await Promise.all([0, 1, 2].map(async i => {
-    const bmp = await createImageBitmap(await (await get(`fine${i}.png`)).blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-    const c = new OffscreenCanvas(bmp.width, bmp.height), ctx = c.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bmp, 0, 0); return ctx.getImageData(0, 0, bmp.width, bmp.height);
-  }));
-  const fineN = P * T * T * FCH, coarseN = P * COARSE * COARSE * FCH;
-  const texb = new Uint8Array(Math.ceil((fineN + coarseN) / 4) * 4);
-  for (let p = 0; p < P; p++) {
-    const x0 = (p % meta.cols) * T, y0 = Math.floor(p / meta.cols) * T;
-    for (let ch = 0; ch < 8; ch++) {
-      const src = imgs[ch / 3 | 0], W = src.width, d = src.data, j = ch % 3;
-      for (let y = 0; y < T; y++) {
-        let s = ((y0 + y) * W + x0) * 4 + j, o = ((p * T + y) * T) * 8 + ch;
-        for (let x = 0; x < T; x++, s += 4, o += 8) texb[o] = d[s];
-      }
-    }
-  }
-  texb.set(net.coarse, fineN);
+  const texb = await netTexture(get, meta, net);
+  const fineN = P * meta.tile * meta.tile * FCH;
 
   const packed = navigator.gpu.wgslLanguageFeatures?.has('packed_4x8_integer_dot_product');
   // the largest buffers: a frame's activations (64 floats a pixel) and the texture

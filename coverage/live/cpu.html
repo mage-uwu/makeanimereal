@@ -81,6 +81,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="m-lines" aria-pressed="true" hidden title="Line art: toon contours (drawn from her geometry), the network's learned ink, or none">Lines: Toon</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
+      <button id="e-fused" aria-pressed="false" title="The network in fused WebGPU compute kernels, all on the GPU (fused-nts.js)">Fused</button>
       <button id="e-webgpu" aria-pressed="false" title="The network in WebGPU compute shaders (gpu-nts.js); the CPU one where WebGPU is missing">WebGPU</button>
       <button id="e-cpu" aria-pressed="false" title="The network in WebAssembly workers">CPU</button>
       <span class="sep"></span>
@@ -120,6 +121,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { createMotion } from './motion.js';
 import { createCpuShader } from './nts.js';
 import { createGpuShader } from './gpu-nts.js';
+import { createFusedShader } from './fused-nts.js';
 import { createGlShader } from './nts-gl.js';
 import { createToon } from './toon.js';
 import { createGuide } from './guide.js';
@@ -139,7 +141,7 @@ const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1)
 // larger canvas, so raised arms fit. #tight: the training frame itself (the checks compare against it).
 const S = CH.scale || 1;
 const TRAIN_H = 640 * S, [NW, NH] = (location.hash.includes('tight') ? [360, 640] : [720, 800]).map(v => v * S), FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
-const ENGINE = location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
+const ENGINE = location.hash.includes('fused') ? 'fused' : location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
 // The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
 const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? CH.dense : CH.tree;
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
@@ -497,6 +499,7 @@ function frameOnce(t) {
     return Promise.resolve();
   }
   renderTiles(crop);
+  if (shader.fused && !raw) return shader.frame({ source: glCanvas, crop, pitch: THREE.MathUtils.degToRad(cam.pitch) }).then(paint);
   const [x0, y0, x1, y1] = crop, w = x1 - x0, h = y1 - y0, n = w * h * 4;
   for (let k = 0; k < 5; k++) gl.readPixels(k * NW + x0, NH - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, tiles.subarray(k * n, (k + 1) * n));
   if (raw) {   // the raw render: the colour tile, green keyed out
@@ -615,6 +618,7 @@ function loop(now) {
     fps = lastShown ? fps * 0.85 + 1000 / Math.max(1, t1 - lastShown) * 0.15 : 0; lastShown = t1;
     const net = NET === 'tree' ? 'tree FFNs' : 'dense FFNs';
     readout.textContent = raw ? 'raw render' : gls ? `GPU · WebGL2 fragment shaders · ${net} · ${fps.toFixed(1)} fps`
+      : shader.fused ? `${shader.kernel} · ${shader.gpuMs != null ? `${shader.gpuMs.toFixed(1)} ms GPU · ` : ''}${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`
       : shader.gpu ? `WebGPU compute · ${net} · ${shader.gpuMs != null ? `${shader.gpuMs.toFixed(1)} ms GPU · ` : ''}${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`
       : `CPU · WebAssembly ${shader.relaxed ? 'relaxed ' : ''}SIMD ${shader.kernel} × ${shader.threads} · ${net} · ${Math.round(t1 - t0)} ms · ${fps.toFixed(1)} fps`;
     if (PROF && gls && t1 - profShown > 2000) showProf(t1);
@@ -647,8 +651,8 @@ function showProf(now) {
 }
 
 // Engine buttons: switching reloads with the other engine.
-const engineHash = e => { const t = location.hash.slice(1).split('-').filter(x => x && !['cpu', 'gpu', 'webgpu'].includes(x)); if (e !== 'gpu') t.push(e); return t.join('-'); };
-for (const e of ['gpu', 'webgpu', 'cpu']) {
+const engineHash = e => { const t = location.hash.slice(1).split('-').filter(x => x && !['cpu', 'gpu', 'webgpu', 'fused'].includes(x)); if (e !== 'gpu') t.push(e); return t.join('-'); };
+for (const e of ['gpu', 'fused', 'webgpu', 'cpu']) {
   const b = document.getElementById(`e-${e}`);
   b.setAttribute('aria-pressed', String(e === ENGINE));
   b.onclick = () => { if (e !== ENGINE) { location.hash = engineHash(e); location.reload(); } };
@@ -678,6 +682,13 @@ for (const n of ['tree', 'dense']) {
 }
 
 // For checks (#tight): the GPU's drawing and tiles for one view, base64.
+// checks, the 2D engines: one frame at this camera (standing, no blinks), the network frame's straight RGBA
+window.debugNet = async (yaw, pitch) => {
+  face.blinkAt = performance.now() + 1e9; vel.yaw = vel.pitch = 0; cam.yaw = yaw; cam.pitch = pitch; pose = 'stand';
+  while (shader.busy) await new Promise(r => setTimeout(r, 50));
+  await frameOnce(0); await frameOnce(0);
+  return Array.from(netCtx.getImageData(0, 0, NW, NH).data);
+};
 window.debugSword = (poseName, t) => { setPose(poseName, t); return sword.stats; };   // checks: the hilt between the hands
 window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
   cam.yaw = yaw; cam.pitch = pitch; pose = poseName; lastCrop = null;
@@ -701,7 +712,9 @@ try {
     if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
       throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
     const threads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
-    const make = ENGINE === 'webgpu' ? createGpuShader({ base: NET_BASE, maxPixels: NW * NH, threads, stats: location.hash.includes('ntsstats') })
+    const make = ENGINE === 'fused' ? createFusedShader({ base: NET_BASE, NW, NH, maxStrip: MAX_STRIP, target: netCtx,
+        precision: location.hash.includes('fp32') ? 'full' : 'half' }).catch(e => { console.warn('fused engine unavailable, using the GPU one:', e); location.hash = engineHash('gpu'); location.reload(); throw e; })
+      : ENGINE === 'webgpu' ? createGpuShader({ base: NET_BASE, maxPixels: NW * NH, threads, stats: location.hash.includes('ntsstats') })
       : createCpuShader({ base: NET_BASE, maxPixels: NW * NH, threads });
     [shader] = await Promise.all([make, loadModel()]);
     tiles = new Uint8Array(5 * NW * NH * 4);

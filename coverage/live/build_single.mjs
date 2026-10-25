@@ -20,7 +20,7 @@ const must = (s, a, b) => { if (!s.includes(a)) throw new Error(`build_single: '
 const worker = read('nts-worker.js').toString();
 // the modules, bundled into the page's own module script: each in a function scope, its exports
 // returned (an artifact page loads scripts only from its allowed CDNs, so no data: modules)
-const mods = ['motion.js', 'nts.js', 'backdrop.js', 'nts-gl.js', 'toon.js', 'guide.js', 'sword.js', 'gpu-nts.js'];   // dependencies first
+const mods = ['motion.js', 'nts.js', 'backdrop.js', 'nts-gl.js', 'toon.js', 'guide.js', 'sword.js', 'gpu-nts.js', 'fused-nts.js'];   // dependencies first
 const exported = {};
 const bundle = mods.map(m => {
   let code = read(m).toString();
