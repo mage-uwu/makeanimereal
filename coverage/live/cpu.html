@@ -131,7 +131,7 @@ import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 // the colour of the safety shorts its training renders had (render-orbit.mjs --shorts-color), drawn here too.
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
-  girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd/', shorts: 0x1c2056, scale: 2 },
+  girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
@@ -629,7 +629,7 @@ function showProfA() {
   const rows = [step('stencil (9 dilated taps + group mix)', 'no stencil'), step('FFN1 (64×64 ternary)', 'no FFN1'),
     step('GELU', 'no GELU'), step('int8 rounding (×2)', 'no int8 rounding'), ['fetch, pack, write (the rest)', r['none (fetch, pack, write)']]];
   const line = ([k, ms]) => `${ms.toFixed(2).padStart(7)} ms ${(100 * ms / full).toFixed(0).padStart(4)}%  ${k}`;
-  const text = [`block ${block} pass A (dilation ${[1, 2, 4, 8, 16, 1, 2, 4][block]}), ${NW}×${NH} frame: ${full.toFixed(2)} ms a run`,
+  const text = [`block ${block} pass A, ${NW}×${NH} frame: ${full.toFixed(2)} ms a run`,
     ...rows.map(line), '', 'without each step:', ...Object.entries(r).map(([k, ms]) => `${ms.toFixed(2).padStart(7)} ms  ${k}`)].join('\n');
   const el = document.getElementById('prof'); el.hidden = false; el.textContent = text;
   window.profReport = text; console.log(text);

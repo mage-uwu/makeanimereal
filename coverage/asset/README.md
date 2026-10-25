@@ -144,7 +144,13 @@ size, so the crops grow with it). Warm start from the first character's network;
 RTX PRO 6000, 12.7k steps, held-out L1 0.0142, flicker 0.0131, texture noise 0.072.
 
 In `CHARS`, `scale: 2` doubles the network's frame (1440×1600, the crop margins with it): four times
-the pixels of the standard model per frame, so it is the one to try on a strong GPU.
+the pixels of the standard model per frame.
+
+The shipped HD model is smaller: 4 blocks instead of 8, dilations 1, 3, 9, 27 (`--blocks 4 --dil
+1,3,9,27`, from scratch, 60 min) so it still sees 40 px around each pixel. It matched the 8-block one
+(held-out L1 0.0142 both, flicker 0.0130 vs 0.0131, texture noise 0.069 vs 0.072) at about 55-60% of
+its GPU time: in SwiftShader an HD frame took 12.8-14.0 s against 21.0-24.1 s, the standard character
+6.7-7.0 s.
 
 ## 10. Retouch what the film drew wrong (`coverage/shader/nts/retouch_part.py`)
 
