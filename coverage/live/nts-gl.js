@@ -181,12 +181,27 @@ float gelu(float v) {
   return v * (0.5 * (1.0 + er));
 }
 float rowdot(vec4 c[16], int r) { float a = 0.0; for (int k = 0; k < 16; k++) a += dot(c[k], W[r * 16 + k]); return a; }
-// the trees' weights from a texture instead (each pixel walks its own rows: a GPU reads per-pixel
-// rows from a texture far faster than from a uniform buffer); row r of the matrix at texture row wrow + r
-uniform highp sampler2D Wtex; uniform int wrow;
-float rowdotT(vec4 c[16], int r) {   // c: int8 codes, the row ternary
+// The trees' weights, packed: each pixel walks its own rows, which a GPU reads far faster from a
+// texture than from a uniform buffer, and a ternary row of 64 is 128 bits, one texel: x, y the
+// channels that are +1 (bits 0-31, 32-63), z, w those that are -1. Texel 1 of the row: its scale and
+// (w_in) its node bias, as float bits. Row r of the matrix at texture row wrow + r.
+uniform highp usampler2D Wp; uniform int wrow;
+uvec4 rowBits(int r) { return texelFetch(Wp, ivec2(0, wrow + r), 0); }
+vec2 rowScale(int r) { return uintBitsToFloat(texelFetch(Wp, ivec2(1, wrow + r), 0).xy); }
+vec4 tern(uvec4 m, int k) {   // channels 4k .. 4k + 3: +1, 0 or -1
+  uint s = uint(4 * (k & 7)), pos = (k < 8 ? m.x : m.y) >> s, neg = (k < 8 ? m.z : m.w) >> s;
+  return vec4(uvec4(pos, pos >> 1u, pos >> 2u, pos >> 3u) & 1u) - vec4(uvec4(neg, neg >> 1u, neg >> 2u, neg >> 3u) & 1u);
+}
+#ifdef UNPACKED
+// (#unpacked: the rows as 32-bit floats, 16 texels a row, to compare)
+uniform highp sampler2D Wf;
+#define TERN(m, r, k) texelFetch(Wf, ivec2(k, wrow + r), 0)
+#else
+#define TERN(m, r, k) tern(m, k)
+#endif
+float rowdotT(vec4 c[16], uvec4 m, int r) {   // c: int8 codes; exact (integers)
   float a = 0.0;
-  for (int k = 0; k < 16; k++) { MP vec4 ck = c[k], wk = texelFetch(Wtex, ivec2(k, wrow + r), 0); a += float(dot(ck, wk)); }
+  for (int k = 0; k < 16; k++) { MP vec4 ck = c[k], wk = TERN(m, r, k); a += float(dot(ck, wk)); }
   return a;
 }
 `;
@@ -288,7 +303,8 @@ void main() {
     int a = 0;
     for (int j = 0; j < ${V}; j++) {
       int row = tr * ${TN} + a;
-      float sv = rowdotT(v, row) * s1[row / 4][row % 4] * xs + b1[row / 4][row % 4];
+      vec2 sb = rowScale(row);   // its w_in scale and node bias
+      float sv = rowdotT(v, rowBits(row), row) * sb.x * xs + sb.y;
       g[tr * ${V} + j] = gelu(sv);
       nodes[tr] |= uint(row) << (8u * uint(j));
       a = 2 * a + 1 + (sv > 0.0 ? 1 : 0);
@@ -311,15 +327,13 @@ void main() {
     g[2 * i] = a.x; g[2 * i + 1] = a.y; g[8 + 2 * i] = b.x; g[8 + 2 * i + 1] = b.y;
   }
   MP vec4 y[${M}];
-  for (int j = 0; j < ${M}; j++) {
-    int L = ${M} * hf + j;
-    MP vec4 acc = RB(stencilAt(p, L) + RB(b2[L]));
-    for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
-      int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
-      MP vec4 w = RB(texelFetch(Wtex, ivec2(L, wrow + row), 0));
-      acc = RB(g[tr * ${V} + k] * w + acc);
-    }
-    y[j] = acc;
+  for (int j = 0; j < ${M}; j++) y[j] = RB(stencilAt(p, ${M} * hf + j) + RB(b2[${M} * hf + j]));
+  // each visited node: its gelu x its w_out scale, added, subtracted or not per channel (ternary)
+  for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
+    int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
+    uvec4 m = rowBits(row);
+    MP float gs = RB(vec4(g[tr * ${V} + k] * RB(vec4(rowScale(row).x)).x)).x;
+    for (int j = 0; j < ${M}; j++) y[j] = RB(gs * TERN(m, row, ${M} * hf + j) + y[j]);
   }
   ${Array.from({ length: M }, (_, j) => `o${j} = y[${j}];`).join(' ')}
 }`;
@@ -521,7 +535,7 @@ void main() {
 // pixel more) instead of in both of their passes.
 // precision: 'half' (the blocks' stencil and tree outputs in 16-bit floats where the GPU has them),
 // 'full', or 'emulate' (32-bit, rounding each of those steps to 16 bits: a phone's result on a desktop).
-export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true, precision = 'half' }) {
+export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true, precision = 'half', packed = true }) {
   const gl = renderer.getContext();
   if (!(gl instanceof WebGL2RenderingContext)) throw new Error('needs WebGL2');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('needs float render targets (EXT_color_buffer_float)');
@@ -534,7 +548,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const { NB, NBC, P, DIL } = net;
 
   // ---- programs ----
-  const defs = { half: '#define HALF\n', emulate: '#define HALF_EMU\n', emulateS: '#define HALF_EMU_S\n', emulateB: '#define HALF_EMU_B\n', full: '' }[precision];
+  const defs = (packed ? '' : '#define UNPACKED\n') + { half: '#define HALF\n', emulate: '#define HALF_EMU\n', emulateS: '#define HALF_EMU_S\n', emulateB: '#define HALF_EMU_B\n', full: '' }[precision];
   function program(fs) {
     fs = fs.replace('#version 300 es\n', '#version 300 es\n' + defs);
     const p = gl.createProgram();
@@ -628,7 +642,25 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const ubo = data => { const b = gl.createBuffer(); gl.bindBuffer(gl.UNIFORM_BUFFER, b); gl.bufferData(gl.UNIFORM_BUFFER, data, gl.DYNAMIC_DRAW); return b; };
   const blkBuf = ubo(blkData), wtBuf = ubo(wtData);
   // the same weights as a texture for the trees: 16 texels (64 floats) a row, each matrix 64 rows (WT bytes)
-  const wTex = tex2d(16, 2 * NB * WT / 256, gl.RGBA32F, gl.RGBA, gl.FLOAT, wtData);
+  // the same, packed for the shaders (rowBits, rowScale): per matrix 64 rows of 2 RGBA32UI texels
+  const wp = new Uint32Array(2 * NB * 64 * 8), wpf = new Float32Array(wp.buffer);
+  if (net.T) net.blocks.forEach((k, b) => {
+    for (const [m, codes, scale, bias] of [[0, k.cin, k.sin, k.bias], [1, k.cout, k.sout, null]]) {
+      for (let r = 0; r < net.T * net.TN; r++) {
+        const o = ((2 * b + m) * 64 + r) * 8;
+        for (let i = 0; i < DW; i++) {
+          const c = codes[r * DW + i], w = i >> 5, bit = (1 << (i & 31)) >>> 0;
+          if (c > 0) wp[o + w] |= bit; else if (c < 0) wp[o + 2 + w] |= bit;
+        }
+        wpf[o + 4] = scale[r]; if (bias) wpf[o + 5] = bias[r];
+      }
+    }
+  });
+  const wTex = tex2d(2, 2 * NB * 64, gl.RGBA32UI, gl.RGBA_INTEGER, gl.UNSIGNED_INT, wp);
+  // (#unpacked) the rows as floats: w_in codes, w_out codes (x 1: the scale is applied as packed)
+  const wf = new Float32Array(2 * NB * 64 * 64);
+  if (net.T && !packed) net.blocks.forEach((k, b) => [k.cin, k.cout].forEach((c, m) => wf.set(Float32Array.from(c), (2 * b + m) * 64 * 64)));
+  const wfTex = packed ? null : tex2d(16, 2 * NB * 64, gl.RGBA32F, gl.RGBA, gl.FLOAT, wf);
   const emb = new Float32Array(312 * 4);
   for (let i = 0; i < CIN; i++) for (let j = 0; j < DW; j++) emb[i * DW + j] = net.We[j * CIN + i];
   emb.set(net.be, 288 * 4); emb.set(net.lo.subarray(0, 8), 304 * 4); emb.set(net.lo.subarray(8, 16), 306 * 4);
@@ -760,7 +792,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
         };
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
         if (net.T) {   // trees: the walk, then the visited nodes' outputs
-          const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wtex); gl.uniform1i(u.wrow, (2 * b + m) * 64); };
+          const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wp); if (wfTex) bindTex(5, gl.TEXTURE_2D, wfTex, null, u.Wf); gl.uniform1i(u.wrow, (2 * b + m) * 64); };
           const st = u => St && bindTex(4, gl.TEXTURE_2D_ARRAY, St.tex, null, u.St);
           if (St) for (let h = 0; h < 16 / M; h++) pass(prog.TS, St, M * h, M, u => { common(u); gl.uniform1i(u.hf, h); });
           pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); st(u); });

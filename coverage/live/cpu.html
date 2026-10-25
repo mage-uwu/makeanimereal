@@ -694,7 +694,7 @@ window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
 try {
   let parts;
   if (ENGINE === 'gpu') {
-    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'),
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
     catch (e) { console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
