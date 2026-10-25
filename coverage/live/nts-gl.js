@@ -115,6 +115,7 @@ function backgroundStates(net, input) {
 const HEAD = `#version 300 es
 precision highp float; precision highp int; precision highp sampler2D; precision highp sampler2DArray; precision highp usampler2DArray;
 uniform ivec4 crop;   // x0, y0, x1, y1 (GL pixels, y up, end exclusive)
+uniform ivec2 org;    // the strip's origin: the activations (X, C) hold the frame's pixels from here
 uniform sampler2D distT;
 int distAt(ivec2 p) { return int(texelFetch(distT, p, 0).r * 255.0 + 0.5); }
 bool inCrop(ivec2 p) { return p.x >= crop.x && p.y >= crop.y && p.x < crop.z && p.y < crop.w; }
@@ -128,7 +129,7 @@ const BLOCK_COMMON = `
 layout(std140) uniform Blk { vec4 Q[208]; vec4 gate[16]; vec4 b1[16]; vec4 b2[16]; vec4 s1[16]; vec4 s2[16]; vec4 bg[16]; };
 layout(std140) uniform Wt { vec4 W[1024]; };
 uniform sampler2DArray X; uniform int dil, needPrev, needCur;
-vec4 xin(ivec2 p, int L) { return (!inCrop(p) || distAt(p) > needPrev) ? bg[L] : texelFetch(X, ivec3(p, L), 0); }
+vec4 xin(ivec2 p, int L) { return (!inCrop(p) || distAt(p) > needPrev) ? bg[L] : texelFetch(X, ivec3(p - org, L), 0); }
 vec4 stencil(ivec2 p, int L) {
   vec4 z = vec4(0.0);
   for (int k = 0; k < 9; k++) z = Q[k * 16 + L] * xin(p + ivec2(k % 3 - 1, 1 - k / 3) * dil, L) + z;
@@ -163,7 +164,7 @@ uint pack4(vec4 c) { uvec4 i = uvec4(ivec4(c) & 255); return i.x | (i.y << 8u) |
 #define QUANT(v) quant(v)
 #endif
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
   vec4 v[16];
 #ifdef NO_STENCIL
@@ -197,11 +198,11 @@ const PASS_B = M => HEAD + BLOCK_COMMON + `${outs(M)}
 uniform highp usampler2DArray C; uniform int hf;
 vec4 unpack4(uint u) { ivec4 i = ivec4(int(u << 24u), int(u << 16u), int(u << 8u), int(u)) >> 24; return vec4(i); }
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
   vec4 c[16];
-  for (int j = 0; j < 4; j++) { uvec4 u = texelFetch(C, ivec3(p, j), 0); c[4 * j] = unpack4(u.x); c[4 * j + 1] = unpack4(u.y); c[4 * j + 2] = unpack4(u.z); c[4 * j + 3] = unpack4(u.w); }
-  float xs = uintBitsToFloat(texelFetch(C, ivec3(p, 4), 0).x);
+  for (int j = 0; j < 4; j++) { uvec4 u = texelFetch(C, ivec3(p - org, j), 0); c[4 * j] = unpack4(u.x); c[4 * j + 1] = unpack4(u.y); c[4 * j + 2] = unpack4(u.z); c[4 * j + 3] = unpack4(u.w); }
+  float xs = uintBitsToFloat(texelFetch(C, ivec3(p - org, 4), 0).x);
   vec4 y[${M}];
   for (int j = 0; j < ${M}; j++) {
     int L = ${M} * hf + j;
@@ -218,7 +219,7 @@ void main() {
 // x = stencil + b2 + each visited node's gelu x its w_out row (the next Wt buffer), M layers a pass.
 const PASS_TA = (T, V, TN) => HEAD + BLOCK_COMMON + `${outs(3, 'uvec4')}
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
   vec4 v[16];
   for (int L = 0; L < 16; L++) v[L] = stencil(p, L);
@@ -243,9 +244,9 @@ void main() {
 const PASS_TB = (M, T, V) => HEAD + BLOCK_COMMON + `${outs(M)}
 uniform highp usampler2DArray C; uniform int hf;
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
-  uvec4 nodes = texelFetch(C, ivec3(p, 0), 0), h0 = texelFetch(C, ivec3(p, 1), 0), h1 = texelFetch(C, ivec3(p, 2), 0);
+  uvec4 nodes = texelFetch(C, ivec3(p - org, 0), 0), h0 = texelFetch(C, ivec3(p - org, 1), 0), h1 = texelFetch(C, ivec3(p - org, 2), 0);
   float g[16];
   for (int i = 0; i < 4; i++) {
     vec2 a = unpackHalf2x16(h0[i]), b = unpackHalf2x16(h1[i]);
@@ -285,7 +286,7 @@ float coarseAt(int part, ivec2 t, int c) {
   return lo[2 + c / 4][c % 4] + b * st[2 + c / 4][c % 4];
 }
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > 0) discard;
   vec3 col = colourBytes(p), nrm = bytes(T1, p), ua = bytes(T3, p), ub = bytes(T4, p);
   float dep = bytes(T2, p).r;
@@ -348,7 +349,7 @@ void main() {
   if (distAt(p) <= ${MARGIN}) {
     for (int c = 0; c < 4; c++) {
       vec4 s = vec4(0.0);
-      for (int L = 0; L < 16; L++) s = Wh[c * 16 + L] * texelFetch(X, ivec3(p, L), 0) + s;
+      for (int L = 0; L < 16; L++) s = Wh[c * 16 + L] * texelFetch(X, ivec3(p - org, L), 0) + s;
       q[c] = 1.0 / (1.0 + exp(-(bh[c] + ((s.x + s.y) + (s.z + s.w)))));
     }
   }
@@ -362,7 +363,7 @@ void main() {
   float k = kbg;
   if (distAt(p) <= ${MARGIN}) {
     vec4 s = vec4(0.0);
-    for (int L = 0; L < 16; L++) s = Wl[L] * texelFetch(X, ivec3(p, L), 0) + s;
+    for (int L = 0; L < 16; L++) s = Wl[L] * texelFetch(X, ivec3(p - org, L), 0) + s;
     k = 1.0 / (1.0 + exp(-(bl + ((s.x + s.y) + (s.z + s.w)))));
     k = smoothstep(0.4, 0.7, k);   // drawn crisp (infer.c ink)
   }
@@ -454,7 +455,10 @@ void main() {
   o = toonOver(vec4(bg * (1.0 - d.a) + d.rgb, 1.0));
 }`;
 
-export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' }) {
+// maxStrip: the most pixels the network's activations may hold at once (a phone's GPU memory: 336
+// bytes a pixel). A taller crop than fits runs in horizontal strips, each with the network's reach of
+// extra rows above and below, so every strip's own rows come out exactly as from the whole crop.
+export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity }) {
   const gl = renderer.getContext();
   if (!(gl instanceof WebGL2RenderingContext)) throw new Error('needs WebGL2');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('needs float render targets (EXT_color_buffer_float)');
@@ -497,10 +501,14 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   }
   function array(layers, internal) {
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
-    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, NW, NH, layers);
+    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, internal, NW, SH, layers);
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST]]) gl.texParameteri(gl.TEXTURE_2D_ARRAY, k, v);
     return { tex: t, fbos: new Map() };
   }
+  // the strips: SH rows of activations; a strip computes its own rows plus REACH (all the blocks'
+  // dilations: how far a pixel's result can see) on each side
+  const REACH = DIL.reduce((a, b) => a + b, 0);
+  const SH = Math.min(NH, Math.max(2 * REACH + 64, Math.floor(maxStrip / NW)));
   const fine = fineImgs.map(img => tex2d(0, 0, gl.RGB8, gl.RGB, gl.UNSIGNED_BYTE, img));
   // coarse: [part][64][64][8] -> two RGBA8 atlases, part p at x = p * 64
   const cw = P * COARSE, cdata = [new Uint8Array(cw * COARSE * 4), new Uint8Array(cw * COARSE * 4)];
@@ -526,13 +534,14 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
   const fbo2d = t => t.__fbo || fbo(t);
 
   // ---- the G-buffer tiles: render targets three.js draws into (colour sRGB, multisampled like the
-  // coverage renders) ----
-  const tiles = [0, 1, 2, 3, 4].map(k => {
-    const rt = new THREE.WebGLRenderTarget(NW, NH, { samples: 4, depthBuffer: true, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
-    if (k === 0) { rt.texture.colorSpace = THREE.SRGBColorSpace; rt.texture.minFilter = rt.texture.magFilter = THREE.LinearFilter; }
-    return rt;
-  });
+  // coverage renders). The colour has its own; the other four take turns in one multisampled target,
+  // each copied out to a plain texture (one set of multisampled buffers instead of four) ----
+  const rtColour = new THREE.WebGLRenderTarget(NW, NH, { samples: 4, depthBuffer: true, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  rtColour.texture.colorSpace = THREE.SRGBColorSpace;
+  const rtG = new THREE.WebGLRenderTarget(NW, NH, { samples: 4, depthBuffer: true, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
   const glTex = rt => renderer.properties.get(rt.texture).__webglTexture;
+  const gTex = [1, 2, 3, 4].map(() => tex2d(NW, NH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE));
+  const tileTex = k => k ? gTex[k - 1] : glTex(rtColour);
 
   // ---- uniform buffers: per block (stencil codes, gates, biases, scales, its background input),
   // its two weight matrices, the embedding ----
@@ -575,10 +584,18 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     const [x0, y0, x1, y1] = cropTD;
     crop = [x0, NH - y1, x1, NH - y0];
     passes.forEach(([bg, mat, show], k) => {
-      const rt = tiles[k];
+      const rt = k ? rtG : rtColour;
       rt.scissor.set(crop[0], crop[1], crop[2] - crop[0], crop[3] - crop[1]); rt.scissorTest = true;
       show(); scene.background = bg; scene.overrideMaterial = mat;
-      renderer.setRenderTarget(rt); renderer.render(scene, camera);
+      renderer.setRenderTarget(rt); renderer.render(scene, camera);   // three.js resolves the samples into rt.texture
+      if (k) {   // the crop, out to the tile's own texture
+        const dst = fbo2d(gTex[k - 1]);   // (made first: making one binds it)
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, renderer.properties.get(rtG).__webglFramebuffer);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.blitFramebuffer(crop[0], crop[1], crop[2], crop[3], crop[0], crop[1], crop[2], crop[3], gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        renderer.resetState();
+      }
     });
     scene.overrideMaterial = null; renderer.setRenderTarget(null);
   }
@@ -587,10 +604,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(t));
     gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); gl.enable(gl.SCISSOR_TEST);
   }
+  let org = [0, 0];   // the strip's origin in the frame (the activations' pixel (0, 0))
   function pass(pr, target, first, m, setup) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbos ? fbo(target, first, m) : fbo2d(target));
     gl.useProgram(pr.p);
     gl.uniform4i(pr.u.crop, ...crop);
+    if (pr.u.org) gl.uniform2i(pr.u.org, ...org);
     setup(pr.u);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -641,13 +660,23 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
         gl.bindBuffer(gl.UNIFORM_BUFFER, blkBuf); gl.bufferSubData(gl.UNIFORM_BUFFER, 0, blkData);
         pbg = out; kbg = ink; lastPitch = pitch;
       }
-      const T = tiles.map(glTex);
+      const T = [0, 1, 2, 3, 4].map(tileTex);
       const bindTiles = u => T.forEach((t, k) => bindTex(k, gl.TEXTURE_2D, t, null, u[`T${k}`]));
       pass(prog.diff, diffT, 0, 1, bindTiles);
       pass(prog.distH, hT, 0, 1, u => bindTex(0, gl.TEXTURE_2D, diffT, null, u.M));
       pass(prog.distV, distT, 0, 1, u => bindTex(0, gl.TEXTURE_2D, hT, null, u.M));
       mark('background test + distance');
+      clear(outT); clear(inkT);
       gl.bindBufferBase(gl.UNIFORM_BUFFER, 2, embBuf);
+      // the strips, bottom up (GL rows): own rows [r0, r1), activations from row o = r0 - REACH
+      const one = crop[3] - crop[1] <= SH, step = one ? SH : SH - 2 * REACH;
+      for (let r0 = crop[1]; r0 < crop[3]; r0 += step) {
+      const r1 = Math.min(crop[3], r0 + step), o = one ? crop[1] : Math.max(crop[1], r0 - REACH), top = Math.min(crop[3], o + SH);
+      org = [0, o];
+      // the strip's passes: into the activations (rows o..top), then its own rows into the drawing
+      const inStrip = () => { gl.viewport(0, 0, NW, SH); gl.scissor(crop[0], 0, crop[2] - crop[0], top - o); };
+      const inFrame = () => { gl.viewport(0, 0, NW, NH); gl.scissor(crop[0], r0, crop[2] - crop[0], r1 - r0); };
+      inStrip();
       for (let h = 0; h < 16 / M; h++) pass(prog.embed, X, M * h, M, u => {
         bindTiles(u); bindTex(5, gl.TEXTURE_2D, distT, null, u.distT);
         fine.forEach((t, k) => bindTex(6 + k, gl.TEXTURE_2D, t, null, u[`F${k}`]));
@@ -679,26 +708,28 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
         }
         [x, y] = [y, x];
         if (b === NBC - 1) {   // the colour, before the ink branch's blocks (if any) go on
-          clear(outT);
+          inFrame();
           pass(prog.head, outT, 0, 1, u => {
             bindTex(0, gl.TEXTURE_2D_ARRAY, x.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
             gl.uniform4fv(u.Wh, WhT); gl.uniform4fv(u.bh, net.bh); gl.uniform4fv(u.pbg, pbg);
           });
           mark('head');
+          inStrip();
         }
       }
-      clear(inkT);
+      inFrame();
       if (net.Wl) pass(prog.ink, inkT, 0, 1, u => {
         bindTex(0, gl.TEXTURE_2D_ARRAY, x.tex, null, u.X); bindTex(1, gl.TEXTURE_2D, distT, null, u.distT);
         gl.uniform4fv(u.Wl, net.Wl); gl.uniform1f(u.bl, net.bl); gl.uniform1f(u.kbg, kbg);
       });
+      }
     }
     // display
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, view.W, view.H);
     const s = prog.show; gl.useProgram(s.p);
-    bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, glTex(tiles[0]), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
+    bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, tileTex(0), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
@@ -707,7 +738,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     gl.uniform1i(s.u.sharp, view.guide && !view.raw ? 1 : 0);
     if (view.guide) {
       bindTex(5, gl.TEXTURE_2D, view.guide, null, s.u.G);
-      [1, 2, 4].forEach((k, i) => bindTex(6 + i, gl.TEXTURE_2D, glTex(tiles[k]), null, s.u[`T${k}`]));
+      [1, 2, 4].forEach((k, i) => bindTex(6 + i, gl.TEXTURE_2D, tileTex(k), null, s.u[`T${k}`]));
       gl.uniform2f(s.u.lowRes, NW, NH);
     }
     if (view.toon) { bindTex(3, gl.TEXTURE_2D, view.toon.ink, null, s.u.TT); bindTex(4, gl.TEXTURE_2D, view.toon.depth, null, s.u.TD); gl.uniform3f(s.u.toonP, view.toon.near, view.toon.far, view.toon.width); }
@@ -726,7 +757,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
       for (let c = 0; c < 3; c++) px[i + c] = Math.round(px[i + c] * (1 - k));
       px[i + 3] = Math.round(px[i + 3] + k * (255 - px[i + 3]));
     }
-    const t = tiles.map(rt => { const b = new Uint8Array(NW * NH * 4); renderer.readRenderTargetPixels(rt, 0, 0, NW, NH, b); return b; });
+    const t = [0, 1, 2, 3, 4].map(k => {
+      const b = new Uint8Array(NW * NH * 4);
+      if (k) { gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2d(gTex[k - 1])); gl.readPixels(0, 0, NW, NH, gl.RGBA, gl.UNSIGNED_BYTE, b); renderer.resetState(); }
+      else renderer.readRenderTargetPixels(rtColour, 0, 0, NW, NH, b);
+      return b;
+    });
     renderer.resetState();
     return { px, tiles: t };
   }
@@ -740,7 +776,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/' })
     const out = {};
     renderer.resetState(); gl.bindVertexArray(vao);
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.disable(gl.STENCIL_TEST);
-    gl.viewport(0, 0, NW, NH); gl.enable(gl.SCISSOR_TEST); gl.scissor(crop[0], crop[1], crop[2] - crop[0], crop[3] - crop[1]);
+    org = [0, crop[1]];   // the last frame's activations: its first strip
+    gl.viewport(0, 0, NW, SH); gl.enable(gl.SCISSOR_TEST); gl.scissor(crop[0], 0, crop[2] - crop[0], Math.min(SH, crop[3] - crop[1]));
     gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, blkBuf, block * BLK, BLK);
     gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * block) * WT, WT);
     const common = u => {
