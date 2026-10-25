@@ -230,13 +230,30 @@ void main() {
 // bias in Blk's s1 and b1 slots), gelu(s) kept and the child sign(s) picks. Out: the visited nodes
 // (a tree's in one uint, 8 bits a level) and their GELUs (half floats, two to a uint). Pass TB:
 // x = stencil + b2 + each visited node's gelu x its w_out row (the next Wt buffer), M layers a pass.
-const PASS_TA = (T, V, TN) => HEAD + BLOCK_COMMON + `${outs(3, 'uvec4')}
+// The stencil is worked out once, by pass TS (M layers a pass, half floats, as the activations are
+// kept), and both read it from St.
+const PASS_TS = M => HEAD + BLOCK_COMMON + `${outs(M)}
+uniform int hf;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
   taps(p);
+  ${Array.from({ length: M }, (_, j) => `o${j} = stencil(p, ${M} * hf + ${j});`).join(' ')}
+}`;
+// cached: the stencil from St; else each pass works it out (taps(p) by prep(p))
+const STENCIL_IN = cached => cached ? `uniform highp sampler2DArray St;
+vec4 stencilAt(ivec2 p, int L) { return texelFetch(St, ivec3(p - org, L), 0); }
+void prep(ivec2 p) {}
+` : `vec4 stencilAt(ivec2 p, int L) { return stencil(p, L); }
+void prep(ivec2 p) { taps(p); }
+`;
+const PASS_TA = (T, V, TN, cached) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(3, 'uvec4')}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
+  if (distAt(p) > needCur) discard;
+  prep(p);
   vec4 v[16];
-  for (int L = 0; L < 16; L++) v[L] = stencil(p, L);
+  for (int L = 0; L < 16; L++) v[L] = stencilAt(p, L);
   float xs = quant(v);
   uvec4 nodes = uvec4(0u);
   float g[16];
@@ -255,12 +272,12 @@ void main() {
   o1 = uvec4(packHalf2x16(vec2(g[0], g[1])), packHalf2x16(vec2(g[2], g[3])), packHalf2x16(vec2(g[4], g[5])), packHalf2x16(vec2(g[6], g[7])));
   o2 = uvec4(packHalf2x16(vec2(g[8], g[9])), packHalf2x16(vec2(g[10], g[11])), packHalf2x16(vec2(g[12], g[13])), packHalf2x16(vec2(g[14], g[15])));
 }`;
-const PASS_TB = (M, T, V) => HEAD + BLOCK_COMMON + `${outs(M)}
+const PASS_TB = (M, T, V, cached) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(M)}
 uniform highp usampler2DArray C; uniform int hf;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
   if (distAt(p) > needCur) discard;
-  taps(p);
+  prep(p);
   uvec4 nodes = texelFetch(C, ivec3(p - org, 0), 0), h0 = texelFetch(C, ivec3(p - org, 1), 0), h1 = texelFetch(C, ivec3(p - org, 2), 0);
   float g[16];
   for (int i = 0; i < 4; i++) {
@@ -270,7 +287,7 @@ void main() {
   vec4 y[${M}];
   for (int j = 0; j < ${M}; j++) {
     int L = ${M} * hf + j;
-    vec4 acc = stencil(p, L) + b2[L];
+    vec4 acc = stencilAt(p, L) + b2[L];
     for (int tr = 0; tr < ${T}; tr++) for (int k = 0; k < ${V}; k++) {
       int row = int((nodes[tr] >> (8u * uint(k))) & 255u);
       acc += g[tr * ${V} + k] * texelFetch(Wtex, ivec2(L, wrow + row), 0);
@@ -470,10 +487,12 @@ void main() {
   o = toonOver(vec4(bg * (1.0 - d.a) + d.rgb, 1.0));
 }`;
 
-// maxStrip: the most pixels the network's activations may hold at once (a phone's GPU memory: 336
+// maxStrip: the most pixels the network's activations may hold at once (a phone's GPU memory: 464
 // bytes a pixel). A taller crop than fits runs in horizontal strips, each with the network's reach of
 // extra rows above and below, so every strip's own rows come out exactly as from the whole crop.
-export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity }) {
+// cacheStencil: the trees' blocks work their stencil out once (pass TS, kept as half floats, 128 bytes a
+// pixel more) instead of in both of their passes.
+export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true }) {
   const gl = renderer.getContext();
   if (!(gl instanceof WebGL2RenderingContext)) throw new Error('needs WebGL2');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('needs float render targets (EXT_color_buffer_float)');
@@ -501,7 +520,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     for (const b of ['Blk', 'Wt', 'Emb']) { const i = gl.getUniformBlockIndex(p, b); if (i !== gl.INVALID_INDEX) { const point = { Blk: 0, Wt: 1, Emb: 2 }[b]; gl.uniformBlockBinding(p, i, point); blocks[b] = point; } }
     return { p, u, blocks };
   }
-  const prog = { TA: net.T ? program(PASS_TA(net.T, net.V, net.TN)) : null, TB: net.T ? program(PASS_TB(M, net.T, net.V)) : null,
+  const prog = { TS: net.T && cacheStencil ? program(PASS_TS(M)) : null, TA: net.T ? program(PASS_TA(net.T, net.V, net.TN, cacheStencil)) : null, TB: net.T ? program(PASS_TB(M, net.T, net.V, cacheStencil)) : null,
     A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), ink: program(INK_PASS), show: program(SHOW) };
 
   // ---- textures ----
@@ -530,7 +549,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   for (let p = 0; p < P; p++) for (let y = 0; y < COARSE; y++) for (let x = 0; x < COARSE; x++) for (let c = 0; c < 8; c++)
     cdata[c >> 2][((y * cw) + p * COARSE + x) * 4 + (c & 3)] = net.coarse[((p * COARSE + y) * COARSE + x) * 8 + c];
   const coarse = cdata.map(d => tex2d(cw, COARSE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, d));
-  const X = array(16, gl.RGBA16F), Y = array(16, gl.RGBA16F), Cq = array(5, gl.RGBA32UI);
+  const X = array(16, gl.RGBA16F), Y = array(16, gl.RGBA16F), Cq = array(5, gl.RGBA32UI), St = net.T && cacheStencil ? array(16, gl.RGBA16F) : null;
   const diffT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), hT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), distT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE);
   const outT = tex2d(NW, NH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR), inkT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE, null, gl.LINEAR);
   function fbo(target, first = 0, m = 1) {
@@ -711,10 +730,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
         if (net.T) {   // trees: the walk, then the visited nodes' outputs
           const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wtex); gl.uniform1i(u.wrow, (2 * b + m) * 64); };
-          pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); });
-          mark(`block ${b} A: stencil, tree walk`);
+          const st = u => St && bindTex(4, gl.TEXTURE_2D_ARRAY, St.tex, null, u.St);
+          if (St) for (let h = 0; h < 16 / M; h++) pass(prog.TS, St, M * h, M, u => { common(u); gl.uniform1i(u.hf, h); });
+          pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); st(u); });
+          mark(`block ${b} A: stencil, tree walk`);   // (the stencil pass counted in A)
           gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
-          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); wt(u, 1); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); wt(u, 1); st(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
           mark(`block ${b} B: tree outputs, residual`);
         } else {
           if (M >= 5) pass(prog.A, Cq, 0, 5, common);

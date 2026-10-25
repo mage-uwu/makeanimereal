@@ -145,8 +145,8 @@ const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32 * S;
-// The GPU engine's activations at most this many pixels at once (336 bytes each): a phone gets the
-// standard frame's worth (720 x 800, ~190 MB), so an HD character runs in strips there; #strip=N sets it.
+// The GPU engine's activations at most this many pixels at once (464 bytes each with the trees): a phone gets the
+// standard frame's worth (720 x 800, ~270 MB), so an HD character runs in strips there; #strip=N sets it.
 const MAX_STRIP = +(location.hash.match(/strip=(\d+)/)?.[1] || (matchMedia('(pointer: coarse)').matches ? 720 * 800 : 4e6));
 const status = document.getElementById('status'), readout = document.getElementById('readout');
 const stage = document.getElementById('stage'), view = document.getElementById('view');
@@ -694,7 +694,7 @@ window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
 try {
   let parts;
   if (ENGINE === 'gpu') {
-    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP }), loadModel()]); parts = gls.parts; }
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache') }), loadModel()]); parts = gls.parts; }
     catch (e) { console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
     if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
