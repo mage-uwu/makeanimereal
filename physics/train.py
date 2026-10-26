@@ -12,7 +12,9 @@ import os
 import sys
 import time
 
-import numpy as np
+# One BLAS thread here: idle BLAS threads spin and starve the simulation workers of CPU.
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+import numpy as np  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
