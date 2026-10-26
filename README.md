@@ -65,6 +65,13 @@ play facing the front. The credit line goes into each file's glTF `asset.copyrig
 clips in `coverage/live/motions.json` are from the Bandai Namco Research Motion Dataset, which is
 CC BY-NC 4.0: non-commercial only.
 
+### vrmanet (a motion network whose weights are a .vrma)
+
+The stage plays the moves through [vrmanet](vrmanet/README.md): `web/moves/vrmanet.vrma` holds all 11
+clips as experts (decoder rows = keyframes) plus a state-space controller's weights in a glTF
+extension, and a 7 KB C runtime (`web/vrmanet.wasm`) runs it. The stage's Arms row routes the arms
+to a different expert than the body, e.g. waving while walking.
+
 ## Web viewer (anime key drawings you can orbit freely)
 
 Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly

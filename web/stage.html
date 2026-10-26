@@ -53,7 +53,9 @@ body {
 #credit b { font-size: 17px; font-weight: 800; text-wrap: balance; }
 #credit span { font-size: 12px; color: var(--ink-soft); }
 #poses { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; }
-#poses button { flex: none; }
+#poses button, #arms button { flex: none; }
+#arms { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; align-items: center; }
+#arms .label { font-size: 12px; font-weight: 700; color: var(--ink-soft); padding: 0 6px 0 10px; flex: none; }
 
 .group { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line); backdrop-filter: blur(10px); flex-wrap: wrap; }
 button {
@@ -98,6 +100,10 @@ body.dragging #empty .card { border-color: var(--accent); }
     <button type="button" data-pose="stand" aria-pressed="true">Stand</button>
     <button type="button" data-pose="tpose" aria-pressed="false">T-pose</button>
   </div>
+  <div class="group" id="arms" aria-label="Arms from">
+    <span class="label">Arms</span>
+    <button type="button" data-arms="same" aria-pressed="true">Same</button>
+  </div>
   <div class="group" id="faces" aria-label="Expression"></div>
   <div class="group">
     <button type="button" id="spin" aria-pressed="true">Turntable</button>
@@ -111,15 +117,16 @@ body.dragging #empty .card { border-color: var(--accent); }
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
-  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
-  "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.5/lib/three-vrm-animation.module.min.js"
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
 } }
 </script>
 <script type="module">
 // A live VRM stage: orbit around the avatar with MToon shading, spring-bone hair and skirt, an idle
 // sway, blinking, eyes that follow the camera, and buttons for pose, mocap moves and expression.
-// The moves are VRM Animation files (moves/*.vrma: CMU motion capture, baked by
-// scripts/bake-vrma.mjs), played by @pixiv/three-vrm-animation through a three.js AnimationMixer.
+// The moves come from vrmanet (vrmanet.js + vrmanet.wasm): a motion network whose weights are the
+// VRM Animation file moves/vrmanet.vrma, one expert per CMU mocap clip. The Moves row picks the
+// expert for the whole body, the Arms row can route the arms to another; the network's state-space
+// controller crossfades between them.
 // Loads ?model=<url>, else stock.vrm.png beside the page (a VRM packed into a PNG by
 // coverage/live/slim_vrm.py, for hosts that serve images but not model files), else the stock
 // avatar in out/stock/ when served from the repo (npm run viewer, then /web/stage.html), else
@@ -128,29 +135,42 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
+import { createVrmanet } from './vrmanet.js';
 
-// moves/<name>.vrma and its button label, in this order.
+// The experts' button labels, in this order.
 const MOVES = {
   wave: 'Wave', bow: 'Grand bow', stretch: 'Stretch & yawn', walk: 'Walk', shywalk: 'Shy walk', coolwalk: 'Cool walk',
   moonwalk: 'Moonwalk', twist: 'Twist', charleston: 'Charleston', dance: 'Ballet', jacks: 'Jumping jacks',
 };
-// Each file is fetched once, on first use: name -> Promise<{ animation, credit }>.
-const vrmaLoader = new GLTFLoader();
-vrmaLoader.register(parser => new VRMAnimationLoaderPlugin(parser));
-const moveFiles = new Map();
 for (const [name, label] of Object.entries(MOVES)) {
-  const b = document.createElement('button');
-  b.type = 'button'; b.dataset.pose = `clip:${name}`; b.textContent = label; b.setAttribute('aria-pressed', 'false');
-  document.getElementById('poses').append(b);
+  for (const [row, attr] of [['poses', 'pose'], ['arms', 'arms']]) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset[attr] = attr === 'pose' ? `clip:${name}` : name; b.textContent = label;
+    b.setAttribute('aria-pressed', 'false');
+    document.getElementById(row).append(b);
+  }
 }
-// Hosts that serve images but not glTF get the same file packed into a PNG (moves/<name>.vrma.png).
-const moveFile = name => {
-  if (!moveFiles.has(name)) moveFiles.set(name, vrmaLoader.loadAsync(`moves/${name}.vrma`)
-    .catch(async () => vrmaLoader.parseAsync(await unpackPng(`moves/${name}.vrma.png`), ''))
-    .then(g => ({ animation: g.userData.vrmAnimations[0], credit: g.parser.json.asset.copyright || '' })));
-  return moveFiles.get(name);
-};
+
+// The network: its runtime and its weights. Hosts that serve images but not glTF get the weights
+// packed into a PNG (moves/vrmanet.vrma.png).
+let net = null, armsMove = 'same', active = new Set();
+(async () => {
+  const wasm = await (await fetch('vrmanet.wasm')).arrayBuffer();
+  const res = await fetch('moves/vrmanet.vrma').catch(() => null);
+  const weights = res?.ok ? await res.arrayBuffer() : await unpackPng('moves/vrmanet.vrma.png');
+  return createVrmanet(wasm, weights);
+})().then(n => {
+  net = n;
+  document.getElementById('motion-credit').textContent = n.credit.replace(/ \(.*$/, '');
+  for (const b of document.querySelectorAll('[data-pose^="clip:"], [data-arms]')) {
+    const name = b.dataset.arms || b.dataset.pose.slice(5);
+    if (name !== 'same' && !n.experts.includes(name)) b.disabled = true;
+  }
+  if (pose.startsWith('clip:')) setPose(pose);
+}, e => {
+  console.error('vrmanet', e);
+  for (const b of document.querySelectorAll('[data-pose^="clip:"], [data-arms]')) b.disabled = true;
+});
 
 const $ = id => document.getElementById(id);
 const stage = $('stage');
@@ -203,7 +223,7 @@ const resize = () => {
 addEventListener('resize', resize);
 resize();
 
-let vrm = null, pose = 'stand', face = null, mixer = null, action = null, clips = new Map();
+let vrm = null, pose = 'stand', face = null;
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
 
 // A file packed into an RGB PNG as coverage/live/slim_vrm.py does: a 4-byte length, then the bytes.
@@ -266,11 +286,6 @@ async function load(src, label) {
   $('faces').hidden = !wanted.length;
   face = null;
 
-  // Clips are bound to one model's bones, so a new model starts a new mixer.
-  mixer = new THREE.AnimationMixer(vrm.scene);
-  action = null;
-  clips = new Map();
-
   // Settle the springs in the stand before showing her, so the hair doesn't fall in from the T-pose.
   if (pose.startsWith('clip:')) pose = 'stand';
   setPose(pose);
@@ -281,23 +296,25 @@ async function load(src, label) {
   return true;
 }
 
-async function setPose(p) {
+function setPose(p) {
+  const fresh = !pose.startsWith('clip:') || !active.size;
   pose = p;
   for (const b of $('poses').children) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
-  $('motion-credit').hidden = true;
-  if (!p.startsWith('clip:')) { mixer?.stopAllAction(); action = null; return; }
-  const name = p.slice(5), model = vrm;
-  let move;
-  try { move = await moveFile(name); }
-  catch { $('poses').querySelector(`[data-pose="${p}"]`).disabled = true; if (pose === p) setPose('stand'); return; }
-  if (pose !== p || vrm !== model) return;   // another button was pressed while this one loaded
-  if (!clips.has(name)) clips.set(name, createVRMAnimationClip(move.animation, vrm));
-  const next = mixer.clipAction(clips.get(name)).reset().play();
-  if (action && action !== next) next.crossFadeFrom(action, 0.3, false);
-  else if (!action) vrm.humanoid.resetNormalizedPose();
-  action = next;
-  $('motion-credit').textContent = move.credit.replace(/ \(.*$/, '');
-  $('motion-credit').hidden = !move.credit;
+  $('motion-credit').hidden = !p.startsWith('clip:') || !net;
+  if (p.startsWith('clip:')) drive(fresh);
+  else active = new Set();
+}
+
+// Point the network at the chosen experts: the pressed move for the body, the Arms row's for the
+// arms. Starting from a still pose it begins at full weight; between moves its controller fades.
+// An expert that joins starts its clip from the top; one already playing keeps its place.
+function drive(fresh) {
+  if (!net) return;
+  const body = pose.slice(5), arms = armsMove === 'same' ? body : armsMove;
+  net.control({ [body]: 1 }, { [arms]: 1 });
+  if (fresh) { net.reset(); net.steady(); }
+  for (const n of new Set([body, arms])) if (fresh || !active.has(n)) net.trigger(n);
+  active = new Set([body, arms]);
 }
 
 // The pose at time t (seconds) when no move is playing: the bind T-pose, or arms down with a slow
@@ -344,8 +361,8 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 20), t = clock.elapsedTime;
   if (vrm) {
-    if (action) mixer.update(dt);
-    else if (!pose.startsWith('clip:')) applyPose(t);
+    if (!pose.startsWith('clip:')) applyPose(t);
+    else if (net) { net.step(dt); vrm.humanoid.resetNormalizedPose(); net.apply(vrm); }
     blink(t);
     vrm.update(dt);
   }
@@ -357,6 +374,13 @@ renderer.setAnimationLoop(() => {
 
 $('poses').addEventListener('click', e => { const p = e.target.dataset?.pose; if (p && vrm) setPose(p); });
 $('faces').addEventListener('click', e => { const f = e.target.dataset?.face; if (f && vrm) setFace(f); });
+$('arms').addEventListener('click', e => {
+  const a = e.target.dataset?.arms;
+  if (!a) return;
+  armsMove = a;
+  for (const b of $('arms').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.arms === a));
+  if (pose.startsWith('clip:')) drive(false);
+});
 $('spin').addEventListener('click', () => {
   controls.autoRotate = !controls.autoRotate;
   $('spin').setAttribute('aria-pressed', String(controls.autoRotate));
