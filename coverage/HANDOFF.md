@@ -155,8 +155,13 @@ the device with `#prof`.
   went from 0.687 at step 500 to 0.646.
 
   The model is in the kit (`style/style.ntst` + `.ssm.pt`, 4 blocks with dilations 1,3,9,27 and SSM
-  blocks 1,3), with its final held-out grids. There is no runtime engine for it yet: the SSM write is
-  a frame-wide reduction. Do it in the fused WebGPU engine, ideally with a temporal write (read the
+  blocks 1,3), with its final held-out grids.
+
+  **In the viewer** (`#style`, the "Style (SSM)" chip, GL engine): `export_ssm.py` writes the SSM
+  blocks with each node's memory fixed (the mean of the states the training frames wrote; on held-out
+  frames this draws within 0.63/255 of the per-frame write). That makes every block per-pixel work for
+  `nts-gl.js`. It matches PyTorch on the viewer's own G-buffer within 0.10/255. The true per-frame write
+  is a frame-wide reduction: do it in the fused WebGPU engine, ideally as a temporal write (read the
   previous frame's state), which also removes the sync point.
 - **Free-drawn keyframes:** `edit_images.py` with a "draw it as an anime artist would, not a trace"
   prompt and no keying. 115 of a planned 300 were drawn for the magical girl. They clearly redraw eyes,
