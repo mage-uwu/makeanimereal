@@ -642,7 +642,9 @@ void main() {
 // pixel more) instead of in both of their passes.
 // precision: 'half' (the blocks' stencil and tree outputs in 16-bit floats where the GPU has them),
 // 'full', or 'emulate' (32-bit, rounding each of those steps to 16 bits: a phone's result on a desktop).
-export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true, precision = 'half', packed = true }) {
+// dilScale: run the network on a grid this many times finer than it trained on, its stencils' dilations
+// scaled to match (each still reaches as far on her): the same picture, drawn at that resolution.
+export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', maxStrip = Infinity, cacheStencil = true, precision = 'half', packed = true, dilScale = 1 }) {
   const gl = renderer.getContext();
   if (!(gl instanceof WebGL2RenderingContext)) throw new Error('needs WebGL2');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('needs float render targets (EXT_color_buffer_float)');
@@ -652,6 +654,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const [meta, netImg, ...fineImgs] = await Promise.all([fetch(base + 'meta.json').then(r => r.json()), loadImage(base + 'net.png'),
     ...[0, 1, 2].map(k => loadImage(`${base}fine${k}.png`))]);
   const net = parseNet(unpackNet(netImg));
+  net.DIL = net.DIL.map(d => d * dilScale);
   const { NB, NBC, P, DIL } = net;
   if (meta.ssm) parseSSM(await (await fetch(base + 'ssm.bin')).arrayBuffer(), net);
   const SSM = net.blocks.filter(k => k.ssm);

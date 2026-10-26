@@ -205,6 +205,23 @@ the device with `#prof`.
   regenerate them with `jobs-keys.json` (in the tar) and `edit_images.py`. Next test: the style shader
   on these drawings, to see whether it learns shapes beyond the silhouette.
 
+## Resolution without retraining (`dilScale`, the viewer's 2x chip)
+
+The network is resolution-agnostic up to its stencils' reach: 3×3 depthwise taps at fixed dilations,
+then per-pixel trees. On a grid k times finer with every dilation times k, each stencil reaches as far
+on her as in training, so the same weights draw the same picture at k times the resolution.
+
+- The magical girl's style v2 on a 720×1280 frame with dilations 2, 6, 18, 54, box-averaged back
+  down, matches its 360×640 drawing within 0.83/255.
+- At full size it draws visibly sharper eyes, lashes, necklace and strands.
+
+The viewer runs the style characters this way (`CHARS[...].fine = 2`, `nts-gl.js` `dilScale`). This
+costs 4× the network's pixels; `#lores` (the 2x chip off) is the training grid. GL matches PyTorch at
+2× within 0.184/255.
+
+A short fine-tune on the 2× grid (the girl has 720×1280 data, with `--dil 2,6,18,54`) could sharpen
+it further. The bunny would need 2× G-buffers first.
+
 ## Style training speed (`style_torch.py`, `bravo.py`)
 
 One step is 6 crops of 256² with the discriminator on, on an RTX PRO 6000:
