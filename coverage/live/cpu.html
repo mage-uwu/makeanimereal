@@ -92,6 +92,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="c-girlhd" aria-pressed="false" title="The magical girl trained at twice the resolution (720 x 1280): finer lines and detail, four times the work a frame">Magical Girl HD</button>
       <button id="c-style" aria-pressed="false" title="The magical girl drawn by the style shader: the same ternary tree network with a fixed learned memory per tree node in two blocks, a small learned coarse texture and no learned fine texture; its lines and cel shading learned from the film with a perceptual + adversarial objective (GPU engine)">Style</button>
       <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
+      <button id="c-bunnystyle" aria-pressed="false" title="The bunny girl drawn by a style shader trained with the step-bravo pipeline (bravo.py): the same recipe as the magical girl's Style (GPU engine)">Bunny Style</button>
     </div>
     <form class="say" id="say" hidden>
       <input id="say-text" type="text" placeholder="Something for her to say" maxlength="200" autocomplete="off" enterkeyhint="send">
@@ -137,6 +138,7 @@ const CHARS = {
   girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
   style: { label: 'Magical Girl Style', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true },   // node-memory blocks (ssm.bin): the GPU engine only
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
+  bunnystyle: { label: 'Bunny Style', model: 'bunny/model.vrm.png', tree: 'bunny/nts-style/', shorts: 0xf4dde3, gpuOnly: true },   // bravo.py's viewer files
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
 // The network's frame: the training frames' scale (360 x 640, or twice that for an HD character) on a

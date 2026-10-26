@@ -291,15 +291,20 @@ def inputs(net, px, pitch):
         x0, y0 = torch.floor(fx_), torch.floor(fy_)
         fx, fy = fx_ - x0, fy_ - y0
         x0, y0 = x0.long(), y0.long()
+        idxs, wgts = [], []
         for j in (0, 1):
             for i in (0, 1):
                 x, y = x0 + i, y0 + j
                 ok = mask & (x >= 0) & (y >= 0) & (x < S) & (y < S)
-                wgt = (fx if i else 1 - fx) * (fy if j else 1 - fy)
+                wgts.append((fx if i else 1 - fx) * (fy if j else 1 - fy) * ok)
                 idx = base + part * S * S + y.clamp(0, S - 1) * S + x.clamp(0, S - 1)
-                idx = torch.where(ok, idx, 0)
-                feat = feat + (wgt * ok)[..., None] * tex.index_select(0, idx.view(-1)).view(B, h, w, FCH)
-                hits.append(idx[ok])
+                idxs.append(torch.where(ok, idx, 0))
+                hits.append(idxs[-1][ok])
+        # the level's 4 corners in one gather (one gradient buffer, not four); a level the trainer
+        # holds fixed (net.tex_grad_levels, e.g. style_torch's fixed fine level) reads without one
+        src = tex if lev in getattr(net, 'tex_grad_levels', (0, 1)) else tex.detach()
+        g = src.index_select(0, torch.stack(idxs).view(-1)).view(4, B, h, w, FCH)
+        for k in range(4): feat = feat + wgts[k][..., None] * g[k]
     p = pitch.float() * 0.017453292519943295
     pit = torch.stack([torch.sin(p), torch.cos(p)], -1)[:, None, None, :].expand(B, h, w, 2)
     return torch.cat([col, nrm, dep, mask.float()[..., None], feat, pit], -1), torch.cat(hits)
@@ -314,7 +319,8 @@ def forward(net, px, pitch, trees=False, credit=False, temp=1.0, keep=None):
     x_in, hits = inputs(net, px, pitch)
     B, h, w, _ = x_in.shape
     x = x_in @ net.view('We', DW, CIN).t() + net.view('be')
-    x = x.permute(0, 3, 1, 2)                                  # (B, 64, h, w)
+    x = x.permute(0, 3, 1, 2).contiguous()                     # (B, 64, h, w); NCHW in memory: cuDNN's depthwise
+                                                               # kernels are ~3x faster than on the channels-last view
     for b in range(net.NB):
         tc = net.view(f'tc{b}')
         q = tc_codes(tc[:(KT + TCG) * DW]).view(KT + TCG, DW)
@@ -340,7 +346,7 @@ def forward(net, px, pitch, trees=False, credit=False, temp=1.0, keep=None):
             f = g @ ternary(net.W2[b]).t() + b2
             if keep is not None: keep.append((xq.detach(), xc, xs, (f - b2).detach()))
             o = tt + f
-        x = o.view(B, h, w, DW).permute(0, 3, 1, 2)
+        x = o.view(B, h, w, DW).permute(0, 3, 1, 2).contiguous()
     z = x.permute(0, 2, 3, 1) @ net.view('Wh', 4, DW).t() + net.view('bh')
     return torch.sigmoid(z), hits
 
@@ -363,6 +369,7 @@ class Optim:
         mats = [net.TI, net.TO] if net.T else [net.W1, net.W2]
         self.mom = [torch.zeros_like(m) for m in mats]
         self.mask = None
+        self.tex_rows = slice(None)   # texels (rows of 8) the texture Adam visits
         if distill:   # only the trees' node biases (b2 is shared with the teacher)
             self.mask = torch.zeros_like(net.dense, dtype=torch.bool)
             for b in range(net.NB): a, n = net.o[f'tb{b}']; self.mask[a:a + n] = True
@@ -394,11 +401,15 @@ class Optim:
         gd = net.dense.grad if net.dense.grad is not None else torch.zeros_like(net.dense)
         if self.mask is not None: gd = gd * self.mask
         gmats = [m.grad if m.grad is not None else torch.zeros_like(m) for m in mats]
-        gt = net.tex.grad if net.tex.grad is not None else torch.zeros_like(net.tex)
         hit = torch.zeros(net.n_tex // FCH, dtype=torch.bool, device=net.tex.device); hit[hits] = True
-        nrm = (gd.double() ** 2).sum() + sum((g.double() ** 2).sum() for g in gmats) + (gt.view(-1, FCH)[hit].double() ** 2).sum()
-        scale = 1 / B; norm = math.sqrt(nrm.item()) * scale
-        if clip > 0 and norm > clip: scale *= clip / (norm + 1e-6)
+        hit = hit[self.tex_rows, None]
+        # the texture's gradient over self.tex_rows only (the rest can't move, and has none)
+        G = net.tex.grad.view(-1, FCH)[self.tex_rows] if net.tex.grad is not None else None
+        nrm = (gd.double() ** 2).sum() + sum((g.double() ** 2).sum() for g in gmats)
+        if G is not None: nrm = nrm + ((G.double() ** 2) * hit).sum()
+        # the clip as a tensor: no wait on the GPU (it was norm.item())
+        norm = torch.sqrt(nrm).float() / B
+        scale = torch.where((norm > clip) if clip > 0 else torch.zeros((), dtype=torch.bool, device=norm.device), clip / (norm + 1e-6), 1.0) / B
         c1, c2 = 1 - b1 ** it, 1 - b2 ** it
         if self.mask is None:
             self.adam(net.dense, gd * scale, self.dm, self.dv, lr, wd, b1, b2, eps, c1, c2)
@@ -408,11 +419,15 @@ class Optim:
             net.dense[self.mask], self.dm[self.mask], self.dv[self.mask] = p, m, v
         rows = net.TN if net.T else 32
         for p, g, mo in zip(mats, gmats, self.mom): self.muon(p, g * scale, mo, lr, wd, rows)
-        # lazy texture Adam: only the texels the step read
-        T, G, M, V = (t.view(-1, FCH) for t in (net.tex, gt, self.tm, self.tv))
-        tp, tm, tv = T[hit], M[hit], V[hit]
-        self.adam(tp, G[hit] * scale, tm, tv, lr_tex, 0.0, b1, b2, eps, c1, c2)
-        T[hit], M[hit], V[hit] = tp, tm, tv
+        # lazy texture Adam: only the texels the step read move (their moments too). Dense and masked,
+        # not hit-indexed: boolean indexing waits on the GPU for its size
+        if lr_tex > 0 and G is not None:   # over self.tex_rows only: the texels that can move (style_torch: the coarse level)
+            T, M, V = (t.view(-1, FCH)[self.tex_rows] for t in (net.tex, self.tm, self.tv))
+            h = hit
+            g = G * scale
+            m2 = M * b1 + g * (1 - b1); v2 = V * b2 + g * g * (1 - b2)
+            T.copy_(torch.where(h, T - lr_tex * ((m2 / c1) / (torch.sqrt(v2 / c2) + eps)), T))
+            M.copy_(torch.where(h, m2, M)); V.copy_(torch.where(h, v2, V))
         for t in net.leaves(): t.grad = None
 
 

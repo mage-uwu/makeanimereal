@@ -12,8 +12,13 @@ average of the possible drawings (blur); here the shader is judged by what its p
 No neural texture: its 8 slots carry what any renderer has, fixed, not learned: a code for the
 mesh part (6 channels) and the UV coordinates (2).
 
-    python3 style_torch.py --data style.npz --ssm 1,3 --seconds 5400 --out style_run
+    python3 style_torch.py --data style.npz --ssm 1,3 --iters 6000 --out style_run
 style.npz (make_style_data.py): px (N, H, W, 17) uint8 as pack_data.py, pitch (N,), held (N,) bool.
+bravo.py runs the whole recipe (data, both phases, export); this is one phase.
+
+Speed (GPU): the shader in float32 with TF32 matmuls (exact for its ternary x int8 sums), VGG and the
+discriminator in bfloat16 autocast, channels-last; no host sync in a step (losses are read at the
+evals). --bench N times N steps and prints the profile instead of training.
 """
 import argparse
 import math
@@ -72,8 +77,22 @@ class VGG(torch.nn.Module):
         return out
 
 
+AMP = torch.bfloat16   # VGG's and the discriminator's autocast type (None: float32 throughout)
+
+
+def amp():
+    return torch.autocast('cuda', dtype=AMP) if AMP is not None and torch.cuda.is_available() else torch.autocast('cpu', enabled=False)
+
+
+def cl(x): return x.contiguous(memory_format=torch.channels_last)
+
+
 def perceptual(vgg, a, b):
-    return sum((fa - fb).abs().mean((1, 2, 3)) for fa, fb in zip(vgg(a), vgg(b)))   # per sample
+    """Per sample: the L1 between VGG features of a (the drawing; gradient) and b (the target)."""
+    with amp():
+        with torch.no_grad(): fb = vgg(cl(b))
+        fa = vgg(cl(a))
+    return sum((x.float() - y.float()).abs().mean((1, 2, 3)) for x, y in zip(fa, fb))
 
 
 class PatchD(torch.nn.Module):
@@ -108,6 +127,7 @@ def main():
     ap.add_argument('--data', required=True); ap.add_argument('--out', default='style_run')
     ap.add_argument('--blocks', type=int, default=4); ap.add_argument('--dil', default='1,3,9,27')
     ap.add_argument('--ssm', default='1,3'); ap.add_argument('--tree', default='4,4')
+    ap.add_argument('--iters', type=int, default=0, help='steps (sets the schedule); 0: --seconds does')
     ap.add_argument('--seconds', type=float, default=5400); ap.add_argument('--batch', type=int, default=6)
     ap.add_argument('--crop', type=int, default=256)
     ap.add_argument('--lr', type=float, default=0.003); ap.add_argument('--adv', type=float, default=0.05)
@@ -119,7 +139,16 @@ def main():
     ap.add_argument('--coarse-tex', action='store_true', help='learn the coarse texture level (64 x 64 x 8 a part; the fine level stays the fixed part code and UV)')
     ap.add_argument('--lr-tex', type=float, default=0.01)
     ap.add_argument('--lines', type=float, default=0.0, help="the tolerant line loss's weight (edges())")
+    ap.add_argument('--amp', default='bf16', choices=['bf16', 'off'], help="VGG and discriminator precision")
+    ap.add_argument('--no-tf32', action='store_true', help='the shader in strict float32 (shader_torch.py parity)')
+    ap.add_argument('--bench', type=int, default=0, help='time this many steps (after warm-up), print the profile, exit')
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--compile', action='store_true', help="torch.compile the shader's training forward (fuses its elementwise work)")
     a = ap.parse_args()
+    global AMP
+    AMP = torch.bfloat16 if a.amp == 'bf16' else None
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = not a.no_tf32
+    torch.backends.cudnn.benchmark = True
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     z = np.load(a.data)
@@ -131,7 +160,8 @@ def main():
 
     T, V = map(int, a.tree.split(','))
     dil = [int(v) for v in a.dil.split(',')]
-    net = Net(a.blocks, P, dil, T, V, dev); net.init(0); fixed_texture(net)
+    net = Net(a.blocks, P, dil, T, V, dev); net.init(a.seed); fixed_texture(net)
+    net.tex_grad_levels = (1,) if a.coarse_tex else ()   # the fine level is fixed: no gradient buffer for it
     shader_torch.SSM.clear()
     for b in map(int, a.ssm.split(',')) if a.ssm else []: shader_torch.SSM[b] = SSMTree(trees=T, levels=V).to(dev)
     if a.load:
@@ -140,13 +170,13 @@ def main():
         print(f'from {a.load}', flush=True)
     ssm_params = [p for m in shader_torch.SSM.values() for p in m.parameters()]
     nfine = P * FINE * FINE   # texels of the fine level (fixed); the coarse level after them
-    opt = Optim(net)
+    opt = Optim(net); opt.tex_rows = slice(nfine, None)   # only the coarse level can move
     ssm_opt = torch.optim.AdamW(ssm_params, lr=2e-3, weight_decay=0.01) if ssm_params else None
-    vgg = VGG(a.vgg == 'random').to(dev); D = PatchD().to(dev)
+    vgg = VGG(a.vgg == 'random').to(dev).to(memory_format=torch.channels_last); D = PatchD().to(dev).to(memory_format=torch.channels_last)
     d_opt = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(.5, .999))
     leaves = [net.dense, net.W1, net.W2] + ([net.TI, net.TO] if net.T else []) + ([net.tex] if a.coarse_tex else [])
     nohits = torch.zeros(0, dtype=torch.long, device=dev)
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(a.seed)
     # crops around her: centres drawn from her coverage
     cover = [torch.nonzero(px_all[i, ..., 12] > 127).cpu().numpy() for i in range(N)]
 
@@ -160,35 +190,39 @@ def main():
 
     def d_in(rgba, px):   # the discriminator's view: picture over white, alpha, normals
         nrm = px[..., 3:6].float().permute(0, 3, 1, 2) / 255 * 2 - 1
-        return torch.cat([over_white(rgba) * 2 - 1, rgba[..., 3:4].permute(0, 3, 1, 2) * 2 - 1, nrm], 1)
+        return cl(torch.cat([over_white(rgba) * 2 - 1, rgba[..., 3:4].permute(0, 3, 1, 2) * 2 - 1, nrm], 1))
+
+    def Dp(x):   # the discriminator's patch scores, float32
+        with amp(): return D(x).float()
 
     @torch.no_grad()
     def evaluate(step):
-        tot = {'perceptual': 0.0, 'anchor': 0.0, 'lines': 0.0}
-        tiles = []
-        for k, i in enumerate(held):
-            px = px_all[i:i + 1]
-            p, _ = forward(net, px, pitch_all[i:i + 1], True)
+        tot = {k: torch.zeros((), device=dev) for k in ('perceptual', 'anchor', 'lines')}
+        tiles, every = [], max(1, len(held) // 6)
+        for k0 in range(0, len(held), 4):   # whole frames, 4 at a time
+            ids = held[k0:k0 + 4]
+            px = px_all[ids]
+            p, _ = forward(net, px, pitch_all[ids], True)
             tgt = px[..., 13:17].float() / 255
-            tot['perceptual'] += perceptual(vgg, over_white(p), over_white(tgt)).item() / len(held)
-            tot['anchor'] += (F.avg_pool2d(over_white(p), 8) - F.avg_pool2d(over_white(tgt), 8)).abs().mean().item() / len(held)
-            tot['lines'] += (edges(over_white(p)) - edges(over_white(tgt))).abs().mean().item() / len(held)
-            if k % max(1, len(held) // 6) == 0 and len(tiles) < 6:
-                ren = px[0, ..., :3].float() / 255
-                row = torch.cat([ren, over_white(tgt)[0].permute(1, 2, 0), over_white(p)[0].permute(1, 2, 0)], 1)
-                tiles.append(row)
+            po, to = over_white(p), over_white(tgt)
+            tot['perceptual'] += perceptual(vgg, po, to).sum() / len(held)
+            tot['anchor'] += (F.avg_pool2d(po, 8) - F.avg_pool2d(to, 8)).abs().mean((1, 2, 3)).sum() / len(held)
+            tot['lines'] += (edges(po) - edges(to)).abs().mean((1, 2, 3)).sum() / len(held)
+            for j in range(len(ids)):
+                if (k0 + j) % every == 0 and len(tiles) < 6:
+                    tiles.append(torch.cat([px[j, ..., :3].float() / 255, to[j].permute(1, 2, 0), po[j].permute(1, 2, 0)], 1))
         if tiles:
             img = torch.cat(tiles, 0).clamp(0, 1).mul(255).byte().cpu().numpy()
             Image.fromarray(img).save(out / f'held_{step:06d}.png')
-        return tot
+        return {k: v.item() for k, v in tot.items()}
 
     print(f'SSM blocks {a.ssm}: {sum(p.numel() for p in ssm_params)} parameters; adversarial x{a.adv} from step {a.adv_from}', flush=True)
-    t0 = time.time(); it = 0; ema = {}
-    if a.load:   # the starting point's held-out numbers, the baseline
-        print('it 0  | held: ' + '  '.join(f'{k} {v:.4f}' for k, v in evaluate(0).items()), flush=True)
-    while True:
-        it += 1
-        prog = min(1, (time.time() - t0) / a.seconds)
+    ema = {}
+    fwd = torch.compile(forward) if a.compile else forward
+
+    def step(it, prog):
+        """One training step: the shader against VGG, the anchor, the lines and the discriminator, then
+        the discriminator. No host sync: the losses stay on the GPU (ema)."""
         sched = min(1, it / 300) * (.1 + .9 * .5 * (1 + math.cos(math.pi * prog)))
         ids = rng.choice(train, a.batch)
         px, pit = batch_of(ids, min(a.crop, H, W))
@@ -196,37 +230,67 @@ def main():
         # generator (the shader)
         for t in leaves: t.requires_grad_(True); t.grad = None
         if ssm_opt: ssm_opt.zero_grad()
-        p, hits = forward(net, px, pit, True, credit=True)
-        lp = perceptual(vgg, over_white(p), over_white(tgt))
-        ll = (edges(over_white(p)) - edges(over_white(tgt))).abs().mean((1, 2, 3)) if a.lines else torch.zeros_like(lp)
-        la = (F.avg_pool2d(over_white(p), 8) - F.avg_pool2d(over_white(tgt), 8)).abs().mean((1, 2, 3)) \
+        with torch.profiler.record_function('shader forward'):
+            p, hits = fwd(net, px, pit, True, credit=True)
+        po, to = over_white(p), over_white(tgt)
+        with torch.profiler.record_function('vgg'):
+            lp = perceptual(vgg, po, to)
+        ll = (edges(po) - edges(to)).abs().mean((1, 2, 3)) if a.lines else torch.zeros_like(lp)
+        la = (F.avg_pool2d(po, 8) - F.avg_pool2d(to, 8)).abs().mean((1, 2, 3)) \
             + (F.avg_pool2d(p[..., 3:4].permute(0, 3, 1, 2), 8) - F.avg_pool2d(tgt[..., 3:4].permute(0, 3, 1, 2), 8)).abs().mean((1, 2, 3))
         use_adv = it > a.adv_from
-        lg = -D(d_in(p, px)).mean((1, 2, 3)) if use_adv else torch.zeros_like(lp)
-        (lp + a.anchor * la + a.lines * ll + (a.adv * min(1, (it - a.adv_from) / 500) if use_adv else 0) * lg).sum().backward()
+        with torch.profiler.record_function('discriminator (shader)'):
+            lg = -Dp(d_in(p, px)).mean((1, 2, 3)) if use_adv else torch.zeros_like(lp)
+        with torch.profiler.record_function('backward'):
+            (lp + a.anchor * la + a.lines * ll + (a.adv * min(1, (it - a.adv_from) / 500) if use_adv else 0) * lg).sum().backward()
         for t in leaves: t.requires_grad_(False)
-        opt.step(it, a.lr * sched, a.lr_tex * sched if a.coarse_tex else 0.0, a.batch, hits[hits >= nfine] if a.coarse_tex else nohits)
-        if ssm_opt:
-            for g in ssm_opt.param_groups: g['lr'] = 2e-3 * sched
-            torch.nn.utils.clip_grad_norm_(ssm_params, 1.0); ssm_opt.step()
+        with torch.profiler.record_function('optimisers'):
+            # every texel read is passed; the fine level's have no gradient (fixed) and stay put
+            opt.step(it, a.lr * sched, a.lr_tex * sched if a.coarse_tex else 0.0, a.batch, hits if a.coarse_tex else nohits)
+            if ssm_opt:
+                for g in ssm_opt.param_groups: g['lr'] = 2e-3 * sched
+                torch.nn.utils.clip_grad_norm_(ssm_params, 1.0); ssm_opt.step()
         # discriminator: keyframes real, the shader's drawings fake
-        if it > a.adv_from - 500:
-            d_opt.zero_grad()
-            ld = F.relu(1 - D(d_in(tgt, px))).mean() + F.relu(1 + D(d_in(p.detach(), px))).mean()
-            ld.backward(); d_opt.step()
-        else:
-            ld = torch.zeros(())
-        for k, v in [('perc', lp.mean().item()), ('anchor', la.mean().item()), ('lines', ll.mean().item()), ('g', lg.mean().item()), ('d', ld.item())]:
-            ema[k] = v if k not in ema else .98 * ema[k] + .02 * v
-        last = time.time() - t0 >= a.seconds
+        with torch.profiler.record_function('discriminator step'):
+            if it > a.adv_from - 500:
+                d_opt.zero_grad()
+                ld = F.relu(1 - Dp(d_in(tgt, px))).mean() + F.relu(1 + Dp(d_in(p.detach(), px))).mean()
+                ld.backward(); d_opt.step()
+            else:
+                ld = torch.zeros((), device=dev)
+        with torch.no_grad():
+            for k, v in [('perc', lp.mean()), ('anchor', la.mean()), ('lines', ll.mean()), ('g', lg.mean()), ('d', ld)]:
+                ema[k] = v.detach().clone() if k not in ema else .98 * ema[k] + .02 * v.detach()
+
+    if a.bench:   # warm-up (with the discriminator on), then timed steps and the profile
+        sync = torch.cuda.synchronize if dev.type == 'cuda' else (lambda: None)
+        for k in range(3): step(a.adv_from + 1 + k, .5)
+        sync(); t1 = time.time()
+        for k in range(a.bench): step(a.adv_from + 4 + k, .5)
+        sync(); dt = (time.time() - t1) / a.bench
+        print(f'{dt * 1000:.1f} ms a step ({a.batch} crops of {min(a.crop, H, W)}^2, discriminator on)', flush=True)
+        acts = [torch.profiler.ProfilerActivity.CPU] + ([torch.profiler.ProfilerActivity.CUDA] if dev.type == 'cuda' else [])
+        with torch.profiler.profile(activities=acts) as prof:
+            for k in range(5): step(a.adv_from + 4 + a.bench + k, .5)
+            sync()
+        key = 'cuda_time_total' if dev.type == 'cuda' else 'cpu_time_total'
+        print(prof.key_averages().table(sort_by=key, row_limit=30), flush=True)
+        return
+
+    t0 = time.time(); it = 0
+    if a.load:   # the starting point's held-out numbers, the baseline
+        print('it 0  | held: ' + '  '.join(f'{k} {v:.4f}' for k, v in evaluate(0).items()), flush=True)
+    while True:
+        it += 1
+        step(it, min(1, it / a.iters) if a.iters else min(1, (time.time() - t0) / a.seconds))
+        last = it >= a.iters if a.iters else time.time() - t0 >= a.seconds
         if it % a.eval_every == 0 or last:
             m = evaluate(it)
-            print(f'it {it}  ' + '  '.join(f'{k} {v:.4f}' for k, v in ema.items()) + '  | held: ' + '  '.join(f'{k} {v:.4f}' for k, v in m.items())
+            print(f'it {it}  ' + '  '.join(f'{k} {v.item():.4f}' for k, v in ema.items()) + '  | held: ' + '  '.join(f'{k} {v:.4f}' for k, v in m.items())
                   + f'  {time.time() - t0:.0f}s', flush=True)
             net.save(str(out / 'style.ntst'))
             torch.save([m_.state_dict() for m_ in shader_torch.SSM.values()], out / 'style.ntst.ssm.pt')
         if last: break
-
 
 if __name__ == '__main__':
     main()

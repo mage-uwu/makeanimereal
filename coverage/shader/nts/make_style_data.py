@@ -31,12 +31,8 @@ def keyed(img):
     return np.concatenate([c, alpha[..., None] * 255], -1)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('keys'); ap.add_argument('--out', required=True)
-    ap.add_argument('--full', action='store_true', help='keep the full size')
-    a = ap.parse_args()
-    keys = json.loads(Path(a.keys).read_text())
+def build(keys, full=False):
+    """keys (as keys.json) -> the style_torch.py data: px (N, H, W, 17) uint8, pitch, held, parts."""
     parts = len(json.loads((Path(keys[0]['dir']) / 'meta.json').read_text())['parts'])
     pxs, pitch, held = [], [], []
     for k in keys:
@@ -48,17 +44,24 @@ def main():
             tgt = np.asarray(ki.resize((col.shape[1], col.shape[0]), Image.LANCZOS)).astype(np.float32)
         else:                   # a drawing on green
             tgt = keyed(np.asarray(ki.convert('RGB').resize((col.shape[1], col.shape[0]), Image.LANCZOS)))
-        if not a.full:   # smooth buffers by area; the encoded ones (uv, part, coverage) by their top-left texel
+        if not full:   # smooth buffers by area; the encoded ones (uv, part, coverage) by their top-left texel
             col, nrm, dep = box2(col), box2(nrm), box2(dep)
             uva, uvb = uva[::2, ::2], uvb[::2, ::2]
             pa = box2(np.concatenate([tgt[..., :3] * tgt[..., 3:4] / 255, tgt[..., 3:4]], -1))   # premultiplied
             tgt = np.concatenate([pa[..., :3] * 255 / np.maximum(pa[..., 3:4], 1e-3), pa[..., 3:4]], -1)
         px = np.concatenate([col, nrm, dep[..., :1], uva, uvb, tgt], -1)
         pxs.append(np.clip(np.round(px), 0, 255).astype(np.uint8)); pitch.append(k['pitch']); held.append(k['held'])
-    px = np.stack(pxs)
-    np.savez(a.out, px=px, pitch=np.array(pitch, np.float32), held=np.array(held), parts=parts)
-    print(f'{len(px)} frames {px.shape[2]}x{px.shape[1]}, {sum(held)} held out -> {a.out}')
+    return dict(px=np.stack(pxs), pitch=np.array(pitch, np.float32), held=np.array(held), parts=parts)
 
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('keys'); ap.add_argument('--out', required=True)
+    ap.add_argument('--full', action='store_true', help='keep the full size')
+    a = ap.parse_args()
+    d = build(json.loads(Path(a.keys).read_text()), a.full)
+    np.savez(a.out, **d)
+    print(f"{len(d['px'])} frames {d['px'].shape[2]}x{d['px'].shape[1]}, {d['held'].sum()} held out -> {a.out}")
 
 if __name__ == '__main__':
     main()

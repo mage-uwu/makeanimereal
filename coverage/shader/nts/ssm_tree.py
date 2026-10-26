@@ -48,7 +48,53 @@ class SSMTree(torch.nn.Module):
 
     def forward(self, tt, xq, sample, S):
         """tt: (N, d) the stencil's output (the residual), xq: (N, d) its int8 codes x scale (quant8),
-        sample: (N,) which image each pixel is in, S: images. Returns (N, d), the block's output."""
+        sample: (N,) which image each pixel is in, S: images. Returns (N, d), the block's output.
+
+        The same three steps as forward_ref, as dense matmuls instead of per-pixel gathers of node
+        states. A node's read R . Z = C^T h Z is linear in h, so with K = C (x) Z (N, n pv) every
+        node's read is K @ h^T at once; the per-image write is a (visits x gain)^T @ (B (x) V) matmul;
+        the U term sums the visited states per tree first. Needs the pixels grouped by image, equal
+        counts (as shader_torch.forward lays them out); otherwise forward_ref."""
+        N, d, T, V, n, pv, TN = tt.shape[0], self.d, self.T, self.V, self.n, self.pv, self.TN
+        Np = N // S
+        if Np * S != N or not torch.equal(sample[::Np], torch.arange(S, device=sample.device)):
+            return self.forward_ref(tt, xq, sample, S)
+        R_ = T * TN
+        p = xq @ ternary(self.proj).t()
+        Bk, Cq, Vv, Zz, dtr = p.split([n, n, pv, pv, T], -1)
+        gain = F.softplus(dtr + self.dt_bias)                               # (N, T)
+        dec = torch.exp(-torch.exp(self.A_log))                             # (R,)
+        S_in = xq @ ternary(self.w_in).t() + self.bias                      # (N, R)
+        K = (Cq[:, :, None] * Zz[:, None, :]).reshape(N, n * pv)            # C (x) Z
+        h0d = self.h0 * dec[:, None, None]                                  # (R, n, pv)
+        # 1: the walk, reading the starting state (routing only: no gradient)
+        with torch.no_grad():
+            s1 = S_in + K @ h0d.reshape(R_, n * pv).t()
+            rows = torch.empty(N, T, V, dtype=torch.long, device=tt.device)
+            a = torch.zeros(N, T, dtype=torch.long, device=tt.device)
+            base = torch.arange(T, device=tt.device) * TN
+            for j in range(V):
+                rows[:, :, j] = base + a
+                a = 2 * a + 1 + (s1.gather(1, rows[:, :, j]) > 0).long()
+            M = torch.zeros(N, R_, device=tt.device).scatter_(1, rows.view(N, -1), 1.0)   # visits
+            cnt = M.view(S, Np, R_).sum(1)                                  # (S, R)
+        # 2: the write, per image and node: dec h0 + the mean of gain B (x) V over its visitors
+        G = M * gain.repeat_interleave(TN, 1)                               # (N, R): visit x its tree's gain
+        BV = (Bk[:, :, None] * Vv[:, None, :]).reshape(N, n * pv)
+        tot = torch.bmm(G.view(S, Np, R_).transpose(1, 2), BV.view(S, Np, n * pv))     # (S, R, n pv)
+        h1 = h0d.reshape(1, R_, n * pv) + tot / cnt.clamp(min=1)[..., None]
+        self.last_h1 = h1.detach().view(S, R_, n, pv)
+        if self.frozen is not None: h1 = self.frozen.reshape(1, R_, n * pv).expand(S, -1, -1)
+        # 3: the same path, reading the new state
+        s2 = S_in + torch.bmm(K.view(S, Np, n * pv), h1.transpose(1, 2)).reshape(N, R_)
+        y = (gelu(s2) * M) @ ternary(self.w_out)
+        hsum = torch.einsum('sptr,strk->sptk', M.view(S, Np, T, TN), h1.view(-1, T, TN, n * pv).expand(S, -1, -1, -1))
+        R2 = torch.einsum('ptnv,pn->ptv', hsum.reshape(N, T, n, pv), Cq)     # (N, T, pv): the reads summed per tree
+        return tt + y + R2.reshape(N, T * pv) @ ternary(self.U).t()
+
+    def forward_ref(self, tt, xq, sample, S):
+        """The per-pixel original (gathers of each visited node's state): any pixel order; the reference
+        forward checks against (test_ssm_fast.py)."""
         N, d, T, V, n, pv, TN = tt.shape[0], self.d, self.T, self.V, self.n, self.pv, self.TN
         p = xq @ ternary(self.proj).t()
         Bk, Cq, Vv, Zz, dtr = p.split([n, n, pv, pv, T], -1)
