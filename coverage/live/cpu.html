@@ -92,6 +92,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="c-girl" aria-pressed="false" title="The magical girl (the first character)">Magical Girl</button>
       <button id="c-girlhd" aria-pressed="false" title="The magical girl trained at twice the resolution (720 x 1280): finer lines and detail, four times the work a frame">Magical Girl HD</button>
       <button id="c-style" aria-pressed="false" title="The magical girl drawn by the style shader: the same ternary tree network with a fixed learned memory per tree node in two blocks, a small learned coarse texture and no learned fine texture; its lines and cel shading learned from the film with a perceptual + adversarial objective (GPU engine)">Style</button>
+      <button id="c-stylesoft" aria-pressed="false" title="The magical girl's style model fine-tuned on the 2x grid, drawn on the 1x grid (its dilations halved): the 2x drawing averaged down, at the 1x cost">Style 2x→1x</button>
       <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
       <button id="c-bunnystyle" aria-pressed="false" title="The bunny girl drawn by a style shader trained with the step-bravo pipeline (bravo.py): the same recipe as the magical girl's Style (GPU engine)">Bunny Style</button>
     </div>
@@ -138,6 +139,7 @@ const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
   girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
   style: { label: 'Magical Girl Style', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true, fine: 2, fineTree: 'nts-style-hd/' },   // fineTree: fine-tuned on the 2x grid (its dilations in the file)   // node-memory blocks (ssm.bin): the GPU engine only
+  stylesoft: { label: 'Magical Girl Style 2x→1x', model: 'model.vrm.png', tree: 'nts-style-hd/', shorts: 0x1c2056, gpuOnly: true, dilScale: 0.5 },   // the 2x-trained weights on the 1x grid
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
   bunnystyle: { label: 'Bunny Style', model: 'bunny/model.vrm.png', tree: 'bunny/nts-style/', shorts: 0xf4dde3, gpuOnly: true, fine: 2 },   // bravo.py's viewer files
 };
@@ -725,7 +727,7 @@ try {
   let parts;
   if (CH.gpuOnly && ENGINE !== 'gpu') { location.hash = engineHash('gpu'); location.reload(); throw new Error('this character runs on the GPU engine'); }
   if (ENGINE === 'gpu') {
-    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, dilScale: FINE_TREE ? 1 : FINE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, dilScale: (FINE_TREE ? 1 : FINE) * (CH.dilScale || 1), maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
     catch (e) {
       // no WebGL2: the default (GPU-only) character falls back to the magical girl on the CPU engine
