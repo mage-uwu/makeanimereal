@@ -215,8 +215,9 @@ on her as in training, so the same weights draw the same picture at k times the 
   down, matches its 360×640 drawing within 0.83/255.
 - At full size it draws visibly sharper eyes, lashes, necklace and strands.
 
-The viewer runs the style characters this way (`CHARS[...].fine = 2`, `nts-gl.js` `dilScale`). This
-costs 4× the network's pixels; `#lores` (the 2x chip off) is the training grid. GL matches PyTorch at
+The viewer offers it for the style characters as an opt-in (`CHARS[...].fine = 2`, `nts-gl.js`
+`dilScale`; the 2x chip or `#fine`). It costs 4× the network's pixels, and on a phone the gain is
+marginal, so it is off by default. GL matches PyTorch at
 2× within 0.184/255.
 
 A short fine-tune on the 2× grid (the girl has 720×1280 data, with `--dil 2,6,18,54`) could sharpen

@@ -78,7 +78,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <span class="sep"></span>
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
       <button id="m-sharp" aria-pressed="true" hidden title="Edge-aware upscale: her edges at the screen's resolution, guided by her geometry (off: plain bilinear)">Sharp</button>
-      <button id="m-fine" aria-pressed="true" hidden title="The network on a grid twice as fine as it trained on (its stencils' reach scaled to match): the same drawing at twice the resolution, four times the work. Off: its training resolution">2x</button>
+      <button id="m-fine" aria-pressed="false" hidden title="The network on a grid twice as fine as it trained on (its stencils' reach scaled to match): the same drawing at twice the resolution, four times the work (off: its training resolution)">2x</button>
       <button id="m-lines" aria-pressed="true" hidden title="Line art: toon contours (drawn from her geometry), the network's learned ink, or none">Lines: Toon</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
@@ -147,8 +147,8 @@ const CHAR = Object.keys(CHARS).find(k => k !== DEFAULT_CHAR && location.hash.sl
 // The network's frame: the training frames' scale (360 x 640, or twice that for an HD character) on a
 // larger canvas, so raised arms fit. #tight: the training frame itself (the checks compare against it).
 // fine: a model trained at 360 x 640 drawn on a grid this many times finer (its dilations scaled; nts-gl.js
-// dilScale): the same picture at that resolution, no retraining. #lores: its training resolution.
-const FINE = location.hash.includes('lores') ? 1 : CH.fine || 1;
+// dilScale): the same picture at that resolution, no retraining, 4x the work. Opt-in: #fine (the 2x chip).
+const FINE = location.hash.includes('fine') ? CH.fine || 1 : 1;
 const S = (CH.scale || 1) * FINE;
 const TRAIN_H = 640 * S, [NW, NH] = (location.hash.includes('tight') ? [360, 640] : [720, 800]).map(v => v * S), FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('fused') ? 'fused' : location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
@@ -585,8 +585,8 @@ document.getElementById('v-bg').onclick = e => {
   e.currentTarget.setAttribute('aria-pressed', String(backdrop > 0)); dirty = true;
 };
 document.getElementById('m-fine').onclick = () => {   // reloads at the other grid
-  const t = location.hash.slice(1).split('-').filter(x => x && x !== 'lores');
-  if (FINE > 1) t.push('lores');
+  const t = location.hash.slice(1).split('-').filter(x => x && x !== 'fine');
+  if (FINE === 1) t.push('fine');
   location.hash = t.join('-'); location.reload();
 };
 document.getElementById('m-sharp').onclick = e => { sharp = !sharp; e.currentTarget.setAttribute('aria-pressed', String(sharp)); dirty = true; };
