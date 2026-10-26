@@ -223,6 +223,28 @@ marginal, so it is off by default. GL matches PyTorch at
 A short fine-tune on the 2× grid (the girl has 720×1280 data, with `--dil 2,6,18,54`) could sharpen
 it further. The bunny would need 2× G-buffers first.
 
+## A learned upscale instead (`nts/upsample_torch.py`): tried, not shipped
+
+The idea was to keep the 1× network and learn the step to the screen instead. The magical girl's
+style v2 drew at 1×; training was at 2× against her 720×1280 film, 3000 steps, about 20 minutes on an
+RTX PRO 6000. Held-out crops:
+
+| | L1 | perceptual | lines |
+|---|---|---|---|
+| hand-made edge-aware upscale (the viewer's) | 0.0365 | 1.794 | 0.0678 |
+| learned re-weighting (MLP 10 → 12 → 1 a tap) | 0.0365 | 1.736 | 0.0647 |
+| + detail head (normal, part code, uv sines → colour) | 0.0448 | 1.614 | 0.0617 |
+
+- **Re-weighting** gives a learned logit to each of the 16 network pixels a screen pixel blends. It
+  can only choose among colours the drawing already has: the gain is real but barely visible.
+- **The detail head** scored better but looks worse. Its gain is mostly a colour shift towards the
+  film's brighter hair, at the cost of strand contrast.
+
+What the 1× drawing lacks is detail it never drew, and no cheap per-pixel step at the screen's
+resolution recovers it. The shader code was taken back out; the trainer stays for a later attempt.
+Two options remain. One is training the network itself at 2× (it runs on the 2× grid, `#fine`); the
+other is a detail head with its own small texture, which is a neural texture again.
+
 ## Style training speed (`style_torch.py`, `bravo.py`)
 
 One step is 6 crops of 256² with the discriminator on, on an RTX PRO 6000:
