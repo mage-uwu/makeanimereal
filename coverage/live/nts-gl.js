@@ -1,4 +1,4 @@
-// GPU fast path for the nanotss (Tree-SSM) shader: the same network as infer.c, in WebGL2 fragment
+// GPU fast path for the nanotss ternary tree shader: the same network as infer.c, in WebGL2 fragment
 // shaders. WebGL2 with float render targets is all it needs (no WebGPU, no compute), so it runs on
 // iPhones as well as desktops. The G-buffer tiles stay on the GPU: three.js draws them into render
 // targets and the passes below read them directly.

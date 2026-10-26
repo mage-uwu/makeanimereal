@@ -3,7 +3,7 @@
 //   node check_zoom.mjs index.html cpu debugCpu        (viewer, nanotss CPU)
 //   WGPU=1 node check_zoom.mjs index.html ntsgpu debugCpu   (viewer, nanotss WebGPU)
 //   node check_zoom.mjs index.html fast debugFrame     (viewer, learned shader on WebGL; WGPU=1 crisp: WebGPU)
-//   node check_zoom.mjs cpu.html noloop debugGpu       (Tree-SSM page, GPU engine)
+//   node check_zoom.mjs cpu.html noloop debugGpu       (Ternary Tree Shader page, GPU engine)
 // Each line prints hashes of the output and tiles: they must all match. SETTLE: ms to let the first frame finish.
 import { chromium } from 'playwright-core';
 import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto';

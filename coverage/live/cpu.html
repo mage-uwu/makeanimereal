@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Tree-SSM Shader</title>
+<title>Ternary Tree Shader</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Shippori+Mincho:wght@600&family=JetBrains+Mono:wght@400&display=swap">
@@ -57,8 +57,8 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
 <div class="app">
   <header>
-    <h1>Tree-SSM Shader</h1>
-    <p class="hint">Drawn every frame by the nanotss (Tree-SSM) shader: on the GPU in WebGL2 or WebGPU compute, or on the CPU in WebAssembly. Drag to orbit, pinch to zoom, double-tap to reset. Follow, Mic and Speak make her a VTuber.
+    <h1>Ternary Tree Shader</h1>
+    <p class="hint">Drawn every frame by the nanotss ternary tree shader (dilated ternary stencils + fast-feedforward trees): on the GPU in WebGL2 or WebGPU compute, or on the CPU in WebAssembly. Drag to orbit, pinch to zoom, double-tap to reset. Follow, Mic and Speak make her a VTuber.
       Motion: <a href="https://github.com/BandaiNamcoResearchInc/Bandai-Namco-Research-Motiondataset">Bandai Namco Research</a> (CC BY-NC 4.0).</p>
   </header>
   <div id="stage" aria-label="Live character view; drag to orbit">
@@ -90,7 +90,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <span class="sep"></span>
       <button id="c-girl" aria-pressed="false" title="The magical girl (the first character)">Magical Girl</button>
       <button id="c-girlhd" aria-pressed="false" title="The magical girl trained at twice the resolution (720 x 1280): finer lines and detail, four times the work a frame">Magical Girl HD</button>
-      <button id="c-style" aria-pressed="false" title="The magical girl drawn by the SSM style shader: no learned texture, its lines and cel shading learned from the film with a perceptual + adversarial objective (GPU engine)">Style (SSM)</button>
+      <button id="c-style" aria-pressed="false" title="The magical girl drawn by the style shader: the same ternary tree network with a fixed learned memory per tree node in two blocks, a small learned coarse texture and no learned fine texture; its lines and cel shading learned from the film with a perceptual + adversarial objective (GPU engine)">Style</button>
       <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
     </div>
     <form class="say" id="say" hidden>
@@ -109,7 +109,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 } }
 </script>
 <script type="module">
-// The nanotss (Tree-SSM) shader on its own, two engines for the same network. GPU (the default):
+// The nanotss ternary tree shader on its own, two engines for the same network. GPU (the default):
 // three.js draws the G-buffer (colour, normal, depth, UV and part) into render targets and nts-gl.js
 // runs the network in WebGL2 fragment shaders on the same context, then draws the result. CPU (#cpu,
 // or where WebGL2 can't render to float targets): the G-buffer is drawn into a hidden canvas, read
@@ -135,7 +135,7 @@ import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
   girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
-  style: { label: 'Magical Girl Style (SSM)', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true },   // SSM tree blocks: the GPU engine only
+  style: { label: 'Magical Girl Style', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true },   // node-memory blocks (ssm.bin): the GPU engine only
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];

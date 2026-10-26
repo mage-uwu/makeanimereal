@@ -78,8 +78,8 @@ quality. Fresh 4-block models (custom `--dil`) can't warm-start from 8-block fil
 5. **Head**: 64 → RGBA, sigmoid.
 6. **Display**: an edge-aware upscale guided by the geometry, then compositing over the backdrop.
 
-Receptive field: 38 px (8 blocks) or 40 px (4 blocks, dilations 1,3,9,27). There is no recurrence:
-"SSM" in the viewer's name is historical. See `nts/ssm_tree.py` for a real one.
+Receptive field: 38 px (8 blocks) or 40 px (4 blocks, dilations 1,3,9,27). There is no recurrence. The viewer
+was called "Tree-SSM Shader" until it was renamed "Ternary Tree Shader"; see `nts/ssm_tree.py` for a real SSM block.
 
 ## Runtime engines (`coverage/live/`)
 
@@ -157,12 +157,19 @@ the device with `#prof`.
   The model is in the kit (`style/style.ntst` + `.ssm.pt`, 4 blocks with dilations 1,3,9,27 and SSM
   blocks 1,3), with its final held-out grids.
 
-  **In the viewer** (`#style`, the "Style (SSM)" chip, GL engine): `export_ssm.py` writes the SSM
+  **In the viewer** (`#style`, the "Style" chip, GL engine): `export_ssm.py` writes the SSM
   blocks with each node's memory fixed (the mean of the states the training frames wrote; on held-out
   frames this draws within 0.63/255 of the per-frame write). That makes every block per-pixel work for
   `nts-gl.js`. It matches PyTorch on the viewer's own G-buffer within 0.10/255. The true per-frame write
   is a frame-wide reduction: do it in the fused WebGPU engine, ideally as a temporal write (read the
   previous frame's state), which also removes the sync point.
+
+  **Naming, honestly.** With the state frozen, the viewer's style model is not an SSM. It is the
+  ternary tree shader, and in blocks 1 and 3 each tree node holds a fixed learned matrix that the pixel
+  reads bilinearly (`C(x)·H·Z(x)`). In training it is one SSM step per image, with no recurrence over
+  frames or pixels. The tiny frozen-vs-dynamic gap (0.54/255) says the per-frame write carries almost
+  nothing. No style run without these blocks (`--ssm ''`) has been done, so their value is unmeasured.
+  To make it a real SSM, carry the state across consecutive frames (`h_t = dec·h_{t-1} + write_t`).
 
   **v2: more linework and texture, still no neural texture** (now the viewer's `nts-style/`; v1 is in
   `out/style/final/`):

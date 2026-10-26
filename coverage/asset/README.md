@@ -1,7 +1,7 @@
-# A new character for the Tree-SSM shader
+# A new character for the Ternary Tree Shader
 
 The per-asset pathway: one VRM in, a trained nanotss tree shader out, as a character on the
-Tree-SSM page. Everything heavy runs on one RunPod GPU pod (`coverage/pod/`); the renders and the
+Ternary Tree Shader page. Everything heavy runs on one RunPod GPU pod (`coverage/pod/`); the renders and the
 dataset are made locally.
 
 The second character (pixiv's VRoid stock avatar, "bunny", `#bunny` on the page) went through it in

@@ -1,4 +1,4 @@
-// cpu.html (the Tree-SSM page) as one HTML file: every module, the worker, the wasm kernels and the
+// cpu.html (the Ternary Tree Shader page) as one HTML file: every module, the worker, the wasm kernels and the
 // networks' small files (meta.json, net.png) inlined. Only the big binaries stay beside it, at the
 // paths the page already uses: model.vrm.png, motions.json, nts/fine0..2.png, nts-tree/fine0..2.png and
 // each further character's <name>/model.vrm.png and <name>/nts-tree/fine0..2.png (an artifact page is
