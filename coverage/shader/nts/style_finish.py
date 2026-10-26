@@ -15,6 +15,7 @@ RUN holds style.ntst and style.ntst.ssm.pt. Writes:
 """
 import argparse
 import json
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -33,8 +34,13 @@ HERE = Path(__file__).resolve().parent
 
 
 def load(run, P, a, dev):
-    net = Net(a.blocks, P, [int(v) for v in a.dil.split(',')], *map(int, a.tree.split(',')), dev)
-    net.init(0); net.load(str(Path(run) / 'style.ntst'))
+    """RUN's model, drawn at --dil (a model trained at other dilations runs on that grid: --dil 2,6,18,54
+    draws a 1x model on the 2x grid)."""
+    f = str(Path(run) / 'style.ntst')
+    own = list(struct.unpack_from(f'<{a.blocks}i', open(f, 'rb').read(20 + 4 * a.blocks), 20))   # the file's dilations
+    net = Net(a.blocks, P, own, *map(int, a.tree.split(',')), dev)
+    net.init(0); net.load(f)
+    net.DIL = [int(v) for v in a.dil.split(',')]
     ssm = {}
     for b, sd in zip(map(int, a.ssm.split(',')), torch.load(Path(run) / 'style.ntst.ssm.pt', map_location=dev)):
         m = SSMTree(trees=net.T, levels=net.V).to(dev); m.load_state_dict(sd); ssm[b] = m

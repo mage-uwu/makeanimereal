@@ -143,6 +143,7 @@ def main():
     ap.add_argument('--no-tf32', action='store_true', help='the shader in strict float32 (shader_torch.py parity)')
     ap.add_argument('--bench', type=int, default=0, help='time this many steps (after warm-up), print the profile, exit')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--dil-scale', type=int, default=1, help='--load a model trained at --dil, then train it on a grid this many times finer (dilations x k): its frames k times larger')
     ap.add_argument('--compile', action='store_true', help="torch.compile the shader's training forward (fuses its elementwise work)")
     a = ap.parse_args()
     global AMP
@@ -166,6 +167,7 @@ def main():
     for b in map(int, a.ssm.split(',')) if a.ssm else []: shader_torch.SSM[b] = SSMTree(trees=T, levels=V).to(dev)
     if a.load:
         net.load(a.load)
+        net.DIL = [d * a.dil_scale for d in net.DIL]   # (saved so: the viewer reads them from the file)
         for m, sd in zip(shader_torch.SSM.values(), torch.load(a.load + '.ssm.pt', map_location=dev)): m.load_state_dict(sd)
         print(f'from {a.load}', flush=True)
     ssm_params = [p for m in shader_torch.SSM.values() for p in m.parameters()]
