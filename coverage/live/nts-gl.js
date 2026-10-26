@@ -63,6 +63,25 @@ function parseNet(buf) {
   return { NB, NBC, P, DIL, T, V, TN, We, be, blocks, Wh, bh, Wl, bl, lo, st, coarse };
 }
 
+// ssm.bin (export_ssm.py): the SSM tree blocks; their w_in, w_out, scales and node biases take the place
+// of the blocks' trees, the rest goes in block.ssm.
+function parseSSM(buf, net) {
+  const dv = new DataView(buf); let o = 4;
+  if (new TextDecoder().decode(new Uint8Array(buf, 0, 4)) !== 'SSM1') throw new Error('ssm.bin: not SSM1');
+  const i32 = () => { const v = dv.getInt32(o, true); o += 4; return v; };
+  const f32 = n => { const a = new Float32Array(buf.slice(o, o + 4 * n)); o += 4 * n; return a; };
+  const i8 = n => { const a = new Int8Array(buf.slice(o, o + n)); o += n; return a; };
+  const R = net.T * net.TN, PD = 36, NS = 64;
+  for (let s = 0, n = i32(); s < n; s++) {
+    const k = net.blocks[i32()];
+    const pc = i8(PD * DW), ps = f32(PD);
+    k.cin = i8(R * DW); k.sin = f32(R); k.bias = f32(R);
+    k.cout = i8(R * DW); k.sout = f32(R);
+    k.ssm = { slot: s, pc, ps, M0: f32(R * NS), H1: f32(R * NS), uc: i8(DW * net.T * 8), us: f32(DW) };
+  }
+  if (o !== buf.byteLength) throw new Error('ssm.bin has the wrong length');
+}
+
 // The background's value after each block, in JS: infer.c's token() with every neighbour the same.
 function backgroundStates(net, input) {
   const { NB, NBC, We, be, blocks, Wh, bh, Wl, bl } = net, f = Math.fround;
@@ -88,6 +107,24 @@ function backgroundStates(net, input) {
       }
     }
     const q1 = quant(t);
+    if (net.T && k.ssm) {   // an SSM tree block (PASS_TA_SSM, PASS_TB's ssm part), its states fixed
+      const { T, V, TN } = net, S = k.ssm, y = t.map((v, r) => v + k.b2[r]), Racc = new Array(T * 8).fill(0);
+      const proj = r => { let a = 0; for (let i = 0; i < DW; i++) a += q1.c[i] * S.pc[r * DW + i]; return a * S.ps[r] * q1.xs; };
+      const C = [0, 1, 2, 3, 4, 5, 6, 7].map(i => proj(8 + i)), Z = [0, 1, 2, 3, 4, 5, 6, 7].map(i => proj(24 + i));
+      const read = (H, row) => [0, 1, 2, 3, 4, 5, 6, 7].map(v => { let r = 0; for (let n = 0; n < 8; n++) r += C[n] * H[row * 64 + n * 8 + v]; return r; });
+      for (let tr = 0; tr < T; tr++) for (let j = 0, a = 0; j < V; j++) {
+        const row = tr * TN + a; let sum = 0;
+        for (let i = 0; i < DW; i++) sum += q1.c[i] * k.cin[row * DW + i];
+        const sin = sum * k.sin[row] * q1.xs + k.bias[row];
+        const r1 = read(S.M0, row), r2 = read(S.H1, row);
+        const s1 = sin + r1.reduce((acc, r, v) => acc + r * Z[v], 0), s2 = sin + r2.reduce((acc, r, v) => acc + r * Z[v], 0), g = gelu(s2);
+        for (let r = 0; r < DW; r++) y[r] += g * k.cout[row * DW + r] * k.sout[row];
+        for (let v = 0; v < 8; v++) Racc[tr * 8 + v] += r2[v];
+        a = 2 * a + 1 + (s1 > 0 ? 1 : 0);
+      }
+      for (let r = 0; r < DW; r++) { let u = 0; for (let q = 0; q < T * 8; q++) u += Racc[q] * S.uc[r * T * 8 + q]; y[r] += u * S.us[r]; }
+      x = y; states.push(x); continue;
+    }
     if (net.T) {   // the trees (infer.c walk): t + b2 + each visited node's gelu(s) w_out
       const { T, V, TN } = net, y = t.map((v, r) => v + k.b2[r]);
       for (let tr = 0; tr < T; tr++) for (let j = 0, a = 0; j < V; j++) {
@@ -314,7 +351,62 @@ void main() {
   o1 = uvec4(packHalf2x16(vec2(g[0], g[1])), packHalf2x16(vec2(g[2], g[3])), packHalf2x16(vec2(g[4], g[5])), packHalf2x16(vec2(g[6], g[7])));
   o2 = uvec4(packHalf2x16(vec2(g[8], g[9])), packHalf2x16(vec2(g[10], g[11])), packHalf2x16(vec2(g[12], g[13])), packHalf2x16(vec2(g[14], g[15])));
 }`;
-const PASS_TB = (M, T, V, cached) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(M)}
+// SSM tree blocks (style_torch.py / ssm_tree.py; meta.json "ssm"): each visited node has a state h (8 x 8),
+// read here as fixed (export_ssm.py): the walk routes on s = w_in.x + bias + (C . dec h0) . Z, the outputs
+// read the frozen state h1: gelu(w_in.x + bias + (C . h1) . Z) for w_out, and the sum of those reads over a
+// tree's path for U. C and Z (8 each) from the block's ternary projection (Wp's third slot, prow); dec h0,
+// h1 and U from Sf (per block 184 rows of 16 texels: dec h0, then h1, a node a row, n x pv; then U, a
+// channel a row). Out: the visited nodes and their gelus as pass TA, and each tree's sum of reads (8 half
+// floats, a layer a tree, layers 3..6).
+// part: -1 all 3 + T layers in one pass (8 draw buffers); 0 the nodes and gelus, 1 the sums (4 draw buffers: two passes)
+const PASS_TA_SSM = (T, V, TN, cached, part = -1) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(part < 0 ? 3 + T : part === 0 ? 3 : T, 'uvec4')}
+uniform int prow, sbase; uniform highp sampler2D Sf;
+float projRow(vec4 c[16], int k) {   // the projection's row k: int8 codes . ternary, x its scale
+  uvec4 m = texelFetch(Wp, ivec2(0, prow + k), 0);
+  float a = 0.0;
+  for (int kk = 0; kk < 16; kk++) { MP vec4 ck = c[kk], wk = tern(m, kk); a += float(dot(ck, wk)); }
+  return a * uintBitsToFloat(texelFetch(Wp, ivec2(1, prow + k), 0).x);
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
+  if (distAt(p) > needCur) discard;
+  prep(p);
+  vec4 v[16];
+  for (int L = 0; L < 16; L++) v[L] = stencilAt(p, L);
+  float xs = quant(v);
+  float Cc[8];
+  for (int i = 0; i < 8; i++) Cc[i] = projRow(v, 8 + i) * xs;
+  vec4 Za = vec4(projRow(v, 24), projRow(v, 25), projRow(v, 26), projRow(v, 27)) * xs;
+  vec4 Zb = vec4(projRow(v, 28), projRow(v, 29), projRow(v, 30), projRow(v, 31)) * xs;
+  uvec4 nodes = uvec4(0u);
+  float g[16];
+  vec4 RA[${T}], RB_[${T}];
+  for (int tr = 0; tr < ${T}; tr++) {
+    int a = 0;
+    RA[tr] = vec4(0.0); RB_[tr] = vec4(0.0);
+    for (int j = 0; j < ${V}; j++) {
+      int row = tr * ${TN} + a;
+      vec2 sb = rowScale(row);
+      float sin_ = rowdotT(v, rowBits(row), row) * sb.x * xs + sb.y;
+      vec4 r1a = vec4(0.0), r1b = vec4(0.0), r2a = vec4(0.0), r2b = vec4(0.0);
+      for (int n = 0; n < 8; n++) {
+        r1a += Cc[n] * texelFetch(Sf, ivec2(2 * n, sbase + row), 0); r1b += Cc[n] * texelFetch(Sf, ivec2(2 * n + 1, sbase + row), 0);
+        r2a += Cc[n] * texelFetch(Sf, ivec2(2 * n, sbase + ${T * TN} + row), 0); r2b += Cc[n] * texelFetch(Sf, ivec2(2 * n + 1, sbase + ${T * TN} + row), 0);
+      }
+      float s1 = sin_ + dot(r1a, Za) + dot(r1b, Zb), s2 = sin_ + dot(r2a, Za) + dot(r2b, Zb);
+      g[tr * ${V} + j] = gelu(s2);
+      nodes[tr] |= uint(row) << (8u * uint(j));
+      RA[tr] += r2a; RB_[tr] += r2b;
+      a = 2 * a + 1 + (s1 > 0.0 ? 1 : 0);
+    }
+  }
+  ${part === 1 ? '' : `o0 = nodes;
+  o1 = uvec4(packHalf2x16(vec2(g[0], g[1])), packHalf2x16(vec2(g[2], g[3])), packHalf2x16(vec2(g[4], g[5])), packHalf2x16(vec2(g[6], g[7])));
+  o2 = uvec4(packHalf2x16(vec2(g[8], g[9])), packHalf2x16(vec2(g[10], g[11])), packHalf2x16(vec2(g[12], g[13])), packHalf2x16(vec2(g[14], g[15])));`}
+  ${part === 0 ? '' : Array.from({ length: T }, (_, t) => `o${(part < 0 ? 3 : 0) + t} = uvec4(packHalf2x16(RA[${t}].xy), packHalf2x16(RA[${t}].zw), packHalf2x16(RB_[${t}].xy), packHalf2x16(RB_[${t}].zw));`).join(' ')}
+}`;
+const PASS_TB = (M, T, V, cached, ssm = false) => HEAD + BLOCK_COMMON + STENCIL_IN(cached) + `${outs(M)}${ssm ? `
+uniform int sbase; uniform highp sampler2D Sf;` : ''}
 uniform highp usampler2DArray C; uniform int hf;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) + org;   // drawn into the strip
@@ -334,7 +426,18 @@ void main() {
     uvec4 m = rowBits(row);
     MP float gs = RB(vec4(g[tr * ${V} + k] * RB(vec4(rowScale(row).x)).x)).x;
     for (int j = 0; j < ${M}; j++) y[j] = RB(gs * TERN(m, row, ${M} * hf + j) + y[j]);
+  }${ssm ? `
+  // SSM: + U . (each tree's sum of reads), U a channel a row of Sf after the states
+  vec4 Rs[${2 * T}];
+  for (int tr = 0; tr < ${T}; tr++) {
+    uvec4 u = texelFetch(C, ivec3(p - org, 3 + tr), 0);
+    Rs[2 * tr] = vec4(unpackHalf2x16(u.x), unpackHalf2x16(u.y)); Rs[2 * tr + 1] = vec4(unpackHalf2x16(u.z), unpackHalf2x16(u.w));
   }
+  for (int j = 0; j < ${M}; j++) for (int e = 0; e < 4; e++) {
+    int ch = 4 * (${M} * hf + j) + e; float a = 0.0;
+    for (int kk = 0; kk < ${2 * T}; kk++) a += dot(Rs[kk], texelFetch(Sf, ivec2(kk, sbase + ${2 * T * ((1 << V) - 1)} + ch), 0));
+    y[j][e] += a;
+  }` : ''}
   ${Array.from({ length: M }, (_, j) => `o${j} = y[${j}];`).join(' ')}
 }`;
 // The tiles: colour (sRGB texture, read back to its bytes), normal, depth, uv-a, uv-b.
@@ -546,6 +649,9 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     ...[0, 1, 2].map(k => loadImage(`${base}fine${k}.png`))]);
   const net = parseNet(unpackNet(netImg));
   const { NB, NBC, P, DIL } = net;
+  if (meta.ssm) parseSSM(await (await fetch(base + 'ssm.bin')).arrayBuffer(), net);
+  const SSM = net.blocks.filter(k => k.ssm);
+
 
   // ---- programs ----
   const defs = (packed ? '' : '#define UNPACKED\n') + { half: '#define HALF\n', emulate: '#define HALF_EMU\n', emulateS: '#define HALF_EMU_S\n', emulateB: '#define HALF_EMU_B\n', full: '' }[precision];
@@ -566,6 +672,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     return { p, u, blocks };
   }
   const prog = { TS: net.T && cacheStencil ? program(PASS_TS(M)) : null, TA: net.T ? program(PASS_TA(net.T, net.V, net.TN, cacheStencil)) : null, TB: net.T ? program(PASS_TB(M, net.T, net.V, cacheStencil)) : null,
+    TAs: SSM.length && M >= 8 ? program(PASS_TA_SSM(net.T, net.V, net.TN, cacheStencil)) : null,
+    TAs0: SSM.length && M < 8 ? program(PASS_TA_SSM(net.T, net.V, net.TN, cacheStencil, 0)) : null, TAs1: SSM.length && M < 8 ? program(PASS_TA_SSM(net.T, net.V, net.TN, cacheStencil, 1)) : null, TBs: SSM.length ? program(PASS_TB(M, net.T, net.V, cacheStencil, true)) : null,
     A: program(PASS_A(false, M)), A2: M < 5 ? program(PASS_A(true, M)) : null, B: program(PASS_B(M)), embed: program(EMBED(M)), diff: program(DIFF), distH: program(DIST_H), distV: program(DIST_V), head: program(HEAD_PASS), ink: program(INK_PASS), show: program(SHOW) };
 
   // ---- textures ----
@@ -594,7 +702,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   for (let p = 0; p < P; p++) for (let y = 0; y < COARSE; y++) for (let x = 0; x < COARSE; x++) for (let c = 0; c < 8; c++)
     cdata[c >> 2][((y * cw) + p * COARSE + x) * 4 + (c & 3)] = net.coarse[((p * COARSE + y) * COARSE + x) * 8 + c];
   const coarse = cdata.map(d => tex2d(cw, COARSE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, d));
-  const X = array(16, gl.RGBA16F), Y = array(16, gl.RGBA16F), Cq = array(5, gl.RGBA32UI), St = net.T && cacheStencil ? array(16, gl.RGBA16F) : null;
+  const X = array(16, gl.RGBA16F), Y = array(16, gl.RGBA16F), Cq = array(SSM.length ? 3 + net.T : 5, gl.RGBA32UI), St = net.T && cacheStencil ? array(16, gl.RGBA16F) : null;
   const diffT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), hT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE), distT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE);
   const outT = tex2d(NW, NH, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, null, gl.LINEAR), inkT = tex2d(NW, NH, gl.R8, gl.RED, gl.UNSIGNED_BYTE, null, gl.LINEAR);
   function fbo(target, first = 0, m = 1) {
@@ -643,11 +751,12 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   const blkBuf = ubo(blkData), wtBuf = ubo(wtData);
   // the same weights as a texture for the trees: 16 texels (64 floats) a row, each matrix 64 rows (WT bytes)
   // the same, packed for the shaders (rowBits, rowScale): per matrix 64 rows of 2 RGBA32UI texels
-  const wp = new Uint32Array(2 * NB * 64 * 8), wpf = new Float32Array(wp.buffer);
+  const wp = new Uint32Array(3 * NB * 64 * 8), wpf = new Float32Array(wp.buffer);
   if (net.T) net.blocks.forEach((k, b) => {
-    for (const [m, codes, scale, bias] of [[0, k.cin, k.sin, k.bias], [1, k.cout, k.sout, null]]) {
-      for (let r = 0; r < net.T * net.TN; r++) {
-        const o = ((2 * b + m) * 64 + r) * 8;
+    // (an SSM block: its projection's 36 rows in a third slot)
+    for (const [m, codes, scale, bias] of [[0, k.cin, k.sin, k.bias], [1, k.cout, k.sout, null], ...(k.ssm ? [[2, k.ssm.pc, k.ssm.ps, null]] : [])]) {
+      for (let r = 0; r < codes.length / DW; r++) {
+        const o = ((3 * b + m) * 64 + r) * 8;
         for (let i = 0; i < DW; i++) {
           const c = codes[r * DW + i], w = i >> 5, bit = (1 << (i & 31)) >>> 0;
           if (c > 0) wp[o + w] |= bit; else if (c < 0) wp[o + 2 + w] |= bit;
@@ -656,11 +765,19 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
       }
     }
   });
-  const wTex = tex2d(2, 2 * NB * 64, gl.RGBA32UI, gl.RGBA_INTEGER, gl.UNSIGNED_INT, wp);
+  const wTex = tex2d(2, 3 * NB * 64, gl.RGBA32UI, gl.RGBA_INTEGER, gl.UNSIGNED_INT, wp);
+  // the SSM blocks' fixed states and U (PASS_TA_SSM): per block 184 rows of 16 RGBA32F texels
+  const SR = 2 * net.T * net.TN + DW, sf = new Float32Array(Math.max(1, SSM.length) * SR * 64);
+  for (const k of SSM) {
+    const o = k.ssm.slot * SR * 64, R = net.T * net.TN, Q = net.T * 8;
+    sf.set(k.ssm.M0, o); sf.set(k.ssm.H1, o + R * 64);
+    for (let ch = 0; ch < DW; ch++) for (let q = 0; q < Q; q++) sf[o + 2 * R * 64 + ch * 64 + q] = k.ssm.uc[ch * Q + q] * k.ssm.us[ch];
+  }
+  const sfTex = SSM.length ? tex2d(16, SSM.length * SR, gl.RGBA32F, gl.RGBA, gl.FLOAT, sf) : null;
   // (#unpacked) the rows as floats: w_in codes, w_out codes (x 1: the scale is applied as packed)
-  const wf = new Float32Array(2 * NB * 64 * 64);
-  if (net.T && !packed) net.blocks.forEach((k, b) => [k.cin, k.cout].forEach((c, m) => wf.set(Float32Array.from(c), (2 * b + m) * 64 * 64)));
-  const wfTex = packed ? null : tex2d(16, 2 * NB * 64, gl.RGBA32F, gl.RGBA, gl.FLOAT, wf);
+  const wf = new Float32Array(3 * NB * 64 * 64);
+  if (net.T && !packed) net.blocks.forEach((k, b) => [k.cin, k.cout].forEach((c, m) => wf.set(Float32Array.from(c), (3 * b + m) * 64 * 64)));
+  const wfTex = packed ? null : tex2d(16, 3 * NB * 64, gl.RGBA32F, gl.RGBA, gl.FLOAT, wf);
   const emb = new Float32Array(312 * 4);
   for (let i = 0; i < CIN; i++) for (let j = 0; j < DW; j++) emb[i * DW + j] = net.We[j * CIN + i];
   emb.set(net.be, 288 * 4); emb.set(net.lo.subarray(0, 8), 304 * 4); emb.set(net.lo.subarray(8, 16), 306 * 4);
@@ -792,13 +909,18 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
         };
         gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b) * WT, WT);
         if (net.T) {   // trees: the walk, then the visited nodes' outputs
-          const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wp); if (wfTex) bindTex(5, gl.TEXTURE_2D, wfTex, null, u.Wf); gl.uniform1i(u.wrow, (2 * b + m) * 64); };
+          const wt = (u, m) => { bindTex(3, gl.TEXTURE_2D, wTex, null, u.Wp); if (wfTex) bindTex(5, gl.TEXTURE_2D, wfTex, null, u.Wf); gl.uniform1i(u.wrow, (3 * b + m) * 64); };
           const st = u => St && bindTex(4, gl.TEXTURE_2D_ARRAY, St.tex, null, u.St);
           if (St) for (let h = 0; h < 16 / M; h++) pass(prog.TS, St, M * h, M, u => { common(u); gl.uniform1i(u.hf, h); });
-          pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); st(u); });
+          const ks = net.blocks[b].ssm;
+          const sfu = u => { bindTex(6, gl.TEXTURE_2D, sfTex, null, u.Sf); gl.uniform1i(u.sbase, ks.slot * SR); };
+          const sa = u => { common(u); wt(u, 0); st(u); sfu(u); gl.uniform1i(u.prow, (3 * b + 2) * 64); };
+          if (ks && M >= 8) pass(prog.TAs, Cq, 0, 3 + net.T, sa);
+          else if (ks) { pass(prog.TAs0, Cq, 0, 3, sa); pass(prog.TAs1, Cq, 3, net.T, sa); }   // 4 draw buffers: the walk twice
+          else pass(prog.TA, Cq, 0, 3, u => { common(u); wt(u, 0); st(u); });
           mark(`block ${b} A: stencil, tree walk`);   // (the stencil pass counted in A)
           gl.bindBufferRange(gl.UNIFORM_BUFFER, 1, wtBuf, (2 * b + 1) * WT, WT);
-          for (let h = 0; h < 16 / M; h++) pass(prog.TB, y, M * h, M, u => { common(u); wt(u, 1); st(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); });
+          for (let h = 0; h < 16 / M; h++) pass(ks ? prog.TBs : prog.TB, y, M * h, M, u => { common(u); wt(u, 1); st(u); bindTex(2, gl.TEXTURE_2D_ARRAY, Cq.tex, null, u.C); gl.uniform1i(u.hf, h); if (ks) sfu(u); });
           mark(`block ${b} B: tree outputs, residual`);
         } else {
           if (M >= 5) pass(prog.A, Cq, 0, 5, common);

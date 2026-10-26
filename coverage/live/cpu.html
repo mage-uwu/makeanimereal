@@ -90,6 +90,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <span class="sep"></span>
       <button id="c-girl" aria-pressed="false" title="The magical girl (the first character)">Magical Girl</button>
       <button id="c-girlhd" aria-pressed="false" title="The magical girl trained at twice the resolution (720 x 1280): finer lines and detail, four times the work a frame">Magical Girl HD</button>
+      <button id="c-style" aria-pressed="false" title="The magical girl drawn by the SSM style shader: no learned texture, its lines and cel shading learned from the film with a perceptual + adversarial objective (GPU engine)">Style (SSM)</button>
       <button id="c-bunny" aria-pressed="false" title="The bunny girl (pixiv VRoid stock avatar), trained by the per-asset pipeline">Bunny</button>
     </div>
     <form class="say" id="say" hidden>
@@ -134,6 +135,7 @@ import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
   girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
+  style: { label: 'Magical Girl Style (SSM)', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true },   // SSM tree blocks: the GPU engine only
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
 };
 const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
@@ -704,10 +706,11 @@ window.debugGpu = (yaw, pitch, poseName = 'stand', t = 0) => {
 
 try {
   let parts;
+  if (CH.gpuOnly && ENGINE !== 'gpu') { location.hash = engineHash('gpu'); location.reload(); throw new Error('this character runs on the GPU engine'); }
   if (ENGINE === 'gpu') {
     try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
-    catch (e) { console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
+    catch (e) { if (CH.gpuOnly) throw e; console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
     if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
       throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');

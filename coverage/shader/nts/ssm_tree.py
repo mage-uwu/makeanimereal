@@ -42,6 +42,9 @@ class SSMTree(torch.nn.Module):
         self.dt_bias = torch.nn.Parameter(torch.full((trees,), -1.0))
         self.U = torch.nn.Parameter(r(d, trees * pv) * 0.02)
         self.h0 = torch.nn.Parameter(torch.zeros(R, n, pv))
+        # frozen: a fixed state for step 3 (R, n, pv) instead of this image's write (a viewer without the
+        # frame-wide sum); last_h1: the states the last call wrote, per image (S, R, n, pv)
+        self.frozen, self.last_h1 = None, None
 
     def forward(self, tt, xq, sample, S):
         """tt: (N, d) the stencil's output (the residual), xq: (N, d) its int8 codes x scale (quant8),
@@ -70,6 +73,8 @@ class SSMTree(torch.nn.Module):
         tot = torch.zeros(S * R_, n * pv, device=tt.device).index_add_(0, key, w)
         cnt = torch.zeros(S * R_, device=tt.device).index_add_(0, key, torch.ones_like(key, dtype=tt.dtype))
         h1 = (self.h0 * dec[:, None, None]).repeat(S, 1, 1).view(S * R_, n * pv) + tot / cnt.clamp(min=1)[:, None]
+        self.last_h1 = h1.detach().view(S, R_, n, pv)
+        if self.frozen is not None: h1 = self.frozen.reshape(1, R_, n * pv).expand(S, -1, -1).reshape(S * R_, n * pv)
         # 3: the same path, reading the new state
         hs = h1[key].view(N, T, V, n, pv)
         R2 = torch.einsum('pn,ptjnv->ptjv', Cq, hs)                          # (N, T, V, pv)

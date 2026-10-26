@@ -46,6 +46,7 @@ const nets = readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory
   .flatMap(d => [`${d.name}/`, `${d.name}/nts-tree/`]).filter(isNet);
 for (const net of nets) {
   for (const f of ['meta.json', 'net.png', 'infer.wasm', 'infer-dot.wasm', 'infer-relaxed.wasm', 'infer-relaxed-dot.wasm']) files[net + f] = read(net + f);
+  if (existsSync(path.join(dir, net, 'ssm.bin'))) files[net + 'ssm.bin'] = read(net + 'ssm.bin');   // SSM tree blocks (export_ssm.py)
 }
 const types = { '.json': 'application/json', '.png': 'image/png', '.wasm': 'application/wasm' };
 const blobs = {}, seen = new Map();
