@@ -163,6 +163,34 @@ the device with `#prof`.
   `nts-gl.js`. It matches PyTorch on the viewer's own G-buffer within 0.10/255. The true per-frame write
   is a frame-wide reduction: do it in the fused WebGPU engine, ideally as a temporal write (read the
   previous frame's state), which also removes the sync point.
+
+  **v2: more linework and texture, still no neural texture** (now the viewer's `nts-style/`; v1 is in
+  `out/style/final/`):
+  ```
+  style_torch.py --data film.npz --ssm 1,3 --seconds 5400 --batch 6 --crop 256 --load v1/style.ntst \
+    --coarse-tex --lines 5 --adv 0.15 --adv-from 300
+  ```
+  Warm start from v1, 90 min, 5,600 steps on an RTX PRO 6000.
+  - `--coarse-tex`: learns only the 64² coarse texture level (8 channels per part); the fine level stays
+    the fixed part code + UV. It adds ~0.4 MB to `net.png` (0.43 MB in all, against v1's 23 KB).
+  - `--lines 5`: an edge loss on max-pooled luma gradients, tolerant of a few pixels of misplacement.
+
+  Held-out results:
+
+  | | lines | colour anchor | perceptual |
+  |---|---|---|---|
+  | v1 | 0.0225 | 0.0111 | 0.646 |
+  | v2 | 0.0204 | 0.0096 | 0.659 |
+
+  - Front views (seen in training) gain strand lines through the bangs and crown, the film's cheek
+    blush, and heavier jaw ink.
+  - Mid-run (step 2,000) it drifted to lavender hair and yellow skin; this was gone by the end.
+  - Still missing: the film's large glossy eyes and the hair's shine bands. That is fine detail a
+    fixed fine texture can't place.
+  - The frozen state is within 0.54/255 of the per-frame write. GL matches PyTorch within 0.12/255.
+  - The run's scripts: `frozen_pod.py`, which writes the frozen state and the v1/v2/target strips,
+    and `face_pod.py` (face crops). Both are in the session scratchpad and simple to redo from
+    `frozen_test.py`'s logic.
 - **Free-drawn keyframes:** `edit_images.py` with a "draw it as an anime artist would, not a trace"
   prompt and no keying. 115 of a planned 300 were drawn for the magical girl. They clearly redraw eyes,
   face and hair beyond the 3D silhouette. They are kept in the session's `out/style/keys.tar`, which is not in the kit;
