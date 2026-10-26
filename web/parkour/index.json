@@ -1,0 +1,17 @@
+{
+ "clips": [
+  "climb",
+  "vault",
+  "drop",
+  "traverse",
+  "gap-jump"
+ ],
+ "labels": {
+  "climb": "Climb",
+  "vault": "Vault",
+  "drop": "Drop",
+  "traverse": "Traverse",
+  "gap-jump": "Gap jump"
+ },
+ "credit": "Motion and terrain: PARC dataset (Xu, Shi, Yin, Peng 2025; huggingface.co/datasets/mxucg/PARC, MIT License)"
+}

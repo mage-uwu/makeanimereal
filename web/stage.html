@@ -54,8 +54,9 @@ body {
 #credit span { font-size: 12px; color: var(--ink-soft); }
 #poses { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; }
 #poses button, #arms button { flex: none; }
-#arms { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; align-items: center; }
-#arms .label { font-size: 12px; font-weight: 700; color: var(--ink-soft); padding: 0 6px 0 10px; flex: none; }
+#arms, #parkour { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; align-items: center; }
+#parkour button { flex: none; }
+#arms .label, #parkour .label { font-size: 12px; font-weight: 700; color: var(--ink-soft); padding: 0 6px 0 10px; flex: none; }
 
 .group { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line); backdrop-filter: blur(10px); flex-wrap: wrap; }
 button {
@@ -104,6 +105,9 @@ body.dragging #empty .card { border-color: var(--accent); }
     <span class="label">Arms</span>
     <button type="button" data-arms="same" aria-pressed="true">Same</button>
   </div>
+  <div class="group" id="parkour" aria-label="Parkour" hidden>
+    <span class="label">Parkour</span>
+  </div>
   <div class="group" id="faces" aria-label="Expression"></div>
   <div class="group">
     <button type="button" id="spin" aria-pressed="true">Turntable</button>
@@ -117,7 +121,8 @@ body.dragging #empty .card { border-color: var(--accent); }
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
-  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js",
+  "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.5/lib/three-vrm-animation.module.min.js"
 } }
 </script>
 <script type="module">
@@ -135,6 +140,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { createVrmanet } from './vrmanet.js';
 
 // The experts' button labels, in this order.
@@ -298,11 +304,84 @@ async function load(src, label) {
 
 function setPose(p) {
   const fresh = !pose.startsWith('clip:') || !active.size;
+  if (pose.startsWith('parc:') && p !== pose) stopParkour();
   pose = p;
-  for (const b of $('poses').children) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
+  for (const b of document.querySelectorAll('[data-pose]')) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
   $('motion-credit').hidden = !p.startsWith('clip:') || !net;
   if (p.startsWith('clip:')) drive(fresh);
   else active = new Set();
+  if (p.startsWith('parc:')) startParkour(p.slice(5));
+}
+
+// Parkour previews: PARC dataset motions as VRMA clips that travel over their own terrain
+// (parkour/<name>.vrma and .json, listed in parkour/index.json; made by parkour/export.py).
+const pk = { mixer: null, terrain: null, credit: '' };
+const vrmaLoader = new GLTFLoader();
+vrmaLoader.register(parser => new VRMAnimationLoaderPlugin(parser));
+const loadVrma = url => vrmaLoader.loadAsync(url).catch(async () => vrmaLoader.parseAsync(await unpackPng(`${url}.png`), ''));
+fetch('parkour/index.json').then(r => (r.ok ? r.json() : null)).then(ix => {
+  if (!ix) return;
+  pk.credit = ix.credit;
+  for (const name of ix.clips) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.pose = `parc:${name}`; b.textContent = ix.labels?.[name] || name; b.setAttribute('aria-pressed', 'false');
+    $('parkour').append(b);
+  }
+  $('parkour').hidden = !ix.clips.length;
+}).catch(() => {});
+
+async function startParkour(name) {
+  const [gltf, ground] = await Promise.all([loadVrma(`parkour/${name}.vrma`), fetch(`parkour/${name}.json`).then(r => r.json())]);
+  if (pose !== `parc:${name}` || !vrm) return;
+  stopParkour();
+  const anim = gltf.userData.vrmAnimations[0];
+  const clip = createVRMAnimationClip(anim, vrm);
+  pk.mixer = new THREE.AnimationMixer(vrm.scene);
+  pk.mixer.clipAction(clip).play();
+  // Watch from the side of her path, pulled back: where she starts, and the way she goes.
+  const hipsAt = t => { pk.mixer.setTime(t); vrm.scene.updateMatrixWorld(true); return vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3()); };
+  const end = hipsAt(clip.duration * 0.999), start = hipsAt(0);
+  const along = end.clone().sub(start).setY(0);
+  const side = along.lengthSq() > 1e-4 ? new THREE.Vector3(along.z, 0, -along.x).normalize() : new THREE.Vector3(1, 0, 0);
+  controls.target.copy(start);
+  camera.position.copy(start).addScaledVector(side, 5.5).add(new THREE.Vector3(0, 1.6, 0)).addScaledVector(along.normalize(), -1.5);
+  controls.update();
+  // The player scales the hips' path by hip height; the terrain gets the same scale.
+  const s = vrm.humanoid.normalizedRestPose.hips.position[1] / anim.restHipsPosition.y;
+  pk.terrain = buildTerrain(ground, s);
+  scene.add(pk.terrain);
+  floor.visible = false;
+  controls.autoRotate = false;
+  $('spin').setAttribute('aria-pressed', 'false');
+  $('motion-credit').textContent = pk.credit.replace(/ \(.*$/, '');
+  $('motion-credit').hidden = false;
+}
+
+function stopParkour() {
+  pk.mixer?.stopAllAction();
+  pk.mixer = null;
+  if (pk.terrain) { scene.remove(pk.terrain); pk.terrain.geometry.dispose(); pk.terrain.material.dispose(); pk.terrain = null; }
+  floor.visible = true;
+  vrm?.humanoid.resetNormalizedPose();
+  resetView();
+}
+
+// The heightfield as stone columns, one per sample (heights[i][j] at x = x0 + j cell, z = z0 + i cell).
+function buildTerrain({ heights, x0, z0, cell }, s) {
+  const rows = heights.length, cols = heights[0].length, all = heights.flat();
+  const lo = Math.min(...all), hi = Math.max(...all), base = (lo - 0.3) * s;
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ emissive: '#5f5660' }), rows * cols);
+  // The stage has one key light and no ambient (MToon's own shade colours fill her); the stone glows a
+  // little so faces turned from the light read as shade, not as holes.
+  const m = new THREE.Matrix4(), c = new THREE.Color(), low = new THREE.Color('#b9adb6'), high = new THREE.Color('#efe6ea');
+  let k = 0;
+  for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+    const top = heights[i][j] * s, h = Math.max(top - base, 0.01);
+    m.makeScale(cell * s * 0.985, h, cell * s * 0.985).setPosition((x0 + j * cell) * s, base + h / 2, (z0 + i * cell) * s);
+    mesh.setMatrixAt(k, m);
+    mesh.setColorAt(k++, c.copy(low).lerp(high, hi > lo ? (heights[i][j] - lo) / (hi - lo) : 1));
+  }
+  return mesh;
 }
 
 // Point the network at the chosen experts: the pressed move for the body, the Arms row's for the
@@ -361,7 +440,16 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 20), t = clock.elapsedTime;
   if (vrm) {
-    if (!pose.startsWith('clip:')) applyPose(t);
+    if (pose.startsWith('parc:')) {
+      if (pk.mixer) {
+        pk.mixer.update(dt);
+        // Follow her: the camera keeps its offset from a target that eases toward her hips.
+        const hips = vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3());
+        const move = hips.sub(controls.target).multiplyScalar(Math.min(1, dt * 4));
+        controls.target.add(move);
+        camera.position.add(move);
+      }
+    } else if (!pose.startsWith('clip:')) applyPose(t);
     else if (net) { net.step(dt); vrm.humanoid.resetNormalizedPose(); net.apply(vrm); }
     blink(t);
     vrm.update(dt);
@@ -373,6 +461,7 @@ renderer.setAnimationLoop(() => {
 });
 
 $('poses').addEventListener('click', e => { const p = e.target.dataset?.pose; if (p && vrm) setPose(p); });
+$('parkour').addEventListener('click', e => { const p = e.target.dataset?.pose; if (p && vrm) setPose(p); });
 $('faces').addEventListener('click', e => { const f = e.target.dataset?.face; if (f && vrm) setFace(f); });
 $('arms').addEventListener('click', e => {
   const a = e.target.dataset?.arms;
