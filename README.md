@@ -39,23 +39,31 @@ skirt, an idle sway, blinking, and buttons for pose (stand, wave, T-pose) and ex
 `web/stock.vrm.png` (a VRM packed by `coverage/live/slim_vrm.py`), else
 `out/stock/stock_avatar.vrm` if you put one there, else waits for a dropped or chosen `.vrm`.
 
-### Moves (motion capture)
+### Moves (VRM Animation)
 
-The stage's moves are 11 clips from the [CMU Graphics Lab Motion Capture Database](http://mocap.cs.cmu.edu/)
-(free for all uses, including in commercial products; the raw data may not be resold), retargeted
-into `web/motions-cmu.json` by `coverage/motion/retarget_bvh.py`, which reads CMU's `.asf`/`.amc`
-files as well as BVH. To rebuild or add clips (subject `NN`, trial `NN_TT` from the CMU site):
+The stage's moves are standard [VRM Animation](https://vrm.dev/en/vrma/) files, `web/moves/*.vrma`
+(glTF with `VRMC_vrm_animation` 1.0), played by `@pixiv/three-vrm-animation`. They also work in
+UniVRM, VRoid Hub and anything else that reads VRMA. Each file is one seamless loop.
+
+They are 11 clips from the [CMU Graphics Lab Motion Capture Database](http://mocap.cs.cmu.edu/)
+(free for all uses, including in commercial products; the raw data may not be resold), made in
+two steps:
 
 ```sh
+# 1. retarget: CMU .asf/.amc (or BVH) -> bone directions per frame, assets/motions/cmu.json
 mkdir -p cmu && cd cmu && curl -O http://mocap.cs.cmu.edu/subjects/91/91.asf -O http://mocap.cs.cmu.edu/subjects/91/91_29.amc && cd ..
-python3 coverage/motion/retarget_bvh.py cmu --out web/motions-cmu.json --face-front \
+python3 coverage/motion/retarget_bvh.py cmu --out assets/motions/cmu.json --face-front \
   --credit "Motion: CMU Graphics Lab Motion Capture Database (mocap.cs.cmu.edu), created with funding from NSF EIA-0196217" \
-  --clip walk=91.asf:91_29.amc --clip wave=141.asf:141_16.amc ...   # see the clip list in web/motions-cmu.json
+  --clip walk=91.asf:91_29.amc --clip wave=141.asf:141_16.amc ...   # each clip's source is listed in the JSON
+
+# 2. bake: pose a generic VRoid-proportioned T-pose rig with coverage/live/motion.js -> web/moves/<clip>.vrma
+node scripts/bake-vrma.mjs --motions assets/motions/cmu.json --out web/moves
 ```
 
 `--face-front` takes out slow turning as well as travel, so clips that walk loops round the room
-play facing the front. The coverage clips in `coverage/live/motions.json` are from the Bandai Namco
-Research Motion Dataset, which is CC BY-NC 4.0: non-commercial only.
+play facing the front. The credit line goes into each file's glTF `asset.copyright`. The coverage
+clips in `coverage/live/motions.json` are from the Bandai Namco Research Motion Dataset, which is
+CC BY-NC 4.0: non-commercial only.
 
 ## Web viewer (anime key drawings you can orbit freely)
 

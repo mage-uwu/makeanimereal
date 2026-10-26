@@ -17,6 +17,7 @@
   "homepage": "https://github.com/mage-uwu/makeanimereal#readme",
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
+    "@pixiv/three-vrm-animation": "^3.5.5",
     "playwright-core": "^1.56.1",
     "three": "^0.170.0"
   },
