@@ -71,6 +71,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button data-pose="stand" aria-pressed="true">Stand</button>
       <span class="sep" id="clip-end"></span>
       <button id="v-bg" aria-pressed="false" title="An anime backdrop and ground: off, a pastel day, or an idol stage at night">Backdrop: Off</button>
+      <button id="v-blend" aria-pressed="false" title="Blend the plain VRoid render over the neural drawing: 0, 25, 50 or 75% VRoid">VRoid: 0%</button>
       <button id="v-sword" aria-pressed="false" title="Her longsword, in her right hand (Slash draws it)">Sword</button>
       <button id="v-follow" aria-pressed="false" title="Her head and eyes follow your pointer or finger">Follow</button>
       <button id="v-mic" aria-pressed="false" title="Lip-sync to your microphone">Mic</button>
@@ -346,6 +347,7 @@ const net = document.createElement('canvas');
 net.width = NW; net.height = NH;
 const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
+let blend = 0;   // the VRoid render's share in the blend (v-blend)
 let fps = 0, lastShown = 0, raw = false, lines = 'off', sharp = !location.hash.includes('nosharp');   // line art (both off for now); the edge-aware upscale: 'toon' (toon.js), 'neural' (the ink branch), 'off'
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
@@ -365,8 +367,8 @@ function glView(extra = {}) {
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
   // Raw 3D: three.js at the canvas's resolution, not the network's colour tile stretched
-  const rawTex = raw && rawView ? rawView.render(scene, camera, fb) : null;
-  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, rawTex, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
+  const rawTex = (raw || blend > 0) && rawView ? rawView.render(scene, camera, fb) : null;
+  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, rawTex, blend, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
 }
 // The backdrop (backdrop.js): 0 off (the stage gradient), 1 a pastel day, 2 an idol stage; under her hips, on the floor.
 const BACKDROPS = ['Off', 'Sky', 'Stage'];
@@ -599,6 +601,10 @@ document.getElementById('m-lines').onclick = e => {
   lines = modes[(modes.indexOf(lines) + 1) % modes.length];
   e.currentTarget.textContent = `Lines: ${{ toon: 'Toon', neural: 'Neural', off: 'Off' }[lines]}`;
   e.currentTarget.setAttribute('aria-pressed', String(lines !== 'off')); dirty = true;
+};
+document.getElementById('v-blend').onclick = e => {
+  blend = (blend + 0.25) % 1;
+  e.currentTarget.textContent = `VRoid: ${Math.round(blend * 100)}%`; e.currentTarget.setAttribute('aria-pressed', String(blend > 0)); dirty = true;
 };
 document.getElementById('m-raw').onclick = e => { raw = !raw; e.currentTarget.setAttribute('aria-pressed', String(raw)); dirty = true; };
 document.getElementById('v-follow').onclick = e => {

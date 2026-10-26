@@ -553,6 +553,7 @@ ${BACKDROP_GLSL}
 uniform vec3 toonP;   // near, far, line width (canvas pixels)
 uniform sampler2D G, T1, T2, T4; uniform int sharp; uniform vec2 lowRes;
 uniform sampler2D RAW;   // raw == 2: Raw 3D at the canvas's resolution (guide.js createRawView), premultiplied
+uniform float blendK;    // the VRoid render (RAW) mixed over the drawing: 0 none .. 1 all
 out vec4 o;
 // The edge-aware upscale (joint bilateral): the drawing is the network's resolution, guide.js's G is
 // her geometry at the canvas's. A canvas pixel takes the drawing's pixels around it (4 x 4) weighted by
@@ -632,6 +633,10 @@ void main() {
   if (sharp == 1) d = upscale(uv, d);
   float k = ink == 1 ? texture(K, uv).r : 0.0;   // ink over the colour: alpha a + k (1 - a), colour scaled by (1 - k)
   d = vec4(d.rgb * (1.0 - k), d.a + k * (1.0 - d.a));
+  if (blendK > 0.0) {   // the blend: the VRoid render's own shading mixed with the drawing (both premultiplied, sRGB)
+    vec4 c = texelFetch(RAW, ivec2(gl_FragCoord.xy), 0);
+    d = mix(d, c.a < 0.004 ? vec4(0.0) : vec4(toSrgb(c.rgb / c.a) * c.a, c.a), blendK);
+  }
   o = toonOver(vec4(bg * (1.0 - d.a) + d.rgb, 1.0));
 }`;
 
@@ -841,7 +846,7 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), toon
   // (toon.js's render: contour mask and depth, or null), guide (guide.js's texture: the edge-aware
   // upscale; null: bilinear), rawTex (guide.js createRawView's render: Raw 3D at the canvas's resolution;
-  // null: the colour tile), showOnly (the last drawing again, e.g. zoomed) }.
+  // null: the colour tile), blend (0..1: rawTex mixed over the drawing), showOnly (the last drawing again, e.g. zoomed) }.
   // Profiling (cpu.html #prof): each stage ends by reading back one pixel of a private 1 x 1 target,
   // which can't return before every command before it has run (gl.finish() can, in some browsers),
   // timed on the CPU clock. That works on any device (iPhones have no GPU timer queries); the stalls
@@ -964,7 +969,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, tileTex(0), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? (view.rawTex ? 2 : 1) : 0);
-    if (view.rawTex) bindTex(9, gl.TEXTURE_2D, view.rawTex, null, s.u.RAW); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
+    if (view.rawTex) bindTex(9, gl.TEXTURE_2D, view.rawTex, null, s.u.RAW);
+    gl.uniform1f(s.u.blendK, view.rawTex && !view.raw ? view.blend || 0 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
     gl.uniform1i(s.u.bgOn, view.backdrop ? 1 : 0);
     if (view.backdrop) setBackdropUniforms(gl, s.u, view.backdrop);
