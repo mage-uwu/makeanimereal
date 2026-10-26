@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """make_style_data.py -- style_torch.py's data: the G-buffers of the keyframes' views, half size,
-and each keyframe as the target, its alpha keyed from its own green background (the drawing's
-silhouette, not the render's).
+and each keyframe as the target: an RGBA image (a film frame, build_dataset.py's target) with its
+own alpha, or a drawing on green, its alpha keyed from its own background (the drawing's silhouette,
+not the render's).
 
     python3 make_style_data.py keys.json --out style.npz [--half]
 keys.json: [{"dir": "w1_hd", "frame": 240, "pitch": 10.0, "key": "keys/w1_hd_0240.png", "held": false}, ...]
@@ -42,7 +43,11 @@ def main():
         stem = f"{k['dir']}/{k['frame']:04d}"
         img = lambda s: np.asarray(Image.open(f'{stem}_{s}.png').convert('RGB'))
         col, nrm, dep, uva, uvb = (img(s) for s in ('color', 'normal', 'depth', 'uva', 'uvb'))
-        tgt = keyed(np.asarray(Image.open(k['key']).convert('RGB').resize((col.shape[1], col.shape[0]), Image.LANCZOS)))
+        ki = Image.open(k['key'])
+        if ki.mode == 'RGBA':   # a film frame (build_dataset.py's target): its own alpha
+            tgt = np.asarray(ki.resize((col.shape[1], col.shape[0]), Image.LANCZOS)).astype(np.float32)
+        else:                   # a drawing on green
+            tgt = keyed(np.asarray(ki.convert('RGB').resize((col.shape[1], col.shape[0]), Image.LANCZOS)))
         if not a.full:   # smooth buffers by area; the encoded ones (uv, part, coverage) by their top-left texel
             col, nrm, dep = box2(col), box2(nrm), box2(dep)
             uva, uvb = uva[::2, ::2], uvb[::2, ::2]
