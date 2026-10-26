@@ -305,6 +305,9 @@ def inputs(net, px, pitch):
     return torch.cat([col, nrm, dep, mask.float()[..., None], feat, pit], -1), torch.cat(hits)
 
 
+SSM = {}   # block -> ssm_tree.SSMTree: that block's FFN is nanoTSS's SSM tree (denoise_torch.py --ssm)
+
+
 def forward(net, px, pitch, trees=False, credit=False, temp=1.0, keep=None):
     """shader_nts.c's forward(): px (B, h, w, 17) -> straight RGBA (B, h, w, 4), and the texels read.
     keep: a list to receive each block's (t, quant8(t), FFN output) (the dense teacher, --distill)."""
@@ -325,7 +328,10 @@ def forward(net, px, pitch, trees=False, credit=False, temp=1.0, keep=None):
         tt = t.permute(0, 2, 3, 1).reshape(-1, DW)
         xq, xc, xs = quant8(tt, codes=True)
         b2 = net.view(f'b2{b}')
-        if trees:
+        if b in SSM:
+            sample = torch.arange(B, device=px.device).repeat_interleave(h * w)
+            o = SSM[b](tt, xq, sample, B) + b2
+        elif trees:
             y = Trees.apply(xq, ternary(net.TI[b]), net.view(f'tb{b}'), ternary(net.TO[b]), xc, xs, net.T, net.V, net.TN, temp, credit)
             o = tt + b2 + y
         else:

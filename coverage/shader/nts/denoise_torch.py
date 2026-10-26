@@ -209,6 +209,7 @@ def main():
     ap.add_argument('--load'); ap.add_argument('--net-from'); ap.add_argument('--save', default='denoised.ntst')
     ap.add_argument('--tree', default='4,4'); ap.add_argument('--blocks', type=int, default=8)
     ap.add_argument('--dil', help="the blocks' dilations, e.g. 1,3,9,27 (default: the standard 1,2,4,8,16,...)")
+    ap.add_argument('--ssm', help="blocks whose FFN is nanoTSS's SSM tree (ssm_tree.py), e.g. 1,3; saved beside --save as .ssm.pt")
     ap.add_argument('--seconds', type=float, default=1800); ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--crop', type=int, default=96)
     ap.add_argument('--lr', type=float, default=0.003); ap.add_argument('--lr-tex', type=float, default=0.01)
@@ -231,8 +232,18 @@ def main():
     # consecutive pairs in one wave (the pack is the top wave then the bottom; a jump between them is big)
     pairs = [i for i in held if i + 1 < data.N and abs(data.pitch[i + 1] - data.pitch[i]) < 1][::max(1, len(held) // a.pairs)][:a.pairs]
 
+    def ssm_blocks(path=None):   # --ssm: those blocks' SSM trees, registered with forward() (shader_torch.SSM)
+        import shader_torch
+        from ssm_tree import SSMTree
+        shader_torch.SSM.clear()
+        if not a.ssm: return []
+        for b in map(int, a.ssm.split(',')): shader_torch.SSM[b] = SSMTree(trees=T, levels=V).to(dev)
+        if path: [m.load_state_dict(sd) for m, sd in zip(shader_torch.SSM.values(), torch.load(path + '.ssm.pt', map_location=dev))]
+        return [p for m in shader_torch.SSM.values() for p in m.parameters()]
+
     if a.metrics:
         for path in a.metrics:
+            ssm_blocks(path)
             net = Net(a.blocks, data.P, dil, T, V, dev); net.init(0); net.load(path)
             m = metrics(net, data, True, pairs, held[::4])
             print(f'{path}: ' + '  '.join(f'{k} {v:.4f}' for k, v in m.items()), flush=True)
@@ -254,6 +265,9 @@ def main():
           f'coarse-first {a.coarse_first} smooth {a.tex_smooth} decay {a.tex_decay} lines {a.lines}', flush=True)
 
     leaves = net.leaves(); opt = Optim(net)
+    ssm_params = ssm_blocks(a.load if a.load and a.ssm else None)
+    ssm_opt = torch.optim.AdamW(ssm_params, lr=2e-3, weight_decay=0.01) if ssm_params else None
+    if ssm_params: print(f'SSM tree blocks {a.ssm}: {sum(p.numel() for p in ssm_params)} parameters', flush=True)
     t0 = time.time(); ema = None; it = 0
     while True:
         it += 1
@@ -265,6 +279,7 @@ def main():
         fis = torch.tensor([fi for fi, _, _ in cs], device=dev)
         px = torch.stack([data.px[fi, cy:cy + ch, cx:cx + cw] for fi, cy, cx in cs]).to(dev)
         pitch = torch.tensor([data.pitch[fi] for fi, _, _ in cs], device=dev)
+        if ssm_opt: ssm_opt.zero_grad()
         p, hits = forward(net, px, pitch, True, credit=True)
         if nui:
             nui.opt.zero_grad()
@@ -279,6 +294,9 @@ def main():
         if prog < a.coarse_first:
             hits = hits[hits >= nfine]   # the fine level waits
         opt.step(it, a.lr * sched, a.lr_tex * sched, a.batch, hits)
+        if ssm_opt:
+            for g in ssm_opt.param_groups: g['lr'] = 2e-3 * sched
+            torch.nn.utils.clip_grad_norm_(ssm_params, 1.0); ssm_opt.step()
         if nui:
             for g in nui.opt.param_groups: g['lr'] = 1e-3 * sched
             nui.opt.step()
@@ -296,6 +314,9 @@ def main():
             print(f'it {it}  loss {ema:.4f}  ' + '  '.join(f'{k} {v:.4f}' for k, v in m.items() if 'film' not in k and 'render' not in k)
                   + f'  {time.time() - t0:.0f}s', flush=True)
             net.save(a.save)
+            if ssm_params:
+                import shader_torch
+                torch.save([m.state_dict() for m in shader_torch.SSM.values()], a.save + '.ssm.pt')
         if last: break
     if nui:
         torch.save({'A': nui.A.detach().cpu(), 'b': nui.b.detach().cpu(), 'G': nui.G.detach().cpu()}, a.save + '.nuisance.pt')
