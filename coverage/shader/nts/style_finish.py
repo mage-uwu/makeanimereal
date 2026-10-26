@@ -54,6 +54,7 @@ def main():
     ap.add_argument('--blocks', type=int, default=4); ap.add_argument('--dil', default='1,3,9,27')
     ap.add_argument('--tree', default='4,4'); ap.add_argument('--ssm', default='1,3')
     ap.add_argument('--vgg', default='imagenet', help="'random': code checks only")
+    ap.add_argument('--sheets-only', action='store_true', help='redraw the sheets from RUN/frozen_state.pt (no scoring, no export)')
     a = ap.parse_args()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     run = Path(a.run)
@@ -66,31 +67,35 @@ def main():
     hi, ti = np.nonzero(held)[0], np.nonzero(~held)[0]
     report = {}
     with torch.no_grad():
-        # the frozen state: the mean of every training frame's write (4 whole frames a pass)
-        acc = {b: 0 for b in model[1]}
-        for k in range(0, len(ti), 4):
-            draw(model, *frames(ti[k:k + 4]))
-            for b, m in model[1].items(): acc[b] = acc[b] + m.last_h1.sum(0)
-        frozen = {b: v / len(ti) for b, v in acc.items()}
-        torch.save({b: v.cpu() for b, v in frozen.items()}, run / 'frozen_state.pt')
-        # held out: frozen against per-frame, and the scores the viewer's drawing gets
-        vgg = VGG(a.vgg == 'random').to(dev)
-        diff, tot = [], {'perceptual': 0.0, 'anchor': 0.0, 'lines': 0.0}
-        for k in range(0, len(hi), 4):
-            ids = hi[k:k + 4]; px, pt = frames(ids)
-            for m in model[1].values(): m.frozen = None
-            dyn = over_white(draw(model, px, pt))
+        if a.sheets_only:
+            frozen = torch.load(run / 'frozen_state.pt', map_location=dev)
             for b, m in model[1].items(): m.frozen = frozen[b]
-            fro = over_white(draw(model, px, pt))
-            diff.append(((dyn - fro).abs() * 255).mean((1, 2, 3)))
-            to = over_white(px[..., 13:17].float() / 255)
-            tot['perceptual'] += perceptual(vgg, fro, to).sum().item() / len(hi)
-            tot['anchor'] += (F.avg_pool2d(fro, 8) - F.avg_pool2d(to, 8)).abs().mean((1, 2, 3)).sum().item() / len(hi)
-            tot['lines'] += (edges(fro) - edges(to)).abs().mean((1, 2, 3)).sum().item() / len(hi)
-        report['held_out'] = {k: round(v, 4) for k, v in tot.items()}
-        report['frozen_vs_per_frame_255'] = round(torch.cat(diff).mean().item(), 3)
-        print(f"held out ({len(hi)} frames, frozen state): {report['held_out']}; |frozen - per-frame| "
-              f"{report['frozen_vs_per_frame_255']}/255", flush=True)
+        else:
+            # the frozen state: the mean of every training frame's write (4 whole frames a pass)
+            acc = {b: 0 for b in model[1]}
+            for k in range(0, len(ti), 4):
+                draw(model, *frames(ti[k:k + 4]))
+                for b, m in model[1].items(): acc[b] = acc[b] + m.last_h1.sum(0)
+            frozen = {b: v / len(ti) for b, v in acc.items()}
+            torch.save({b: v.cpu() for b, v in frozen.items()}, run / 'frozen_state.pt')
+            # held out: frozen against per-frame, and the scores the viewer's drawing gets
+            vgg = VGG(a.vgg == 'random').to(dev)
+            diff, tot = [], {'perceptual': 0.0, 'anchor': 0.0, 'lines': 0.0}
+            for k in range(0, len(hi), 4):
+                ids = hi[k:k + 4]; px, pt = frames(ids)
+                for m in model[1].values(): m.frozen = None
+                dyn = over_white(draw(model, px, pt))
+                for b, m in model[1].items(): m.frozen = frozen[b]
+                fro = over_white(draw(model, px, pt))
+                diff.append(((dyn - fro).abs() * 255).mean((1, 2, 3)))
+                to = over_white(px[..., 13:17].float() / 255)
+                tot['perceptual'] += perceptual(vgg, fro, to).sum().item() / len(hi)
+                tot['anchor'] += (F.avg_pool2d(fro, 8) - F.avg_pool2d(to, 8)).abs().mean((1, 2, 3)).sum().item() / len(hi)
+                tot['lines'] += (edges(fro) - edges(to)).abs().mean((1, 2, 3)).sum().item() / len(hi)
+            report['held_out'] = {k: round(v, 4) for k, v in tot.items()}
+            report['frozen_vs_per_frame_255'] = round(torch.cat(diff).mean().item(), 3)
+            print(f"held out ({len(hi)} frames, frozen state): {report['held_out']}; |frozen - per-frame| "
+                  f"{report['frozen_vs_per_frame_255']}/255", flush=True)
         if other:   # its own frozen state when it has one (as the viewer drew it), else per-frame
             fz = Path(a.compare) / 'frozen_state.pt'
             fz = torch.load(fz, map_location=dev) if fz.exists() else {}
@@ -106,16 +111,24 @@ def main():
         front = [i for i in ti if abs((keys[i]['yaw'] + 180) % 360 - 180) < 25 and abs(keys[i]['pitch']) < 15]
         front = front[::max(1, len(front) // 5)][:5]
         faces = []
+        names = json.loads((Path(keys[0]['dir']) / 'meta.json').read_text())['parts']
+        face_ids = torch.tensor([k for k, n in enumerate(names) if 'Face' in n and 'SKIN' in n]
+                                or [k for k, n in enumerate(names) if 'Face' in n or 'EYE' in n or 'Eye' in n])
         for i in front:
-            t = px_all[i, ..., 16].float()
-            ys, xs = torch.nonzero(t > 127, as_tuple=True)
-            if len(ys) == 0: continue
-            y0 = int(ys.min()); s = int(t.shape[0] * .16)
-            xc = int(xs[ys < y0 + s].float().mean()); x0 = max(0, min(t.shape[1] - s, xc - s // 2))
-            faces.append(torch.cat([F.interpolate(im[:, :, y0:y0 + s, x0:x0 + s], size=(320, 320), mode='bicubic')[0]
+            # the square around the face's skin, 1.8 x its extent (5th-95th percentile: stray labelled pixels don't count)
+            q = px_all[i]
+            on = torch.isin(q[..., 11].long(), face_ids) & (q[..., 12] > 127)
+            ys, xs = torch.nonzero(on, as_tuple=True)
+            if len(ys) < 50: continue
+            qy, qx = (torch.quantile(v.float(), torch.tensor([.05, .5, .95])) for v in (ys, xs))
+            s_ = int(1.8 * max(qy[2] - qy[0], qx[2] - qx[0])); s_ = max(32, min(s_, q.shape[0], q.shape[1]))
+            yc, xc = int(qy[1]), int(qx[1])
+            y0 = max(0, min(q.shape[0] - s_, yc - s_ // 2)); x0 = max(0, min(q.shape[1] - s_, xc - s_ // 2))
+            faces.append(torch.cat([F.interpolate(im[:, :, y0:y0 + s_, x0:x0 + s_], size=(320, 320), mode='bicubic')[0]
                                     for im in row(np.array([i]))], 2))
         if faces:
             Image.fromarray(torch.cat(faces, 1).permute(1, 2, 0).clamp(0, 1).mul(255).byte().cpu().numpy()).save(run / 'faces.png')
+    if a.sheets_only: return
     (run / 'finish.json').write_text(json.dumps(report, indent=1))
     # the viewer's files
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)

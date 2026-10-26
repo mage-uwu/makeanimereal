@@ -19,6 +19,36 @@ about 2 hours. The pod (RTX PRO 6000, $2.49/h) was up 1.6 h, about $3.90:
 Leave the bunny's model and trained files out of git: its VRM licence (personal non-profit, no
 redistribution) covers this private page, not a public repository.
 
+## The two stops
+
+- **Alpha: VRM in, film dataset out** (steps 1–5 below): orbit renders with G-buffers, a style reference
+  and anchor keyframes, the VACE film, and `build_dataset.py`'s folders (`$C/data/top`, `$C/data/bottom`).
+- **Bravo: film dataset in, style shader out**, one command on one GPU pod:
+
+      python3 coverage/shader/nts/bravo.py --data $C/data/top $C/data/bottom --out $C/bravo
+
+  It builds the training data and holds out every frame with yaw 140–180° (~11%: angles never
+  trained on). Then it trains phase 1 (the v1 recipe: perceptual + anchor, adversarial ×0.05 from step
+  1500, no learned texture, 6000 steps) and phase 2 (the v2 recipe from phase 1: learned 64² coarse
+  texture, tolerant line loss ×5, adversarial ×0.15 from step 300, 5600 steps). Finally it freezes the
+  node memories, scores the held-out frames, draws `phase2/held.png` and `faces.png` against phase 1,
+  and writes `$C/bravo/viewer`. Copy that to `coverage/live/<character>/nts-style/` and add a
+  `gpuOnly` entry to `CHARS`. Finished stages are skipped on a rerun (`--stages` picks some).
+
+  The bunny's run on an RTX PRO 6000 took 18 minutes:
+  - data: 40 s
+  - phase 1: 7.7 min
+  - phase 2: 8.2 min
+  - finish: 2 × 50 s
+
+  Held-out results, phase 1 → phase 2:
+  - lines 0.0238 → 0.0207
+  - colour anchor 0.0140 → 0.0115
+  - perceptual 0.794 (unchanged)
+
+  The trainer runs at 79 ms a step (6 crops of 256², discriminator on). The old trainer took 934 ms
+  (`HANDOFF.md`, training speed).
+
 Each step below is a command; `$C` is the character's work folder (e.g. `out/c2`), `$P` is
 `coverage/pod/pod.sh` with `POD` and `POD_TOKEN` set.
 

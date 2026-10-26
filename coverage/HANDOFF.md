@@ -195,14 +195,47 @@ the device with `#prof`.
   - Still missing: the film's large glossy eyes and the hair's shine bands. That is fine detail a
     fixed fine texture can't place.
   - The frozen state is within 0.54/255 of the per-frame write. GL matches PyTorch within 0.12/255.
-  - The run's scripts: `frozen_pod.py`, which writes the frozen state and the v1/v2/target strips,
-    and `face_pod.py` (face crops). Both are in the session scratchpad and simple to redo from
-    `frozen_test.py`'s logic.
+  - `style_finish.py` now does what the run's scratch scripts did: the frozen state, the
+    held-out check, the sheets, and the export.
+  - **Bunny Style** (`#bunnystyle`) is the same recipe through `bravo.py`, 18 minutes end to end.
+    Its trained files stay out of git (licence).
 - **Free-drawn keyframes:** `edit_images.py` with a "draw it as an anime artist would, not a trace"
   prompt and no keying. 115 of a planned 300 were drawn for the magical girl. They clearly redraw eyes,
   face and hair beyond the 3D silhouette. They are kept in the session's `out/style/keys.tar`, which is not in the kit;
   regenerate them with `jobs-keys.json` (in the tar) and `edit_images.py`. Next test: the style shader
   on these drawings, to see whether it learns shapes beyond the silhouette.
+
+## Style training speed (`style_torch.py`, `bravo.py`)
+
+One step is 6 crops of 256² with the discriminator on, on an RTX PRO 6000:
+
+| Version | ms a step |
+|---|---|
+| Before | 934 |
+| Changes 1–4 below | 94 |
+| Plus `--compile` (5) | 79 |
+
+Overall that is ~12× faster. On the same data the old and new trainers' losses tracked each other
+step for step.
+
+1. **SSM blocks as dense matmuls** (`ssm_tree.py`, `test_ssm_fast.py`). Each pixel used to gather
+   its visited nodes' state matrices: (N, 16, 8, 8) copies, about 2 GB a step, and a scatter in the
+   backward pass. A node's read Cᵀ·h·Z is bilinear, so all nodes are read at once as
+   (C⊗Z) @ hᵀ. The per-image write is (visits × gain)ᵀ @ (B⊗V), and the U term sums the visited
+   states per tree. Same outputs and gradients to float rounding.
+2. **Texture** (`shader_torch.inputs`): one gather per level instead of four. A level the trainer
+   holds fixed (the style model's fine level) has no gradient buffer.
+3. **Stencils in NCHW memory.** On the channels-last view cuDNN fell back to a slow fp32 depthwise
+   weight-gradient kernel (17.9 → 6.6 ms for the 4 stencils).
+4. **No host syncs in a step.** The norm clip became a tensor, the lazy texture Adam a masked dense
+   update over the rows that can move, and the losses are read only at evals. VGG and the
+   discriminator run in bf16 autocast, channels-last. The shader stays fp32 with TF32 matmuls, which
+   is exact for its ternary × int8 sums.
+5. **`--compile`** (`torch.compile` of the shader forward) fuses its elementwise work. `bravo.py` uses
+   it by default.
+
+`style_torch.py --bench 30` prints a step's time and the GPU profile. Steps are budgeted (`--iters`),
+so the schedule no longer depends on how fast the GPU is.
 
 ## New character checklist
 
