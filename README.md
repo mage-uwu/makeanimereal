@@ -31,6 +31,13 @@ Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` en
 
 `OPENROUTER_BASE_URL` overrides the API endpoint, and `OPENROUTER_MODEL` sets the default model.
 
+## VRM stage (live 3D)
+
+`web/stage.html` renders a VRM avatar live: drag to orbit, MToon shading, spring-bone hair and
+skirt, an idle sway, blinking, and buttons for pose (stand, wave, T-pose) and expression. With
+`npm run viewer` open http://localhost:8000/web/stage.html: it loads `?model=<url>`, else
+`out/stock/stock_avatar.vrm` if you put one there, else waits for a dropped or chosen `.vrm`.
+
 ## Web viewer (anime key drawings you can orbit freely)
 
 Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly

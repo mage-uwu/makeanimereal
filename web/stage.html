@@ -1,0 +1,324 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VRM Stage</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap">
+<style>
+/* Layout: one full-bleed stage; a slim control strip floats at the bottom, the credit card top-left. */
+:root {
+  --sky-top: #fdeef3;
+  --sky-low: #f6f1fb;
+  --ink: #3a2a3f;
+  --ink-soft: #7a6880;
+  --chip: rgba(255, 255, 255, 0.78);
+  --chip-line: rgba(122, 104, 128, 0.22);
+  --accent: #e8507f;
+  --accent-ink: #ffffff;
+  --floor: #f3d6e2;
+  --font-ui: "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", "Arial Rounded MT Bold", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sky-top: #2a1d33; --sky-low: #15111c; --ink: #f6e9f3; --ink-soft: #b9a5bf;
+    --chip: rgba(40, 28, 48, 0.78); --chip-line: rgba(246, 233, 243, 0.16);
+    --accent: #ff7aa6; --accent-ink: #2a1020; --floor: #3a2944; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --sky-top: #2a1d33; --sky-low: #15111c; --ink: #f6e9f3; --ink-soft: #b9a5bf;
+  --chip: rgba(40, 28, 48, 0.78); --chip-line: rgba(246, 233, 243, 0.16);
+  --accent: #ff7aa6; --accent-ink: #2a1020; --floor: #3a2944; color-scheme: dark;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; overflow: hidden; font-family: var(--font-ui); color: var(--ink);
+  background: linear-gradient(180deg, var(--sky-top), var(--sky-low));
+}
+#stage { position: fixed; inset: 0; }
+#stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+.hud {
+  position: fixed; z-index: 2; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+}
+#controls { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); justify-content: center; }
+#credit {
+  top: calc(16px + env(safe-area-inset-top, 0px)); right: auto; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 10px 14px; border-radius: 14px; background: var(--chip); border: 1px solid var(--chip-line);
+  backdrop-filter: blur(10px); max-width: min(320px, calc(100% - 32px));
+}
+#credit b { font-size: 17px; font-weight: 800; text-wrap: balance; }
+#credit span { font-size: 12px; color: var(--ink-soft); }
+
+.group { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line); backdrop-filter: blur(10px); flex-wrap: wrap; }
+button {
+  font: 700 13px/1 var(--font-ui); color: var(--ink); background: transparent; border: 0;
+  padding: 8px 12px; border-radius: 999px; cursor: pointer;
+}
+button:hover { background: var(--chip-line); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+#empty {
+  position: fixed; inset: 0; z-index: 1; display: grid; place-items: center; text-align: center;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+}
+#empty .card {
+  display: grid; gap: 12px; justify-items: center; max-width: 360px; padding: 28px 24px; border-radius: 22px;
+  border: 2px dashed var(--chip-line); background: var(--chip); backdrop-filter: blur(10px);
+}
+#empty h1 { margin: 0; font-size: 22px; font-weight: 800; text-wrap: balance; }
+#empty p { margin: 0; color: var(--ink-soft); line-height: 1.55; }
+#empty .open { background: var(--accent); color: var(--accent-ink); padding: 12px 20px; font-size: 15px; }
+body.dragging #empty .card { border-color: var(--accent); }
+#status { font-size: 13px; color: var(--ink-soft); min-height: 1.2em; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div id="stage"></div>
+
+<div id="empty">
+  <div class="card">
+    <h1>Drop a .vrm avatar here</h1>
+    <p>She loads on this stage with her toon shading, swaying hair and blinking eyes. The file stays on your device.</p>
+    <button class="open" id="pick" type="button">Choose a VRM file</button>
+    <div id="status" role="status"></div>
+  </div>
+</div>
+
+<div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span></div>
+
+<div class="hud" id="controls" hidden>
+  <div class="group" id="poses" aria-label="Pose">
+    <button type="button" data-pose="stand" aria-pressed="true">Stand</button>
+    <button type="button" data-pose="wave" aria-pressed="false">Wave</button>
+    <button type="button" data-pose="tpose" aria-pressed="false">T-pose</button>
+  </div>
+  <div class="group" id="faces" aria-label="Expression"></div>
+  <div class="group">
+    <button type="button" id="spin" aria-pressed="true">Turntable</button>
+    <button type="button" id="reset">Reset view</button>
+    <button type="button" id="other">Open…</button>
+  </div>
+</div>
+<input type="file" id="file" accept=".vrm,.glb" hidden>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+} }
+</script>
+<script type="module">
+// A live VRM stage: orbit around the avatar with MToon shading, spring-bone hair and skirt, an idle
+// sway, blinking, eyes that follow the camera, and buttons for pose and expression.
+// Loads ?model=<url>, else the stock avatar rendered into out/stock/ when served from the repo
+// (npm run viewer, then /web/stage.html), else waits for a dropped or chosen file.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const $ = id => document.getElementById(id);
+const stage = $('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 3, 2);
+scene.add(sun);
+
+// A soft round shadow under her feet, so she stands on something.
+const floorTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'), grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(0.55, 'rgba(255,255,255,0.55)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
+})();
+const floor = new THREE.Mesh(new THREE.CircleGeometry(0.9, 48), new THREE.MeshBasicMaterial({ map: floorTex, transparent: true, depthWrite: false }));
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+const paintFloor = () => floor.material.color.set(getComputedStyle(document.documentElement).getPropertyValue('--floor').trim() || '#f3d6e2');
+paintFloor();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paintFloor);
+new MutationObserver(paintFloor).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+const camera = new THREE.PerspectiveCamera(28, 1, 0.05, 50);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 1.2;
+controls.minDistance = 0.4;
+controls.maxDistance = 8;
+const home = { pos: new THREE.Vector3(0, 1.1, 4.2), target: new THREE.Vector3(0, 0.85, 0) };
+const resetView = () => { camera.position.copy(home.pos); controls.target.copy(home.target); controls.update(); };
+resetView();
+
+const resize = () => {
+  const { clientWidth: w, clientHeight: h } = stage;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+};
+addEventListener('resize', resize);
+resize();
+
+let vrm = null, pose = 'stand', face = null;
+const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
+
+async function load(url, label) {
+  $('status').textContent = `Loading ${label}…`;
+  const loader = new GLTFLoader();
+  loader.register(parser => new VRMLoaderPlugin(parser));
+  let gltf;
+  try { gltf = await loader.loadAsync(url); }
+  catch (e) { $('status').textContent = `Could not open ${label}: ${e.message || e}. Pick a .vrm file exported from VRoid or similar.`; return false; }
+  const next = gltf.userData.vrm;
+  if (!next) { $('status').textContent = `${label} is a glTF without VRM data. Pick a .vrm file.`; return false; }
+  if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); }
+  vrm = next;
+  VRMUtils.removeUnnecessaryVertices(gltf.scene);
+  VRMUtils.combineSkeletons(gltf.scene);
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.traverse(o => { o.frustumCulled = false; });
+  scene.add(vrm.scene);
+  if (vrm.lookAt) vrm.lookAt.target = camera;
+
+  // Frame her: look at mid-height, back off far enough for her full height.
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = box.getSize(new THREE.Vector3()), mid = box.getCenter(new THREE.Vector3());
+  const dist = size.y * 0.62 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  home.target.set(mid.x, mid.y, mid.z);
+  home.pos.set(mid.x, mid.y + size.y * 0.08, mid.z + dist);
+  floor.position.set(mid.x, box.min.y + 0.001, mid.z);
+  floor.scale.setScalar(Math.max(size.x, size.z) * 1.6 + 0.2);
+  resetView();
+
+  const meta = vrm.meta || {};
+  $('name').textContent = (meta.name || meta.title || label).trim();
+  const who = meta.authors?.join(', ') || meta.author;
+  $('author').textContent = who ? `by ${who}` : '';
+  $('credit').hidden = false;
+
+  const names = vrm.expressionManager ? Object.keys(vrm.expressionManager.expressionMap) : [];
+  const wanted = ['happy', 'relaxed', 'surprised', 'sad', 'angry'].filter(n => names.includes(n));
+  $('faces').replaceChildren(...['neutral', ...wanted].map(n => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.face = n; b.textContent = n[0].toUpperCase() + n.slice(1);
+    b.setAttribute('aria-pressed', String(n === 'neutral'));
+    return b;
+  }));
+  $('faces').hidden = !wanted.length;
+  face = null;
+
+  // Settle the springs in the stand before showing her, so the hair doesn't fall in from the T-pose.
+  setPose(pose);
+  for (let i = 0; i < 120; i++) { applyPose(i / 60); vrm.update(1 / 60); }
+  $('empty').hidden = true;
+  $('controls').hidden = false;
+  $('status').textContent = '';
+  return true;
+}
+
+function setPose(p) {
+  pose = p;
+  for (const b of $('poses').children) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
+}
+
+// The pose at time t (seconds): arms down with a slow breath and sway, a wave, or the bind T-pose.
+function applyPose(t) {
+  vrm.humanoid.resetNormalizedPose();
+  if (pose === 'tpose') return;
+  const breath = Math.sin(t * 1.6), sway = Math.sin(t * 0.7);
+  bone('spine').rotation.x = 0.02 * breath;
+  bone('chest') && (bone('chest').rotation.x = 0.015 * breath);
+  bone('hips').rotation.y = 0.04 * sway;
+  bone('spine').rotation.z = 0.02 * sway;
+  bone('neck') && (bone('neck').rotation.z = -0.03 * sway);
+  bone('leftUpperArm').rotation.z = -1.19 + 0.03 * breath;
+  bone('leftLowerArm').rotation.z = -0.15;
+  if (pose === 'wave') {
+    bone('rightUpperArm').rotation.z = -0.95;
+    bone('rightUpperArm').rotation.x = -0.2;
+    bone('rightLowerArm').rotation.y = 0;
+    bone('rightLowerArm').rotation.z = -1.25 + 0.35 * Math.sin(t * 7);
+    bone('rightHand') && (bone('rightHand').rotation.z = 0.1 * Math.sin(t * 7));
+    bone('head').rotation.z = 0.08;
+  } else {
+    bone('rightUpperArm').rotation.z = 1.19 - 0.03 * breath;
+    bone('rightLowerArm').rotation.z = 0.15;
+  }
+}
+
+// Blink every few seconds, skipped while an expression that closes the eyes is on.
+let nextBlink = 2, blinkStart = -1;
+function blink(t) {
+  const em = vrm.expressionManager;
+  if (!em) return;
+  if (blinkStart < 0 && t > nextBlink) blinkStart = t;
+  let v = 0;
+  if (blinkStart >= 0) {
+    const k = (t - blinkStart) / 0.16;
+    v = k < 1 ? Math.sin(k * Math.PI) : 0;
+    if (k >= 1) { blinkStart = -1; nextBlink = t + 2 + Math.random() * 3; }
+  }
+  em.setValue('blink', face === 'happy' || face === 'relaxed' ? 0 : v);
+}
+
+function setFace(n) {
+  const em = vrm.expressionManager;
+  for (const b of $('faces').children) b.setAttribute('aria-pressed', String(b.dataset.face === n));
+  for (const k of ['happy', 'relaxed', 'surprised', 'sad', 'angry']) if (em.getExpression(k)) em.setValue(k, 0);
+  face = n === 'neutral' ? null : n;
+  if (face) em.setValue(face, 1);
+}
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 1 / 20), t = clock.elapsedTime;
+  if (vrm) { applyPose(t); blink(t); vrm.update(dt); }
+  controls.update(dt);
+  renderer.render(scene, camera);
+});
+
+$('poses').addEventListener('click', e => { const p = e.target.dataset?.pose; if (p && vrm) setPose(p); });
+$('faces').addEventListener('click', e => { const f = e.target.dataset?.face; if (f && vrm) setFace(f); });
+$('spin').addEventListener('click', () => {
+  controls.autoRotate = !controls.autoRotate;
+  $('spin').setAttribute('aria-pressed', String(controls.autoRotate));
+});
+$('reset').addEventListener('click', resetView);
+renderer.domElement.addEventListener('pointerdown', () => {
+  if (!controls.autoRotate) return;
+  controls.autoRotate = false;
+  $('spin').setAttribute('aria-pressed', 'false');
+});
+
+const openFile = async file => {
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  await load(url, file.name);
+  URL.revokeObjectURL(url);
+};
+$('pick').addEventListener('click', () => $('file').click());
+$('other').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', e => { openFile(e.target.files[0]); e.target.value = ''; });
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); openFile(e.dataTransfer.files[0]); });
+
+// Served from the repo: open the requested model, or the stock avatar if it has been staged.
+const asked = new URLSearchParams(location.search).get('model');
+const fallback = '../out/stock/stock_avatar.vrm';
+if (asked) load(asked, asked.split('/').pop());
+else fetch(fallback, { method: 'HEAD' }).then(r => r.ok && load(fallback, 'stock_avatar.vrm')).catch(() => {});
+</script>
