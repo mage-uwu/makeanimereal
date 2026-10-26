@@ -72,6 +72,13 @@ clips as experts (decoder rows = keyframes) plus a state-space controller's weig
 extension, and a 7 KB C runtime (`web/vrmanet.wasm`) runs it. The stage's Arms row routes the arms
 to a different expert than the body, e.g. waving while walking.
 
+### Free run (PARC's motion generator, live)
+
+The stage's **Free run** button runs [parcgen](parcgen/README.md): PARC's diffusion motion
+generator ported to C/WASM (`web/parcgen.wasm` + `web/parcgen.bin`), generating her motion half a
+second at a time from the terrain around her and the direction you steer (WASD / arrows, or an
+auto-run lap of vaults, rooftops, a climb and stairs). Kinematic: no physics yet.
+
 ## Web viewer (anime key drawings you can orbit freely)
 
 Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly

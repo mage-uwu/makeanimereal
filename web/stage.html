@@ -52,6 +52,12 @@ body {
 }
 #credit b { font-size: 17px; font-weight: 800; text-wrap: balance; }
 #credit span { font-size: 12px; color: var(--ink-soft); }
+#runhint {
+  top: calc(16px + env(safe-area-inset-top, 0px)); left: auto; flex-direction: column; align-items: flex-end; gap: 6px;
+  padding: 10px 12px; border-radius: 14px; background: var(--chip); border: 1px solid var(--chip-line); backdrop-filter: blur(10px);
+  max-width: min(300px, calc(100% - 32px)); font-size: 12px; color: var(--ink-soft); text-align: right;
+}
+#runhint kbd { font: 700 11px/1 var(--font-ui); padding: 2px 5px; border-radius: 5px; border: 1px solid var(--chip-line); color: var(--ink); }
 #poses { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; }
 #poses button, #arms button { flex: none; }
 #arms, #parkour { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; align-items: center; }
@@ -96,6 +102,12 @@ body.dragging #empty .card { border-color: var(--accent); }
 
 <div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span><span id="motion-credit" hidden></span></div>
 
+<div class="hud" id="runhint" hidden>
+  <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or arrows to run, from the camera's view</span>
+  <button type="button" id="autorun" aria-pressed="true">Auto-run a lap</button>
+  <span id="runstatus" role="status"></span>
+</div>
+
 <div class="hud" id="controls" hidden>
   <div class="group" id="poses" aria-label="Pose and moves">
     <button type="button" data-pose="stand" aria-pressed="true">Stand</button>
@@ -105,8 +117,9 @@ body.dragging #empty .card { border-color: var(--accent); }
     <span class="label">Arms</span>
     <button type="button" data-arms="same" aria-pressed="true">Same</button>
   </div>
-  <div class="group" id="parkour" aria-label="Parkour" hidden>
+  <div class="group" id="parkour" aria-label="Parkour">
     <span class="label">Parkour</span>
+    <button type="button" data-pose="free:run" aria-pressed="false">Free run</button>
   </div>
   <div class="group" id="faces" aria-label="Expression"></div>
   <div class="group">
@@ -142,6 +155,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { createVrmanet } from './vrmanet.js';
+import { createFreeRun, COURSE } from './freerun.js';
 
 // The experts' button labels, in this order.
 const MOVES = {
@@ -305,13 +319,76 @@ async function load(src, label) {
 function setPose(p) {
   const fresh = !pose.startsWith('clip:') || !active.size;
   if (pose.startsWith('parc:') && p !== pose) stopParkour();
+  if (pose === 'free:run' && p !== pose) stopFree();
   pose = p;
   for (const b of document.querySelectorAll('[data-pose]')) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
   $('motion-credit').hidden = !p.startsWith('clip:') || !net;
   if (p.startsWith('clip:')) drive(fresh);
   else active = new Set();
   if (p.startsWith('parc:')) startParkour(p.slice(5));
+  if (p === 'free:run') startFree();
 }
+
+// Free run: PARC's motion generator (parcgen.wasm, weights parcgen.bin) moves her live over a
+// course, steered by the keys or round an auto-run lap (freerun.js).
+const fr = { run: null, assets: null, auto: true, keys: new Set() };
+window.freeRun = fr;   // for tests: fr.run.root() is where she is
+async function freeAssets() {
+  fr.assets ??= (async () => {
+    const wasm = await (await fetch('parcgen.wasm')).arrayBuffer();
+    const res = await fetch('parcgen.bin').catch(() => null);
+    const weights = res?.ok ? await res.arrayBuffer() : await unpackPng('parcgen.bin.png');
+    const start = (await (await fetch('parcgen-start.json')).json()).frames.map(f => Float32Array.from(f));
+    return { wasm, weights, start };
+  })();
+  return fr.assets;
+}
+async function startFree() {
+  $('runhint').hidden = false;
+  $('runstatus').textContent = 'Loading the motion generator (9 MB)…';
+  controls.autoRotate = false;
+  $('spin').setAttribute('aria-pressed', 'false');
+  let a;
+  try { a = await freeAssets(); } catch (e) { $('runstatus').textContent = `Could not load the generator: ${e.message}`; return; }
+  if (pose !== 'free:run' || fr.run) return;
+  const run = await createFreeRun({ THREE, scene, vrm, wasm: a.wasm.slice(0), weights: a.weights.slice(0), start: a.start,
+    onStatus: m => { $('runstatus').textContent = m; } }).catch(e => { $('runstatus').textContent = `Generator failed: ${e.message}`; });
+  if (!run) return;
+  if (pose !== 'free:run') { run.dispose(); return; }
+  fr.run = run;
+  floor.visible = false;
+  // Start behind her and to the side, looking along her first stretch (+x in PARC's frame).
+  const spawn = run.toVrm(COURSE.spawn[0], COURSE.spawn[1], 0.9);
+  controls.target.copy(spawn);
+  camera.position.copy(spawn).add(run.toVrm(-5, -7, 3));
+  controls.update();
+  $('motion-credit').textContent = 'Motion: PARC generator (Xu et al. 2025)';
+  $('motion-credit').hidden = false;
+}
+function stopFree() {
+  fr.run?.dispose();
+  fr.run = null;
+  $('runhint').hidden = true;
+  floor.visible = true;
+  resetView();
+}
+// The keys as a direction on the ground, relative to the camera, in PARC's frame (x = VRM z, y = VRM x).
+function keysDir() {
+  const f = camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize(), k = fr.keys;
+  const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
+  const right = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
+  const vx = f.x * fwd - f.z * right, vz = f.z * fwd + f.x * right, n = Math.hypot(vx, vz);
+  return n > 0 ? [vz / n, vx / n] : [0, 0];
+}
+const RUN_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+addEventListener('keydown', e => {
+  if (pose !== 'free:run' || !RUN_KEYS.has(e.code)) return;
+  e.preventDefault();
+  fr.keys.add(e.code);
+  if (fr.auto) { fr.auto = false; $('autorun').setAttribute('aria-pressed', 'false'); }
+});
+addEventListener('keyup', e => fr.keys.delete(e.code));
+addEventListener('blur', () => fr.keys.clear());
 
 // Parkour previews: PARC dataset motions as VRMA clips that travel over their own terrain
 // (parkour/<name>.vrma and .json, listed in parkour/index.json; made by parkour/export.py).
@@ -327,7 +404,6 @@ fetch('parkour/index.json').then(r => (r.ok ? r.json() : null)).then(ix => {
     b.type = 'button'; b.dataset.pose = `parc:${name}`; b.textContent = ix.labels?.[name] || name; b.setAttribute('aria-pressed', 'false');
     $('parkour').append(b);
   }
-  $('parkour').hidden = !ix.clips.length;
 }).catch(() => {});
 
 async function startParkour(name) {
@@ -440,7 +516,14 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 20), t = clock.elapsedTime;
   if (vrm) {
-    if (pose.startsWith('parc:')) {
+    if (pose === 'free:run') {
+      if (fr.run) {
+        fr.run.update(dt, fr.auto ? null : keysDir());
+        const move = fr.run.hips().clone().sub(controls.target).multiplyScalar(Math.min(1, dt * 3));
+        controls.target.add(move);
+        camera.position.add(move);
+      }
+    } else if (pose.startsWith('parc:')) {
       if (pk.mixer) {
         pk.mixer.update(dt);
         // Follow her: the camera keeps its offset from a target that eases toward her hips.
@@ -469,6 +552,10 @@ $('arms').addEventListener('click', e => {
   armsMove = a;
   for (const b of $('arms').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.arms === a));
   if (pose.startsWith('clip:')) drive(false);
+});
+$('autorun').addEventListener('click', () => {
+  fr.auto = !fr.auto;
+  $('autorun').setAttribute('aria-pressed', String(fr.auto));
 });
 $('spin').addEventListener('click', () => {
   controls.autoRotate = !controls.autoRotate;
