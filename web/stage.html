@@ -116,8 +116,10 @@ body.dragging #empty .card { border-color: var(--accent); }
 <script type="module">
 // A live VRM stage: orbit around the avatar with MToon shading, spring-bone hair and skirt, an idle
 // sway, blinking, eyes that follow the camera, and buttons for pose and expression.
-// Loads ?model=<url>, else the stock avatar rendered into out/stock/ when served from the repo
-// (npm run viewer, then /web/stage.html), else waits for a dropped or chosen file.
+// Loads ?model=<url>, else stock.vrm.png beside the page (a VRM packed into a PNG by
+// coverage/live/slim_vrm.py, for hosts that serve images but not model files), else the stock
+// avatar in out/stock/ when served from the repo (npm run viewer, then /web/stage.html), else
+// waits for a dropped or chosen file.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -175,12 +177,27 @@ resize();
 let vrm = null, pose = 'stand', face = null;
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
 
-async function load(url, label) {
+// A VRM packed into an RGB PNG by coverage/live/slim_vrm.py: a 4-byte length, then the file.
+async function unpackPng(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status}`);
+  const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const ctx = new OffscreenCanvas(bmp.width, bmp.height).getContext('2d');
+  ctx.drawImage(bmp, 0, 0);
+  const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+  const rgb = new Uint8Array(bmp.width * bmp.height * 3);
+  for (let i = 0, j = 0; i < px.length; i += 4) { rgb[j++] = px[i]; rgb[j++] = px[i + 1]; rgb[j++] = px[i + 2]; }
+  const n = rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (rgb[3] << 24);
+  return rgb.buffer.slice(4, 4 + n);
+}
+
+// src: a URL, or the file's bytes.
+async function load(src, label) {
   $('status').textContent = `Loading ${label}…`;
   const loader = new GLTFLoader();
   loader.register(parser => new VRMLoaderPlugin(parser));
   let gltf;
-  try { gltf = await loader.loadAsync(url); }
+  try { gltf = typeof src === 'string' ? await loader.loadAsync(src) : await loader.parseAsync(src, ''); }
   catch (e) { $('status').textContent = `Could not open ${label}: ${e.message || e}. Pick a .vrm file exported from VRoid or similar.`; return false; }
   const next = gltf.userData.vrm;
   if (!next) { $('status').textContent = `${label} is a glTF without VRM data. Pick a .vrm file.`; return false; }
@@ -316,9 +333,13 @@ addEventListener('dragover', e => { e.preventDefault(); document.body.classList.
 addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
 addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); openFile(e.dataTransfer.files[0]); });
 
-// Served from the repo: open the requested model, or the stock avatar if it has been staged.
 const asked = new URLSearchParams(location.search).get('model');
 const fallback = '../out/stock/stock_avatar.vrm';
 if (asked) load(asked, asked.split('/').pop());
-else fetch(fallback, { method: 'HEAD' }).then(r => r.ok && load(fallback, 'stock_avatar.vrm')).catch(() => {});
+else {
+  $('status').textContent = 'Looking for an avatar…';
+  unpackPng('stock.vrm.png').then(buf => load(buf, 'stock avatar'), () =>
+    fetch(fallback, { method: 'HEAD' }).then(r => r.ok && load(fallback, 'stock_avatar.vrm')).catch(() => {})
+  ).finally(() => { if (!vrm) $('status').textContent = ''; });
+}
 </script>
