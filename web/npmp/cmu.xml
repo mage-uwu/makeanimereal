@@ -1,0 +1,321 @@
+<mujoco model="floor">
+  <compiler boundmass="1.0000000000000001e-05" boundinertia="9.9999999999999994e-12" coordinate="local" angle="radian" eulerseq="xyz"/>
+  <option timestep="0.0050000000000000001" noslip_tolerance="0" cone="elliptic" noslip_iterations="5"/>
+  <size njmax="500" nconmax="500"/>
+  <visual>
+    <headlight ambient="0.40000000000000002 0.40000000000000002 0.40000000000000002" diffuse="0.80000000000000004 0.80000000000000004 0.80000000000000004" specular="0.10000000000000001 0.10000000000000001 0.10000000000000001"/>
+    <map znear="0.01"/>
+    <scale forcewidth="0.01" contactwidth="0.059999999999999998" contactheight="0.01" jointwidth="0.01" framelength="0.29999999999999999" framewidth="0.01"/>
+  </visual>
+  <default>
+    <default class="/"/>
+    <default class="walker/">
+      <joint limited="true" solimplimit="0 0.98999999999999999 0.01" stiffness="1" armature="0.01" damping="1"/>
+      <geom condim="1" size="0.029999999999999999 0 0" friction="0.69999999999999996 0.0050000000000000001 0.0001" solref="0.014999999999999999 1" solimp="0.98999999999999999 0.98999999999999999 0.0030000000000000001"/>
+      <general ctrlrange="-1 1" ctrllimited="true" forcelimited="true"/>
+      <default class="walker/humanoid">
+        <geom type="capsule" group="2" material="walker/self"/>
+        <default class="walker/stiff_medium">
+          <joint stiffness="10" damping="2"/>
+        </default>
+        <default class="walker/stiff_medium_higher">
+          <joint stiffness="50" damping="4"/>
+        </default>
+        <default class="walker/stiff_high">
+          <joint stiffness="200" damping="5"/>
+        </default>
+        <default class="walker/sensor_site">
+          <site type="sphere" group="4" size="0.01" rgba="1 0 0 0.5"/>
+        </default>
+        <default class="walker/contact">
+          <geom condim="3" priority="1" friction="1 0.0050000000000000001 0.0001" solref="0.014999999999999999 1" solimp="0.97999999999999998 0.97999999999999998 0.001"/>
+        </default>
+      </default>
+    </default>
+  </default>
+  <asset>
+    <texture name="groundplane" class="/" type="2d" builtin="checker" rgb1="0.20000000000000001 0.29999999999999999 0.40000000000000002" rgb2="0.10000000000000001 0.20000000000000001 0.29999999999999999" mark="edge" markrgb="0.80000000000000004 0.80000000000000004 0.80000000000000004" width="200" height="200"/>
+    <material name="groundplane" class="/" texture="groundplane" texrepeat="2 2" texuniform="true" reflectance="0.20000000000000001"/>
+    <material name="walker/self" class="walker/" rgba="0.69999999999999996 0.5 0.29999999999999999 1"/>
+  </asset>
+  <worldbody>
+    <geom name="groundplane" class="/" type="plane" size="8 8 0.25" material="groundplane"/>
+    <camera name="top_camera" class="/" fovy="10.058147163570894" pos="0 0 100" quat="1 0 0 0"/>
+    <body name="walker/">
+      <freejoint name="walker/"/>
+      <light name="walker/tracking_light" class="walker/" pos="0 0 8.4000000000000004" dir="0 0 -1" mode="trackcom"/>
+      <camera name="walker/back" class="walker/" pos="0 3.5999999999999996 1.6799999999999999" xyaxes="-1 0 0 0 -1 2" mode="trackcom"/>
+      <camera name="walker/side" class="walker/" pos="-3.5999999999999996 0 1.6799999999999999" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
+      <camera name="walker/front_side" class="walker/" pos="-2.3999999999999999 -2.3999999999999999 0.59999999999999998" xyaxes="0.5 -0.5 0 0.10000000000000001 0.10000000000000001 1" mode="trackcom"/>
+      <body name="walker/root" childclass="walker/humanoid">
+        <camera name="walker/bodycam" fovy="80" pos="0 0.35999999999999999 0.12" xyaxes="-1 0 0 0 1 0"/>
+        <site name="walker/root" size="0.012" rgba="0.5 0.5 0.5 0"/>
+        <geom name="walker/root_geom" size="0.12 0.084000000000000005" density="605.02687744402954" pos="0 -0.059999999999999998 0" quat="1 0 -1 0"/>
+        <body name="walker/lhipjoint">
+          <geom name="walker/lhipjoint" size="0.0095999999999999992 0.026248356" density="605.02687744402954" pos="0.0611622 -0.055084439999999998 0.029667599999999995" quat="0.57079999999999997 -0.56660200000000005 -0.59426400000000001 0"/>
+          <body name="walker/lfemur" pos="0.1223244 -0.11016888 0.059335319999999997" quat="0.98480800000000002 0 0 0.173648">
+            <joint name="walker/lfemurrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-1.0471999999999999 1.22173" damping="10"/>
+            <joint name="walker/lfemurry" class="walker/stiff_medium" pos="0 0 0" axis="0 1 0" range="-1.22173 1.22173" damping="10"/>
+            <joint name="walker/lfemurrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-2.7925300000000002 0.34906599999999999" damping="15"/>
+            <geom name="walker/lfemur_upper" size="0.10200000000000001 0.099600000000000008" mass="0" pos="0 -0.13856760000000001 0" quat="0.69636399999999998 -0.69636399999999998 -0.12278799999999999 -0.12278799999999999"/>
+            <geom name="walker/lfemur" size="0.084000000000000005 0.21867119999999998" density="605.02687744402954" pos="0 -0.24296759999999998 0" quat="0.69636399999999998 -0.69636399999999998 -0.12278799999999999 -0.12278799999999999"/>
+            <body name="walker/ltibia" pos="0 -0.48593399999999998 0">
+              <joint name="walker/ltibiarx" pos="0 0 0" axis="1 0 0" range="0.01 2.96706" damping="8"/>
+              <geom name="walker/ltibia" size="0.048000000000000001 0.21907368000000002" density="605.02687744402954" pos="0 -0.2434152 0" quat="0.69636399999999998 -0.69636399999999998 -0.12278799999999999 -0.12278799999999999"/>
+              <body name="walker/lfoot" pos="0 -0.49883159999999993 0" quat="1 -1 0 0">
+                <site name="walker/lfoot_touch" class="walker/sensor_site" type="capsule" pos="0 0.024 -0.017999999999999999" zaxis="1 0 0" size="0.029999999999999999 0.012"/>
+                <joint name="walker/lfootrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-1.22173 0.34906599999999999" damping="3"/>
+                <joint name="walker/lfootrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-0.78539800000000004 0.80000000000000004" damping="6"/>
+                <geom name="walker/lfoot" class="walker/contact" size="0.029999999999999999 0.096000000000000002" density="605.02687744402954" pos="-0.03239999700072 -0.059999999999999998 -0.01366536" quat="0.76725516000000005 -0.64051113999999998 0.023064870000000001 -0.023065829999999999"/>
+                <geom name="walker/lfoot_ch" class="walker/contact" size="0.029999999999999999 0.096000000000000002" density="605.02687744402954" pos="0.032400002999279996 -0.059999999999999998 -0.01366536" quat="0.72887265999999995 -0.59399462000000003 -0.24074282999999999 -0.2407425"/>
+                <body name="walker/ltoes" pos="0 -0.18764640000000002 -0.027330719999999999">
+                  <joint name="walker/ltoesrx" pos="0 0 0" axis="1 0 0" range="-1.5708 0.34906599999999999" damping="1"/>
+                  <geom name="walker/ltoes0" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="0 -0.012 -0.012"/>
+                  <geom name="walker/ltoes1" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="0.035999999999999997 -0.012 -0.012"/>
+                  <geom name="walker/ltoes2" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="-0.035999999999999997 -0.012 -0.012"/>
+                  <site name="walker/ltoes_touch" class="walker/sensor_site" type="capsule" pos="0 -0.012 -0.024" zaxis="1 0 0" size="0.029999999999999999 0.035999999999999997"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+        <body name="walker/rhipjoint">
+          <geom name="walker/rhipjoint" size="0.0095999999999999992 0.026248356" density="605.02687744402954" pos="-0.0611622 -0.055084439999999998 0.029667599999999995" quat="0.57485600000000003 -0.54759400000000003 0.60801400000000005 0"/>
+          <body name="walker/rfemur" pos="-0.1223244 -0.11016888 0.059335319999999997" quat="0.98480800000000002 0 0 -0.173648">
+            <joint name="walker/rfemurrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-1.22173 1.0471999999999999" damping="10"/>
+            <joint name="walker/rfemurry" class="walker/stiff_medium" pos="0 0 0" axis="0 1 0" range="-1.22173 1.22173" damping="10"/>
+            <joint name="walker/rfemurrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-2.7925300000000002 0.34906599999999999" damping="15"/>
+            <geom name="walker/rfemur_upper" size="0.10200000000000001 0.099600000000000008" mass="0" pos="0 -0.13856760000000001 0" quat="0.69636399999999998 -0.69636399999999998 0.12278799999999999 0.12278799999999999"/>
+            <geom name="walker/rfemur" size="0.084000000000000005 0.21867119999999998" density="605.02687744402954" pos="0 -0.24296759999999998 0" quat="0.69636399999999998 -0.69636399999999998 0.12278799999999999 0.12278799999999999"/>
+            <body name="walker/rtibia" pos="0 -0.48593399999999998 0">
+              <joint name="walker/rtibiarx" pos="0 0 0" axis="1 0 0" range="0.01 2.96706" damping="8"/>
+              <geom name="walker/rtibia" size="0.048000000000000001 0.21907368000000002" density="605.02687744402954" pos="0 -0.2434152 0" quat="0.69636399999999998 -0.69636399999999998 0.12278799999999999 0.12278799999999999"/>
+              <body name="walker/rfoot" pos="0 -0.49883159999999993 0" quat="0.70710700000000004 -0.70710700000000004 0 0">
+                <site name="walker/rfoot_touch" class="walker/sensor_site" type="capsule" pos="0 0.024 -0.017999999999999999" zaxis="1 0 0" size="0.029999999999999999 0.012"/>
+                <joint name="walker/rfootrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-0.34906599999999999 1.22173" damping="3"/>
+                <joint name="walker/rfootrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-0.78539800000000004 0.80000000000000004" damping="6"/>
+                <geom name="walker/rfoot" class="walker/contact" size="0.029999999999999999 0.096000000000000002" density="605.02687744402954" pos="-0.032399995837919998 -0.059999999999999998 -0.01366536" quat="0.73520686999999996 -0.58633522999999999 0.24050108000000001 0.24050078999999999"/>
+                <geom name="walker/rfoot_ch" class="walker/contact" size="0.029999999999999999 0.096000000000000002" density="605.02687744402954" pos="0.032400004162079998 -0.059999999999999998 -0.01366536" quat="0.77312468999999995 -0.63323099999999999 -0.025458459999999999 0.025458359999999999"/>
+                <body name="walker/rtoes" pos="0 -0.18764640000000002 -0.027330719999999999">
+                  <joint name="walker/rtoesrx" pos="0 0 0" axis="1 0 0" range="-1.5708 0.34906599999999999" damping="1"/>
+                  <geom name="walker/rtoes0" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="0 -0.012 -0.012"/>
+                  <geom name="walker/rtoes1" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="0.035999999999999997 -0.012 -0.012"/>
+                  <geom name="walker/rtoes2" class="walker/contact" type="sphere" size="0.029999999999999999" density="605.02687744402954" pos="-0.035999999999999997 -0.012 -0.012"/>
+                  <site name="walker/rtoes_touch" class="walker/sensor_site" type="capsule" pos="0 -0.012 -0.024" zaxis="1 0 0" size="0.029999999999999999 0.035999999999999997"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+        <body name="walker/lowerback">
+          <joint name="walker/lowerbackrz" class="walker/stiff_high" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="20"/>
+          <joint name="walker/lowerbackry" class="walker/stiff_high" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="20"/>
+          <joint name="walker/lowerbackrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="15"/>
+          <geom name="walker/lowerback" size="0.10200000000000001 0.054480192000000004" density="605.02687744402954" pos="0.0033951719999999997 0.067927799999999997 0.012" quat="1 0 1 0"/>
+          <body name="walker/upperback" pos="0.00067903439999999994 0.13585559999999999 -0.0096635759999999984">
+            <joint name="walker/upperbackrz" class="walker/stiff_high" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="12"/>
+            <joint name="walker/upperbackry" class="walker/stiff_high" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="8"/>
+            <joint name="walker/upperbackrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="15"/>
+            <geom name="walker/upperback" size="0.108 0.054511391999999999" density="605.02687744402954" pos="0.00030751680000000003 0.068136240000000001 0.024" quat="1 0 1 0"/>
+            <body name="walker/thorax" pos="0.00061503360000000006 0.13627199999999998 0.0011241852000000001">
+              <joint name="walker/thoraxrz" class="walker/stiff_high" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="12"/>
+              <joint name="walker/thoraxry" class="walker/stiff_high" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="8"/>
+              <joint name="walker/thoraxrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="15"/>
+              <geom name="walker/thorax" size="0.11399999999999999 0.068424719999999994" density="605.02687744402954" pos="0 0.068366999999999997 0.024" quat="1 0 1 0"/>
+              <body name="walker/lowerneck" pos="0 0.13673399999999999 0.0056164439999999991">
+                <joint name="walker/lowerneckrz" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="20"/>
+                <joint name="walker/lowerneckry" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="20"/>
+                <joint name="walker/lowerneckrx" class="walker/stiff_medium_higher" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="20"/>
+                <geom name="walker/lowerneck" size="0.089999999999999997 0.027350699999999999" density="605.02687744402954" pos="-0.001980852 0.054288119999999995 0.0064123079999999994" quat="1 1 0 0"/>
+                <body name="walker/upperneck" pos="-0.0039617159999999997 0.10857611999999998 0.01282464">
+                  <joint name="walker/upperneckrz" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="10"/>
+                  <joint name="walker/upperneckry" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="10"/>
+                  <joint name="walker/upperneckrx" class="walker/stiff_medium_higher" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="10"/>
+                  <geom name="walker/upperneck" size="0.059999999999999998 0.02703264" density="605.02687744402954" pos="0.00060105 0.053994719999999996 -0.0026957280000000001" quat="1 1 0 0"/>
+                  <body name="walker/head" pos="0.0012021 0.156 -0.0053914560000000002">
+                    <camera name="walker/egocentric" fovy="80" pos="0 0 0" xyaxes="-1 0 0 0 1 0"/>
+                    <joint name="walker/headrz" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 0 1" range="-0.52359900000000004 0.52359900000000004" damping="2"/>
+                    <joint name="walker/headry" class="walker/stiff_medium_higher" pos="0 0 0" axis="0 1 0" range="-0.52359900000000004 0.52359900000000004" damping="2"/>
+                    <joint name="walker/headrx" class="walker/stiff_medium_higher" pos="0 0 0" axis="1 0 0" range="-0.34906599999999999 0.78539800000000004" damping="2"/>
+                    <geom name="walker/head" size="0.11399999999999999 0.028924800000000001" density="605.02687744402954" pos="0.00040975799999999998 0.057820799999999992 0.029999999999999999" quat="1 1 0 0"/>
+                    <geom name="walker/face" type="capsule" contype="0" conaffinity="0" size="0.078 0.016799999999999999" mass="0" pos="0.00040975799999999998 0.057820799999999992 0.012" quat="0.71788700000000005 0.69614200000000004 -0.0049333399999999996 0"/>
+                    <body name="walker/face" pos="0 0.046800000000000001 0.13200000000000001">
+                      <geom name="walker/nose" type="capsule" contype="0" conaffinity="0" group="1" size="0.024 0.012" mass="0" pos="0 0 0" quat="1 0.69999999999999996 0 0"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+              <body name="walker/lclavicle" pos="0 0.13673399999999999 0.0056164439999999991">
+                <joint name="walker/lclaviclerz" class="walker/stiff_high" pos="0 0 0" axis="0 0 1" range="0 0.34906599999999999" damping="20"/>
+                <joint name="walker/lclaviclery" class="walker/stiff_high" pos="0 0 0" axis="0 1 0" range="-0.34906599999999999 0.17453299999999999" damping="20"/>
+                <geom name="walker/lclavicle" size="0.089999999999999997 0.071999999999999995" density="605.02687744402954" pos="0.11025803999999999 0.045916320000000004 0.0064284480000000007" quat="0.68799999999999994 0.27900000000000003 -0.67000000000000004 0"/>
+                <body name="walker/lhumerus" pos="0.216 0.108 0.012856920000000001" quat="0.18301300000000001 0.68301299999999998 -0.68301299999999998 0.18301300000000001">
+                  <joint name="walker/lhumerusrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-1.1000000000000001 1.5708" damping="6"/>
+                  <joint name="walker/lhumerusry" class="walker/stiff_medium" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" damping="6"/>
+                  <joint name="walker/lhumerusrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-1.0471999999999999 1.5708" damping="6"/>
+                  <site name="walker/lhumerus_ft" class="walker/sensor_site"/>
+                  <geom name="walker/lhumerus" size="0.0504 0.14949467999999999" density="605.02687744402954" pos="0 -0.16610519999999998 0" quat="0.61237200000000003 -0.61237200000000003 0.35355300000000001 0.35355300000000001"/>
+                  <body name="walker/lradius" pos="0 -0.3322116 0">
+                    <joint name="walker/lradiusrx" pos="0 0 0" axis="1 0 0" range="-0.17453299999999999 2.96706" damping="5"/>
+                    <geom name="walker/lradius" size="0.035999999999999997 0.098029331999999997" density="605.02687744402954" pos="0 -0.10892148 0" quat="0.61237200000000003 -0.61237200000000003 0.35355300000000001 0.35355300000000001"/>
+                    <site name="walker/lwrist" pos="0 -0.21784319999999999 0" quat="-0.5 0 0.86602500000000004 0"/>
+                    <body name="walker/lwrist" pos="0 -0.21784319999999999 0" quat="-0.5 0 0.86602500000000004 0">
+                      <joint name="walker/lwristry" pos="0 0 0" axis="0 1 0" range="0 3.1415899999999999" damping="1"/>
+                      <geom name="walker/lwrist" size="0.024 0.035999999999999997" density="605.02687744402954" pos="0 -0.035999999999999997 0" quat="1.59389e-11 -1.5938800000000001e-11 -0.70710700000000004 -0.70710700000000004"/>
+                      <body name="walker/lhand" pos="0 -0.10892112 0">
+                        <joint name="walker/lhandrz" pos="0 0 0" axis="0 0 1" range="-0.78539800000000004 0.78539800000000004" damping="1"/>
+                        <joint name="walker/lhandrx" pos="0 0 0" axis="1 0 0" range="-1.5708 1.5708" damping="1"/>
+                        <site name="walker/lhand_touch" class="walker/sensor_site" type="ellipsoid" pos="0 -0.020102399999999999 -0.024" quat="0 0 -1 -1" size="0.0144 0.0060000000000000001 0.017999999999999999"/>
+                        <geom name="walker/lhand" class="walker/contact" type="ellipsoid" size="0.042000000000000003 0.024 0.053999999999999999" density="605.02687744402954" pos="0 -0.020102399999999999 0" quat="0 0 -1 -1"/>
+                        <body name="walker/lfingers" pos="0 -0.089999999999999997 0">
+                          <joint name="walker/lfingersrx" pos="0 0.017999999999999999 0" axis="1 0 0" range="0 1.5708" damping="1"/>
+                          <site name="walker/lfingers_touch" class="walker/sensor_site" type="box" pos="0 -0.0504 -0.0083999999999999995" size="0.0276 0.015599999999999999 0.0035999999999999999"/>
+                          <geom name="walker/lfinger0" class="walker/contact" size="0.0077999999999999996 0.048000000000000001" density="605.02687744402954" pos="-0.028799999999999999 -0.029999999999999999 0" quat="1 -1 0 0"/>
+                          <geom name="walker/lfinger1" class="walker/contact" size="0.0077999999999999996 0.048000000000000001" density="605.02687744402954" pos="-0.0095999999999999992 -0.035999999999999997 0" quat="1 -1 0 0"/>
+                          <geom name="walker/lfinger2" class="walker/contact" size="0.0071999999999999998 0.048000000000000001" density="605.02687744402954" pos="0.0095999999999999992 -0.035999999999999997 0" quat="1 -1 0 0"/>
+                          <geom name="walker/lfinger3" class="walker/contact" size="0.0065999999999999991 0.048000000000000001" density="605.02687744402954" pos="0.028799999999999999 -0.029999999999999999 0" quat="1 -1 0 0"/>
+                        </body>
+                        <body name="walker/lthumb" pos="-0.029999999999999999 0 0" quat="0.92388000000000003 0 0 -0.382683">
+                          <joint name="walker/lthumbrz" pos="0 0 0" axis="0 0 1" range="-0.78539800000000004 0.78539800000000004" damping="1"/>
+                          <joint name="walker/lthumbrx" pos="0 0 0" axis="1 0 0" range="0 1.5700000000000001" damping="1"/>
+                          <site name="walker/lthumb_touch" class="walker/sensor_site" type="box" pos="0 -0.051599999999999993 -0.0083999999999999995" size="0.0071999999999999998 0.015599999999999999 0.0035999999999999999"/>
+                          <geom name="walker/lthumb" class="walker/contact" size="0.0095999999999999992 0.035999999999999997" density="605.02687744402954" pos="0 -0.035999999999999997 0" quat="0 0 -1 -1"/>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+              <body name="walker/rclavicle" pos="0 0.13673399999999999 0.0056164439999999991">
+                <joint name="walker/rclaviclerz" class="walker/stiff_high" pos="0 0 0" axis="0 0 1" range="-0.34906599999999999 0" damping="20"/>
+                <joint name="walker/rclaviclery" class="walker/stiff_high" pos="0 0 0" axis="0 1 0" range="-0.17453299999999999 0.34906599999999999" damping="20"/>
+                <geom name="walker/rclavicle" size="0.089999999999999997 0.071999999999999995" density="605.02687744402954" pos="-0.11025803999999999 0.045916320000000004 0.0064284480000000007" quat="0.68799999999999994 0.27900000000000003 0.67000000000000004 0"/>
+                <body name="walker/rhumerus" pos="-0.216 0.108 0.012856920000000001" quat="0.18301300000000001 0.68301299999999998 0.68301299999999998 -0.18301300000000001">
+                  <joint name="walker/rhumerusrz" class="walker/stiff_medium" pos="0 0 0" axis="0 0 1" range="-1.1000000000000001 1.5708" damping="6"/>
+                  <joint name="walker/rhumerusry" class="walker/stiff_medium" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" damping="6"/>
+                  <joint name="walker/rhumerusrx" class="walker/stiff_medium" pos="0 0 0" axis="1 0 0" range="-1.0471999999999999 1.5708" damping="6"/>
+                  <site name="walker/rhumerus_ft" class="walker/sensor_site"/>
+                  <geom name="walker/rhumerus" size="0.0504 0.14949467999999999" density="605.02687744402954" pos="0 -0.16610519999999998 0" quat="0.61237200000000003 -0.61237200000000003 -0.35355300000000001 -0.35355300000000001"/>
+                  <body name="walker/rradius" pos="0 -0.3322116 0">
+                    <joint name="walker/rradiusrx" pos="0 0 0" axis="1 0 0" range="-0.17453299999999999 2.96706" damping="5"/>
+                    <geom name="walker/rradius" size="0.035999999999999997 0.098029331999999997" density="605.02687744402954" pos="0 -0.10892148 0" quat="0.61238000000000004 -0.61237200000000003 -0.35355399999999998 -0.35354099999999999"/>
+                    <body name="walker/rwrist" pos="0 -0.21784319999999999 0" quat="-0.5 0 -0.86602500000000004 0">
+                      <joint name="walker/rwristry" pos="0 0 0" axis="0 1 0" range="-3.1415899999999999 0" damping="1"/>
+                      <geom name="walker/rwrist" size="0.024 0.035999999999999997" density="605.02687744402954" pos="0 -0.035999999999999997 0" quat="0 0 1 1"/>
+                      <body name="walker/rhand" pos="0 -0.10892112 0">
+                        <joint name="walker/rhandrz" pos="0 0 0" axis="0 0 1" range="-0.78539800000000004 0.78539800000000004" damping="1"/>
+                        <joint name="walker/rhandrx" pos="0 0 0" axis="1 0 0" range="-1.5708 1.5708" damping="1"/>
+                        <site name="walker/rhand_touch" class="walker/sensor_site" type="ellipsoid" pos="0 -0.020102399999999999 -0.024" quat="0 0 1 1" size="0.0144 0.0060000000000000001 0.017999999999999999"/>
+                        <geom name="walker/rhand" class="walker/contact" type="ellipsoid" size="0.042000000000000003 0.024 0.053999999999999999" density="605.02687744402954" pos="0 -0.020102399999999999 0" quat="0 0 1 1"/>
+                        <body name="walker/rfingers" pos="0 -0.089999999999999997 0">
+                          <joint name="walker/rfingersrx" pos="0 0.017999999999999999 0" axis="1 0 0" range="0 1.5708" damping="1"/>
+                          <site name="walker/rfingers_touch" class="walker/sensor_site" type="box" pos="0 -0.0504 -0.0083999999999999995" size="0.0276 0.015599999999999999 0.0035999999999999999"/>
+                          <geom name="walker/rfinger0" class="walker/contact" size="0.0077999999999999996 0.048000000000000001" density="605.02687744402954" pos="0.028799999999999999 -0.029999999999999999 0" quat="1 -1 0 0"/>
+                          <geom name="walker/rfinger1" class="walker/contact" size="0.0077999999999999996 0.048000000000000001" density="605.02687744402954" pos="0.0095999999999999992 -0.035999999999999997 0" quat="1 -1 0 0"/>
+                          <geom name="walker/rfinger2" class="walker/contact" size="0.0071999999999999998 0.048000000000000001" density="605.02687744402954" pos="-0.0095999999999999992 -0.035999999999999997 0" quat="1 -1 0 0"/>
+                          <geom name="walker/rfinger3" class="walker/contact" size="0.0065999999999999991 0.048000000000000001" density="605.02687744402954" pos="-0.028799999999999999 -0.029999999999999999 0" quat="1 -1 0 0"/>
+                        </body>
+                        <body name="walker/rthumb" pos="0.029999999999999999 0 0" quat="0.92388000000000003 0 0 0.382683">
+                          <joint name="walker/rthumbrz" pos="0 0 0" axis="0 0 1" range="-0.78539800000000004 0.78539800000000004" damping="1"/>
+                          <joint name="walker/rthumbrx" pos="0 0 0" axis="1 0 0" range="0 1.5700000000000001" damping="1"/>
+                          <site name="walker/rthumb_touch" class="walker/sensor_site" type="box" pos="0 -0.051599999999999993 -0.0083999999999999995" size="0.0071999999999999998 0.015599999999999999 0.0035999999999999999"/>
+                          <geom name="walker/rthumb" class="walker/contact" size="0.0095999999999999992 0.035999999999999997" density="605.02687744402954" pos="0 -0.035999999999999997 0" quat="6.2177300000000004e-11 -6.3528400000000006e-11 0.70710700000000004 0.70710700000000004"/>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <exclude name="walker//unnamed_contact_0" body1="walker/lclavicle" body2="walker/rclavicle"/>
+    <exclude name="walker//unnamed_contact_1" body1="walker/lowerneck" body2="walker/lclavicle"/>
+    <exclude name="walker//unnamed_contact_2" body1="walker/lowerneck" body2="walker/rclavicle"/>
+    <exclude name="walker//unnamed_contact_3" body1="walker/upperneck" body2="walker/lclavicle"/>
+    <exclude name="walker//unnamed_contact_4" body1="walker/upperneck" body2="walker/rclavicle"/>
+  </contact>
+  <actuator>
+    <general name="walker/headrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-40 40" joint="walker/headrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="22.689279999999997" biasprm="8.7266399999999997 -40 0"/>
+    <general name="walker/headry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-40 40" joint="walker/headry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="20.943960000000001" biasprm="0 -40 0"/>
+    <general name="walker/headrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-40 40" joint="walker/headrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="20.943960000000001" biasprm="0 -40 0"/>
+    <general name="walker/lclaviclery" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/lclaviclery" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="20.943959999999997" biasprm="-6.981320000000002 -80 0"/>
+    <general name="walker/lclaviclerz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/lclaviclerz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="13.96264" biasprm="13.96264 -80 0"/>
+    <general name="walker/lfemurrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-300 300" joint="walker/lfemurrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="471.23940000000005" biasprm="-366.51960000000003 -300 0"/>
+    <general name="walker/lfemurry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/lfemurry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="244.346" biasprm="0 -200 0"/>
+    <general name="walker/lfemurrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/lfemurrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="226.893" biasprm="17.453000000000031 -200 0"/>
+    <general name="walker/lfingersrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lfingersrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.708" biasprm="15.708 -20 0"/>
+    <general name="walker/lfootrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lfootrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="95.12388" biasprm="0.87612000000000023 -120 0"/>
+    <general name="walker/lfootrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-50 50" joint="walker/lfootrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="39.2699" biasprm="-21.816599999999998 -50 0"/>
+    <general name="walker/lhandrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lhandrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.416" biasprm="0 -20 0"/>
+    <general name="walker/lhandrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lhandrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.70796" biasprm="0 -20 0"/>
+    <general name="walker/lhumerusrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lhumerusrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="157.07999999999998" biasprm="31.416000000000004 -120 0"/>
+    <general name="walker/lhumerusry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lhumerusry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="188.49600000000001" biasprm="0 -120 0"/>
+    <general name="walker/lhumerusrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lhumerusrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="160.24799999999999" biasprm="28.24799999999998 -120 0"/>
+    <general name="walker/lowerbackrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-300 300" joint="walker/lowerbackrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="170.16959999999997" biasprm="65.449799999999996 -300 0"/>
+    <general name="walker/lowerbackry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-180 180" joint="walker/lowerbackry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="94.247820000000004" biasprm="0 -180 0"/>
+    <general name="walker/lowerbackrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/lowerbackrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="104.71980000000001" biasprm="0 -200 0"/>
+    <general name="walker/lowerneckrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lowerneckrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="68.06783999999999" biasprm="26.179919999999996 -120 0"/>
+    <general name="walker/lowerneckry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lowerneckry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="62.831880000000005" biasprm="0 -120 0"/>
+    <general name="walker/lowerneckrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/lowerneckrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="62.831880000000005" biasprm="0 -120 0"/>
+    <general name="walker/lradiusrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-90 90" joint="walker/lradiusrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="141.37168499999999" biasprm="125.663715 -90 0"/>
+    <general name="walker/lthumbrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lthumbrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.700000000000001" biasprm="15.700000000000001 -20 0"/>
+    <general name="walker/lthumbrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lthumbrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.70796" biasprm="0 -20 0"/>
+    <general name="walker/ltibiarx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-160 160" joint="walker/ltibiarx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="236.56480000000002" biasprm="238.16480000000001 -160 0"/>
+    <general name="walker/ltoesrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/ltoesrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="19.198659999999997" biasprm="-12.21734 -20 0"/>
+    <general name="walker/lwristry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/lwristry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.415900000000001" biasprm="31.415900000000001 -20 0"/>
+    <general name="walker/rclaviclery" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/rclaviclery" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="20.943959999999997" biasprm="6.9813199999999975 -80 0"/>
+    <general name="walker/rclaviclerz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/rclaviclerz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="13.96264" biasprm="-13.96264 -80 0"/>
+    <general name="walker/rfemurrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-300 300" joint="walker/rfemurrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="471.23940000000005" biasprm="-366.51960000000003 -300 0"/>
+    <general name="walker/rfemurry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/rfemurry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="244.346" biasprm="0 -200 0"/>
+    <general name="walker/rfemurrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/rfemurrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="226.893" biasprm="-17.452999999999985 -200 0"/>
+    <general name="walker/rfingersrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rfingersrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.708" biasprm="15.708 -20 0"/>
+    <general name="walker/rfootrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/rfootrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="95.12388" biasprm="0.87612000000000023 -120 0"/>
+    <general name="walker/rfootrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-50 50" joint="walker/rfootrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="39.2699" biasprm="21.816600000000001 -50 0"/>
+    <general name="walker/rhandrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rhandrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.416" biasprm="0 -20 0"/>
+    <general name="walker/rhandrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rhandrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.70796" biasprm="0 -20 0"/>
+    <general name="walker/rhumerusrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/rhumerusrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="157.07999999999998" biasprm="31.416000000000004 -120 0"/>
+    <general name="walker/rhumerusry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/rhumerusry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="188.49600000000001" biasprm="0 -120 0"/>
+    <general name="walker/rhumerusrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-120 120" joint="walker/rhumerusrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="160.24799999999999" biasprm="28.24799999999998 -120 0"/>
+    <general name="walker/rradiusrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-90 90" joint="walker/rradiusrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="141.37168499999999" biasprm="125.663715 -90 0"/>
+    <general name="walker/rthumbrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rthumbrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.700000000000001" biasprm="15.700000000000001 -20 0"/>
+    <general name="walker/rthumbrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rthumbrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="15.70796" biasprm="0 -20 0"/>
+    <general name="walker/rtibiarx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-160 160" joint="walker/rtibiarx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="236.56480000000002" biasprm="238.16480000000001 -160 0"/>
+    <general name="walker/rtoesrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rtoesrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="19.198659999999997" biasprm="-12.21734 -20 0"/>
+    <general name="walker/rwristry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-20 20" joint="walker/rwristry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.415900000000001" biasprm="-31.415900000000001 -20 0"/>
+    <general name="walker/thoraxrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-300 300" joint="walker/thoraxrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="170.16959999999997" biasprm="65.449799999999996 -300 0"/>
+    <general name="walker/thoraxry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/thoraxry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="41.887920000000001" biasprm="0 -80 0"/>
+    <general name="walker/thoraxrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/thoraxrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="104.71980000000001" biasprm="0 -200 0"/>
+    <general name="walker/upperbackrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-300 300" joint="walker/upperbackrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="170.16959999999997" biasprm="65.449799999999996 -300 0"/>
+    <general name="walker/upperbackry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-80 80" joint="walker/upperbackry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="41.887920000000001" biasprm="0 -80 0"/>
+    <general name="walker/upperbackrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-200 200" joint="walker/upperbackrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="104.71980000000001" biasprm="0 -200 0"/>
+    <general name="walker/upperneckrx" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-60 60" joint="walker/upperneckrx" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="34.033919999999995" biasprm="13.089959999999998 -60 0"/>
+    <general name="walker/upperneckry" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-60 60" joint="walker/upperneckry" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.415940000000003" biasprm="0 -60 0"/>
+    <general name="walker/upperneckrz" class="walker/" ctrlrange="-1 1" ctrllimited="true" forcerange="-60 60" joint="walker/upperneckrz" dyntype="filter" biastype="affine" dynprm="0.029999999999999999" gainprm="31.415940000000003" biasprm="0 -60 0"/>
+  </actuator>
+  <sensor>
+    <velocimeter name="walker/sensor_root_veloc" site="walker/root"/>
+    <gyro name="walker/sensor_root_gyro" site="walker/root"/>
+    <accelerometer name="walker/sensor_root_accel" site="walker/root"/>
+    <touch name="walker/sensor_touch_lhand" site="walker/lhand_touch"/>
+    <touch name="walker/sensor_touch_lfingers" site="walker/lfingers_touch"/>
+    <touch name="walker/sensor_touch_lthumb" site="walker/lthumb_touch"/>
+    <touch name="walker/sensor_touch_rhand" site="walker/rhand_touch"/>
+    <touch name="walker/sensor_touch_rfingers" site="walker/rfingers_touch"/>
+    <touch name="walker/sensor_touch_rthumb" site="walker/rthumb_touch"/>
+    <touch name="walker/sensor_touch_ltoes" site="walker/ltoes_touch"/>
+    <touch name="walker/sensor_touch_rtoes" site="walker/rtoes_touch"/>
+    <touch name="walker/sensor_touch_rfoot" site="walker/rfoot_touch"/>
+    <touch name="walker/sensor_touch_lfoot" site="walker/lfoot_touch"/>
+    <torque name="walker/sensor_torque_lhumerus" site="walker/lhumerus_ft"/>
+    <torque name="walker/sensor_torque_rhumerus" site="walker/rhumerus_ft"/>
+    <framepos name="walker/rradius_end_effector" objtype="xbody" objname="walker/rradius" reftype="xbody" refname="walker/root"/>
+    <framepos name="walker/lradius_end_effector" objtype="xbody" objname="walker/lradius" reftype="xbody" refname="walker/root"/>
+    <framepos name="walker/rfoot_end_effector" objtype="xbody" objname="walker/rfoot" reftype="xbody" refname="walker/root"/>
+    <framepos name="walker/lfoot_end_effector" objtype="xbody" objname="walker/lfoot" reftype="xbody" refname="walker/root"/>
+  </sensor>
+</mujoco>

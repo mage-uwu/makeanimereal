@@ -81,6 +81,15 @@ generator ported to C/WASM (`web/parcgen.wasm` + `web/parcgen.bin`), generating 
 second at a time from the terrain around her and the direction you steer (WASD / arrows, or an
 auto-run lap of vaults, rooftops, a climb and stairs). Kinematic: no physics yet.
 
+### Physics (MoCapAct, simulated)
+
+The stage's **Physics** row runs [Microsoft's MoCapAct](mocapact/README.md) multi-clip policy, a
+pretrained physics controller (weights CDLA-Permissive-2.0, commercial use allowed): MuJoCo's WASM
+build simulates dm_control's CMU humanoid, the policy (`web/npmp.js`, layers in `web/npmp.wasm`,
+weights `web/npmp/npmp.bin`) drives its 56 joints to follow a CMU clip, and the box character or
+the VRoid avatar is posed from the simulated body (`web/simrun.js`). When the body strays from the
+clip it is put back on it, and the status line counts the catches.
+
 ## Web viewer (anime key drawings you can orbit freely)
 
 Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly

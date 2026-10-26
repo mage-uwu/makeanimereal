@@ -1,0 +1,42 @@
+[
+ {
+  "id": "CMU_016_22",
+  "label": "Walk",
+  "frames": 83
+ },
+ {
+  "id": "CMU_016_27",
+  "label": "Walk, turn left",
+  "frames": 65
+ },
+ {
+  "id": "CMU_069_64",
+  "label": "Walk sideways, turn",
+  "frames": 150
+ },
+ {
+  "id": "CMU_016_44",
+  "label": "Jog, turn right",
+  "frames": 57
+ },
+ {
+  "id": "CMU_127_09",
+  "label": "Run",
+  "frames": 52
+ },
+ {
+  "id": "CMU_016_02",
+  "label": "Jump",
+  "frames": 127
+ },
+ {
+  "id": "CMU_083_45",
+  "label": "Hop forward",
+  "frames": 135
+ },
+ {
+  "id": "CMU_091_44",
+  "label": "Small jump",
+  "frames": 91
+ }
+]
