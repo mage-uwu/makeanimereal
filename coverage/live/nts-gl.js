@@ -552,13 +552,14 @@ uniform int bgOn;   // the backdrop (backdrop.js) instead of the stage gradient
 ${BACKDROP_GLSL}
 uniform vec3 toonP;   // near, far, line width (canvas pixels)
 uniform sampler2D G, T1, T2, T4; uniform int sharp; uniform vec2 lowRes;
+uniform sampler2D RAW;   // raw == 2: Raw 3D at the canvas's resolution (guide.js createRawView), premultiplied
 out vec4 o;
 // The edge-aware upscale (joint bilateral): the drawing is the network's resolution, guide.js's G is
 // her geometry at the canvas's. A canvas pixel takes the drawing's pixels around it (4 x 4) weighted by
 // bilinear's weights and by how well their geometry (the tiles' normal, depth, mask) matches its own, so her
 // edges and the edges between her parts land where the canvas-sized geometry puts them, and only
 // colour from the same surface crosses into a pixel. Pixels the drawing half-covers count by their
-// alpha; her outline's softness comes from G's coverage. Where nothing around matches (a strand
+// alpha; her outline is G's coverage. Where nothing around matches (a strand
 // thinner than the drawing's pixels), the plain bilinear sample.
 vec4 upscale(vec2 uv, vec4 bil) {
   vec4 g = texelFetch(G, ivec2(gl_FragCoord.xy), 0);
@@ -582,13 +583,15 @@ vec4 upscale(vec2 uv, vec4 bil) {
     vec2 t = max(vec2(0.0), 1.0 - abs(dd));
     float w = (t.x * t.y + 0.02 * exp(-0.5 * dot(dd, dd))) * exp(-0.5 * dz * dz) * exp(-8.0 * (1.0 - dot(n, gn)));
     w *= texelFetch(T4, q, 0).b > 0.5 ? 1.0 : 0.05;
-    srgb += w * c.rgb; sa += w * c.a; saa += w * c.a * c.a;
+    srgb += w * c.a * c.rgb; sa += w * c.a; saa += w * c.a * c.a;   // colour by alpha^2: her edge pixels (the film's green spill) count little
   }
-  vec3 rgb; float a;
-  if (sa > 1e-4) { rgb = srgb / sa; a = saa / sa; }
-  else if (bil.a > 0.004) { rgb = bil.rgb / bil.a; a = bil.a; }
-  else return vec4(0.0);
-  a *= cov;
+  // her outline from the canvas-sized geometry: where the drawing has her colour nearby, its coverage is
+  // G's (crisp and multisampled at the screen's resolution), not the network's coarser alpha, which
+  // broke strands thinner than its pixels into dots
+  // (where it hardly drew her at all, a strand it missed, its colour is noise: fade it out with its alpha)
+  if (saa < 1e-4) return vec4(0.0);
+  vec3 rgb = srgb / saa;
+  float a = cov * smoothstep(0.03, 0.3, saa / sa);
   return vec4(rgb * a, a);
 }
 float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing was drawn
@@ -620,6 +623,7 @@ vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.
 void main() {
   vec2 q = vec2(gl_FragCoord.x, view.y - gl_FragCoord.y);   // canvas pixels, top-down
   vec3 bg = bgOn == 1 ? backdrop((q - box.xy) / box.zw) : mix(top, bottom, q.y / view.y);
+  if (raw == 2) { vec4 c = texelFetch(RAW, ivec2(gl_FragCoord.xy), 0); o = vec4(c.a < 0.004 ? bg : mix(bg, toSrgb(c.rgb / c.a), c.a), 1.0); return; }
   vec2 p = (q - box.xy) / box.zw;
   if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) { o = toonOver(vec4(bg, 1.0)); return; }
   vec2 uv = vec2(p.x, 1.0 - p.y);
@@ -833,7 +837,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
   // The network on the crop, then the display pass. view: { W, H, box: [x, y, w, h] in canvas pixels,
   // top: [r, g, b], bottom: [r, g, b], raw, ink (false: the drawing without its line art), toon
   // (toon.js's render: contour mask and depth, or null), guide (guide.js's texture: the edge-aware
-  // upscale; null: bilinear), showOnly (the last drawing again, e.g. zoomed) }.
+  // upscale; null: bilinear), rawTex (guide.js createRawView's render: Raw 3D at the canvas's resolution;
+  // null: the colour tile), showOnly (the last drawing again, e.g. zoomed) }.
   // Profiling (cpu.html #prof): each stage ends by reading back one pixel of a private 1 x 1 target,
   // which can't return before every command before it has run (gl.finish() can, in some browsers),
   // timed on the CPU clock. That works on any device (iPhones have no GPU timer queries); the stalls
@@ -955,7 +960,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     const s = prog.show; gl.useProgram(s.p);
     bindTex(0, gl.TEXTURE_2D, outT, null, s.u.R); bindTex(1, gl.TEXTURE_2D, tileTex(0), null, s.u.T0); bindTex(2, gl.TEXTURE_2D, inkT, null, s.u.K);
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
-    gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
+    gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? (view.rawTex ? 2 : 1) : 0);
+    if (view.rawTex) bindTex(9, gl.TEXTURE_2D, view.rawTex, null, s.u.RAW); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
     gl.uniform1i(s.u.bgOn, view.backdrop ? 1 : 0);
     if (view.backdrop) setBackdropUniforms(gl, s.u, view.backdrop);

@@ -35,3 +35,30 @@ export function createGuide({ THREE, renderer, vertexShader, depthUniforms }) {
   }
   return { render };
 }
+
+// Raw 3D at the canvas's own resolution: her model with its own materials, 4x multisampled, on a
+// transparent background (premultiplied once resolved), framed exactly as the network's frame is
+// shown (the same view offset as the guide). Replaces the colour tile stretched from the network's
+// resolution with the background keyed out.
+export function createRawView({ THREE, renderer }) {
+  let rt = null;
+  const clear = new THREE.Color();
+  function render(scene, camera, { W, H, box }) {
+    if (!rt || rt.width !== W || rt.height !== H) {
+      rt?.dispose();
+      rt = new THREE.WebGLRenderTarget(W, H, { samples: 4, depthBuffer: true });
+      rt.texture.colorSpace = THREE.SRGBColorSpace;
+    }
+    const aspect = camera.aspect, bg = scene.background, alpha = renderer.getClearAlpha();
+    renderer.getClearColor(clear);
+    camera.setViewOffset(box[2], box[3], -box[0], -box[1], W, H);
+    scene.background = null; scene.overrideMaterial = null;
+    renderer.setRenderTarget(rt); renderer.setClearColor(0x000000, 0); renderer.clear(true, true, false);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null); renderer.setClearColor(clear, alpha);
+    camera.clearViewOffset(); camera.aspect = aspect; camera.updateProjectionMatrix();
+    scene.background = bg;
+    return renderer.properties.get(rt.texture).__webglTexture;
+  }
+  return { render };
+}

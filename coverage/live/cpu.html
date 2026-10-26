@@ -126,7 +126,7 @@ import { createGpuShader } from './gpu-nts.js';
 import { createFusedShader } from './fused-nts.js';
 import { createGlShader } from './nts-gl.js';
 import { createToon } from './toon.js';
-import { createGuide } from './guide.js';
+import { createGuide, createRawView } from './guide.js';
 import { createSword } from './sword.js';
 import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 
@@ -343,7 +343,7 @@ function css(n) { return getComputedStyle(document.documentElement).getPropertyV
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
 // frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
 function frameBox() {
-  const dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 3), r = stage.getBoundingClientRect();   // the screen's own pixels (a 3x phone too)
   const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
   if (view.width !== W || view.height !== H) { view.width = W; view.height = H; }
   const s = Math.min(H / NH, W / (NW * 0.62)) * zoom.z, w = NW * s, h = NH * s;
@@ -356,7 +356,9 @@ function glView(extra = {}) {
   const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(8, Math.max(1, fb.box[3] * 0.0019))) : null;
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
-  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
+  // Raw 3D: three.js at the canvas's resolution, not the network's colour tile stretched
+  const rawTex = raw && rawView ? rawView.render(scene, camera, fb) : null;
+  return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, rawTex, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
 }
 // The backdrop (backdrop.js): 0 off (the stage gradient), 1 a pastel day, 2 an idol stage; under her hips, on the floor.
 const BACKDROPS = ['Off', 'Sky', 'Stage'];
@@ -392,7 +394,7 @@ const lookTarget = new THREE.Object3D(), headPos = new THREE.Vector3(), ray = ne
 const qa = new THREE.Quaternion(), ea = new THREE.Euler();
 // Canvas position (CSS pixels) -> the network frame's NDC, through the same box the frame is drawn in.
 function pointerNdc(e) {
-  const dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect(), { box } = frameBox();
+  const dpr = Math.min(devicePixelRatio || 1, 3), r = stage.getBoundingClientRect(), { box } = frameBox();
   const fx = ((e.clientX - r.left) * dpr - box[0]) / box[2], fy = ((e.clientY - r.top) * dpr - box[1]) / box[3];
   return new THREE.Vector2(fx * 2 - 1, 1 - fy * 2);
 }
@@ -482,7 +484,7 @@ function say(text) {
 }
 
 // ---------- one frame: G-buffer, network, show ----------
-let shader = null, gls = null, toon = null, guide = null, tiles = null, fence = null, gpuMs = null;
+let shader = null, gls = null, toon = null, guide = null, rawView = null, tiles = null, fence = null, gpuMs = null;
 const GL_PASSES = () => PASSES.map(([bg, mat]) => [bg, mat, () => { for (const m of shorts) m.visible = !mat; }]);
 let faceMoving = false;
 function frameOnce(t) {
@@ -494,7 +496,7 @@ function frameOnce(t) {
   if (gls) {   // GPU: no readback; a fence per frame keeps the GPU from queueing frames behind it
     depthMat.uniforms.near.value = radius - 0.8; depthMat.uniforms.far.value = radius + 0.8;
     gls.prof.start();
-    gls.renderTiles(scene, camera, GL_PASSES(), crop);
+    if (!(raw && rawView)) gls.renderTiles(scene, camera, GL_PASSES(), crop);   // (Raw 3D draws her itself)
     for (const m of shorts) m.visible = true;
     gls.prof.mark('G-buffer tiles (three.js)');
     const v = glView();
@@ -736,6 +738,7 @@ try {
   if (gls) gls.prof.on = PROF && !PROF_A;
   if (gls) {   // GPU engine: the edge-aware upscale
     guide = createGuide({ THREE, renderer, vertexShader: gbufVert, depthUniforms: depthMat.uniforms });
+    rawView = createRawView({ THREE, renderer });
     const b = document.getElementById('m-sharp'); b.hidden = false; b.setAttribute('aria-pressed', String(sharp));
   }
   for (const [k, label] of Object.entries(CLIPS)) if (motions.clips[k]) {
