@@ -223,6 +223,24 @@ marginal, so it is off by default. GL matches PyTorch at
 A short fine-tune on the 2× grid (the girl has 720×1280 data, with `--dil 2,6,18,54`) could sharpen
 it further. The bunny would need 2× G-buffers first.
 
+## Fine-tuning on the 2× grid (`style_torch.py --dil-scale 2`; the girl's 2x chip)
+
+The magical girl's style v2 was continued on her 720×1280 data with dilations 2, 6, 18, 54, using the
+v2 recipe: 3000 steps, 384² crops, about 9 minutes on an RTX PRO 6000.
+
+| Held out (90 frames at 720×1280) | perceptual | lines | colour |
+|---|---|---|---|
+| v2, untrained on the 2× grid | 0.620 | 0.0203 | 0.0115 |
+| v2, fine-tuned on the 2× grid | 0.583 | 0.0201 | 0.0120 |
+
+- Most of the gain came by step 500.
+- It cleans the drawing up: less speckle and grain in the hair and skin, smoother shading, cleaner
+  jaw lines. It adds no new detail; the eyes are as simple as before.
+- The frozen node memories are within 0.41/255 of the per-frame write. GL matches PyTorch within
+  0.148/255.
+- The viewer loads it in the girl's opt-in 2x mode (`CHARS.style.fineTree = 'nts-style-hd/'`,
+  `#style-fine`), at 4× the network's cost.
+
 ## A learned upscale instead (`nts/upsample_torch.py`): tried, not shipped
 
 The idea was to keep the 1× network and learn the step to the screen instead. The magical girl's

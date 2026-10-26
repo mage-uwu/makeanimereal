@@ -137,7 +137,7 @@ import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
   girlhd: { label: 'Magical Girl HD', model: 'model.vrm.png', tree: 'nts-tree-hd4/', shorts: 0x1c2056, scale: 2 },
-  style: { label: 'Magical Girl Style', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true, fine: 2 },   // node-memory blocks (ssm.bin): the GPU engine only
+  style: { label: 'Magical Girl Style', model: 'model.vrm.png', tree: 'nts-style/', shorts: 0x1c2056, gpuOnly: true, fine: 2, fineTree: 'nts-style-hd/' },   // fineTree: fine-tuned on the 2x grid (its dilations in the file)   // node-memory blocks (ssm.bin): the GPU engine only
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
   bunnystyle: { label: 'Bunny Style', model: 'bunny/model.vrm.png', tree: 'bunny/nts-style/', shorts: 0xf4dde3, gpuOnly: true, fine: 2 },   // bravo.py's viewer files
 };
@@ -153,7 +153,9 @@ const S = (CH.scale || 1) * FINE;
 const TRAIN_H = 640 * S, [NW, NH] = (location.hash.includes('tight') ? [360, 640] : [720, 800]).map(v => v * S), FOV = 30, ARM_DROP = 68, GREEN = 0x00b140;
 const ENGINE = location.hash.includes('fused') ? 'fused' : location.hash.includes('webgpu') ? 'webgpu' : location.hash.includes('cpu') ? 'cpu' : 'gpu';
 // The network: the tree model (nts-tree/, shader_nts.c --tree), or #dense: run2 (nts/), dense FFNs
-const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree', NET_BASE = NET === 'dense' ? CH.dense : CH.tree;
+const NET = location.hash.includes('dense') && CH.dense ? 'dense' : 'tree';
+// on the 2x grid, a model fine-tuned there (CH.fineTree: its own dilations) where the character has one
+const FINE_TREE = FINE > 1 && CH.fineTree, NET_BASE = NET === 'dense' ? CH.dense : FINE_TREE ? CH.fineTree : CH.tree;
 const PROF = /prof(?!A)/.test(location.hash), PROF_A = location.hash.includes('profA');   // GPU engine: per-stage times (nts-gl.js prof), redrawing every frame
 const VIEW_FOV = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(FOV / 2)) * NH / TRAIN_H));
 const CROP_PAD = 32 * S;
@@ -723,7 +725,7 @@ try {
   let parts;
   if (CH.gpuOnly && ENGINE !== 'gpu') { location.hash = engineHash('gpu'); location.reload(); throw new Error('this character runs on the GPU engine'); }
   if (ENGINE === 'gpu') {
-    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, dilScale: FINE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
+    try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, dilScale: FINE_TREE ? 1 : FINE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
     catch (e) {
       // no WebGL2: the default (GPU-only) character falls back to the magical girl on the CPU engine
