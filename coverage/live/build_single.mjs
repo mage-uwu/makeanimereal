@@ -4,6 +4,9 @@
 // each further character's <name>/model.vrm.png and <name>/nts-tree/fine0..2.png (an artifact page is
 // capped at 16 MB; those are ~35 MB a character).
 //   node build_single.mjs [out.html]   (default: single/index.html)
+//   node build_single.mjs --slim [out.html]   (default: slim/index.html): only the two style characters
+//     (Magical Girl, Bunny), no engine or network chips; their networks only; beside it: model.vrm.png,
+//     bunny/model.vrm.png, motions.json, nts-style/fine0..2.png, bunny/nts-style/fine0..2.png
 // The modules are bundled into the page's module script; fetch() and the network's <img> loads are
 // served from the inlined bytes first, so the sources run unchanged apart from the worker's URL and
 // nts-gl.js's image loader, rewritten here.
@@ -11,7 +14,9 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 
 import path from 'node:path';
 
 const dir = path.dirname(new URL(import.meta.url).pathname);
-const out = process.argv[2] || path.join(dir, 'single/index.html');
+const SLIM = process.argv.includes('--slim');
+const out = process.argv.slice(2).find(a => !a.startsWith('--')) || path.join(dir, SLIM ? 'slim/index.html' : 'single/index.html');
+const SLIM_NETS = ['nts-style/', 'bunny/nts-style/'];
 const read = f => readFileSync(path.join(dir, f));
 const b64 = b => Buffer.from(b).toString('base64');
 const must = (s, a, b) => { if (!s.includes(a)) throw new Error(`build_single: '${a}' not found`); return s.split(a).join(b); };
@@ -43,7 +48,7 @@ const files = {};
 // every character's network folders (the page's CHARS): any folder here, or <character>/nts-tree/ or nts-style/, holding a meta.json
 const isNet = d => existsSync(path.join(dir, d, 'meta.json'));
 const nets = readdirSync(dir, { withFileTypes: true }).filter(d => d.isDirectory())
-  .flatMap(d => [`${d.name}/`, `${d.name}/nts-tree/`, `${d.name}/nts-style/`]).filter(isNet);
+  .flatMap(d => [`${d.name}/`, `${d.name}/nts-tree/`, `${d.name}/nts-style/`]).filter(isNet).filter(n => !SLIM || SLIM_NETS.includes(n));
 for (const net of nets) {
   for (const f of ['meta.json', 'net.png']) files[net + f] = read(net + f);
   for (const f of ['infer.wasm', 'infer-dot.wasm', 'infer-relaxed.wasm', 'infer-relaxed-dot.wasm'])   // the CPU engine's (a GPU-only style model has none)
@@ -76,6 +81,24 @@ const shim = `<script>
 `;
 
 let html = read('cpu.html').toString();
+if (SLIM) {   // the two style characters, the cheap 1x drawing, GPU only
+  const drop = ['girl', 'girlhd', 'stylesoft', 'bunny'];
+  for (const c of drop) {
+    html = html.replace(new RegExp(`\\n\\s*<button id="c-${c}"[^\\n]*</button>`), '');
+    html = html.replace(new RegExp(`\\n  ${c}: \\{[^\\n]*`), '');
+  }
+  for (const id of ['e-gpu', 'e-fused', 'e-webgpu', 'e-cpu', 'n-tree', 'n-dense']) html = must(html, `<button id="${id}" aria-pressed="false"`, `<button id="${id}" aria-pressed="false" hidden`);
+  html = must(html, ", fine: 2, fineTree: 'nts-style-hd/' }", ' }');
+  html = must(html, ', fine: 2 },   // bravo.py', ' },   // bravo.py');
+  html = must(html, '>Style</button>', '>Magical Girl</button>');
+  html = must(html, '>Bunny Style</button>', '>Bunny</button>');
+  html = must(html, "label: 'Magical Girl Style',", "label: 'Magical Girl',");
+  html = must(html, "label: 'Bunny Style',", "label: 'Bunny',");
+  html = must(html, '<title>Ternary Tree Shader</title>', '<title>Anime Style Shader</title>');
+  html = must(html, '<h1>Ternary Tree Shader</h1>', '<h1>Anime Style Shader</h1>');
+  html = html.replace(/<p class="hint">Drawn every frame[^<]*/, '<p class="hint">Drawn every frame by a tiny neural style shader (ternary stencils + fast-feedforward trees, WebGL2) trained on anime film of each character. Drag to orbit, pinch to zoom, double-tap to reset. Follow, Mic and Speak make her a VTuber.\n      ');
+  for (const c of drop) if (new RegExp(`id="c-${c}"|\\n  ${c}: \\{`).test(html)) throw new Error(`build_single --slim: ${c} left in the page`);
+}
 html = html.replace(/<script type="importmap">/, () => `${shim}<script type="importmap">`);
 html = html.replace(/^import \{([^}]*)\} from '\.\/([\w.-]+)';$/gm, (_, names, from) => `const {${names}} = ${exported[from]};`);
 const at = html.indexOf('<script type="module">\n') + '<script type="module">\n'.length;
@@ -86,4 +109,4 @@ if (/from '\.\//.test(html)) throw new Error('build_single: a relative import is
 html = html.replace('<title>', '<!-- built by build_single.mjs from cpu.html and its modules: edit those, not this -->\n<title>');
 mkdirSync(path.dirname(out), { recursive: true });
 writeFileSync(out, html);
-console.log(`${out}: ${(html.length / 1e6).toFixed(2)} MB; beside it: model.vrm.png, motions.json, nts/fine0..2.png, nts-tree/fine0..2.png`);
+console.log(`${out}: ${(html.length / 1e6).toFixed(2)} MB; beside it: ${SLIM ? 'model.vrm.png, bunny/model.vrm.png, motions.json, nts-style/fine0..2.png, bunny/nts-style/fine0..2.png' : 'model.vrm.png, motions.json, nts/fine0..2.png, nts-tree/fine0..2.png'}`);

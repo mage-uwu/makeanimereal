@@ -731,7 +731,7 @@ try {
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
     catch (e) {
       // no WebGL2: the default (GPU-only) character falls back to the magical girl on the CPU engine
-      if (CH.gpuOnly && CHAR === DEFAULT_CHAR) { console.warn('GPU engine unavailable, showing the magical girl on the CPU:', e); location.hash = 'girl-cpu'; location.reload(); throw e; }
+      if (CH.gpuOnly && CHAR === DEFAULT_CHAR && CHARS.girl) { console.warn('GPU engine unavailable, showing the magical girl on the CPU:', e); location.hash = 'girl-cpu'; location.reload(); throw e; }
       if (CH.gpuOnly) throw e;
       console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
