@@ -133,10 +133,12 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-sun.position.set(1, 3, 2);
-scene.add(sun);
+// One white key light at intensity PI and no ambient: MToon's own shade colours do the fill, and
+// skin and hair then match VRoid Studio's render of her (its thumbnail) to within a few levels.
+// Like VRoid Studio's preview, the light stays over the viewer's right shoulder as they orbit.
+const sun = new THREE.DirectionalLight(0xffffff, Math.PI);
+const keyDir = new THREE.Vector3(1, 1, 1).normalize();
+scene.add(sun, sun.target);
 
 // A soft round shadow under her feet, so she stands on something.
 const floorTex = (() => {
@@ -304,6 +306,8 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 20), t = clock.elapsedTime;
   if (vrm) { applyPose(t); blink(t); vrm.update(dt); }
   controls.update(dt);
+  sun.target.position.copy(controls.target);
+  sun.position.copy(keyDir).applyQuaternion(camera.quaternion).add(controls.target);
   renderer.render(scene, camera);
 });
 
