@@ -105,6 +105,7 @@ body.dragging #empty .card { border-color: var(--accent); }
 <div class="hud" id="runhint" hidden>
   <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or arrows to run, from the camera's view</span>
   <button type="button" id="autorun" aria-pressed="true">Auto-run a lap</button>
+  <button type="button" id="physics" aria-pressed="false" title="Simulate her body (MuJoCo) and track the generated motion with the trained policy">Physics</button>
   <span id="runstatus" role="status"></span>
 </div>
 
@@ -331,7 +332,7 @@ function setPose(p) {
 
 // Free run: PARC's motion generator (parcgen.wasm, weights parcgen.bin) moves her live over a
 // course, steered by the keys or round an auto-run lap (freerun.js).
-const fr = { run: null, assets: null, auto: true, keys: new Set() };
+const fr = { run: null, assets: null, physicsAssets: null, physics: false, auto: true, keys: new Set() };
 window.freeRun = fr;   // for tests: fr.run.root() is where she is
 async function freeAssets() {
   fr.assets ??= (async () => {
@@ -343,15 +344,32 @@ async function freeAssets() {
   })();
   return fr.assets;
 }
+// Physics: MuJoCo (WASM), the humanoid model and the trained tracker (physics/export.py).
+async function physicsAssets() {
+  fr.physicsAssets ??= (async () => {
+    const mujoco = await (await import('./mujoco/mujoco.js')).default();
+    const xml = await (await fetch('physics/humanoid.xml')).text();
+    const info = await (await fetch('physics/tracker.json')).json();
+    const res = await fetch('physics/tracker.bin').catch(() => null);
+    const weights = res?.ok ? await res.arrayBuffer() : await unpackPng('physics/tracker.bin.png');
+    return { mujoco, xml, info, weights };
+  })();
+  return fr.physicsAssets;
+}
 async function startFree() {
   $('runhint').hidden = false;
   $('runstatus').textContent = 'Loading the motion generator (9 MB)…';
   controls.autoRotate = false;
   $('spin').setAttribute('aria-pressed', 'false');
-  let a;
+  let a, ph = null;
   try { a = await freeAssets(); } catch (e) { $('runstatus').textContent = `Could not load the generator: ${e.message}`; return; }
+  if (fr.physics) {
+    $('runstatus').textContent = 'Loading the physics (MuJoCo, 11 MB)…';
+    try { ph = await physicsAssets(); } catch (e) { $('runstatus').textContent = `Physics unavailable (${e.message}); running without it`; }
+  }
   if (pose !== 'free:run' || fr.run) return;
   const run = await createFreeRun({ THREE, scene, vrm, wasm: a.wasm.slice(0), weights: a.weights.slice(0), start: a.start,
+    physics: ph && { mujoco: ph.mujoco, xml: ph.xml, info: ph.info, weights: ph.weights },
     onStatus: m => { $('runstatus').textContent = m; } }).catch(e => { $('runstatus').textContent = `Generator failed: ${e.message}`; });
   if (!run) return;
   if (pose !== 'free:run') { run.dispose(); return; }
@@ -552,6 +570,11 @@ $('arms').addEventListener('click', e => {
   armsMove = a;
   for (const b of $('arms').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.arms === a));
   if (pose.startsWith('clip:')) drive(false);
+});
+$('physics').addEventListener('click', () => {
+  fr.physics = !fr.physics;
+  $('physics').setAttribute('aria-pressed', String(fr.physics));
+  if (pose === 'free:run') { stopFree(); startFree(); }
 });
 $('autorun').addEventListener('click', () => {
   fr.auto = !fr.auto;
