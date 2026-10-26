@@ -90,6 +90,14 @@ class PatchD(torch.nn.Module):
     def forward(self, x): return self.net(x)
 
 
+def edges(img):
+    """(B, 3, H, W) -> the luma's gradient magnitude, max-pooled 3 x 3: a line a pixel off still meets
+    its match (the tolerant line loss)."""
+    l = (img * img.new_tensor([.299, .587, .114]).view(1, 3, 1, 1)).sum(1, keepdim=True)
+    g = F.pad((l[..., :, 1:] - l[..., :, :-1]).abs(), (0, 1, 0, 0)) + F.pad((l[..., 1:, :] - l[..., :-1, :]).abs(), (0, 0, 0, 1))
+    return F.max_pool2d(g, 3, 1, 1)
+
+
 def over_white(rgba):   # (B, H, W, 4) straight -> (B, 3, H, W)
     a = rgba[..., 3:4]
     return (rgba[..., :3] * a + 1 - a).permute(0, 3, 1, 2)
@@ -107,6 +115,10 @@ def main():
     ap.add_argument('--anchor', type=float, default=1.0)
     ap.add_argument('--eval-every', type=int, default=500)
     ap.add_argument('--vgg', default='imagenet', help="'random': an untrained one (code checks only)")
+    ap.add_argument('--load', help='a style.ntst to start from (its .ssm.pt beside it)')
+    ap.add_argument('--coarse-tex', action='store_true', help='learn the coarse texture level (64 x 64 x 8 a part; the fine level stays the fixed part code and UV)')
+    ap.add_argument('--lr-tex', type=float, default=0.01)
+    ap.add_argument('--lines', type=float, default=0.0, help="the tolerant line loss's weight (edges())")
     a = ap.parse_args()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
@@ -122,12 +134,17 @@ def main():
     net = Net(a.blocks, P, dil, T, V, dev); net.init(0); fixed_texture(net)
     shader_torch.SSM.clear()
     for b in map(int, a.ssm.split(',')) if a.ssm else []: shader_torch.SSM[b] = SSMTree(trees=T, levels=V).to(dev)
+    if a.load:
+        net.load(a.load)
+        for m, sd in zip(shader_torch.SSM.values(), torch.load(a.load + '.ssm.pt', map_location=dev)): m.load_state_dict(sd)
+        print(f'from {a.load}', flush=True)
     ssm_params = [p for m in shader_torch.SSM.values() for p in m.parameters()]
+    nfine = P * FINE * FINE   # texels of the fine level (fixed); the coarse level after them
     opt = Optim(net)
     ssm_opt = torch.optim.AdamW(ssm_params, lr=2e-3, weight_decay=0.01) if ssm_params else None
     vgg = VGG(a.vgg == 'random').to(dev); D = PatchD().to(dev)
     d_opt = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(.5, .999))
-    leaves = [net.dense, net.W1, net.W2] + ([net.TI, net.TO] if net.T else [])
+    leaves = [net.dense, net.W1, net.W2] + ([net.TI, net.TO] if net.T else []) + ([net.tex] if a.coarse_tex else [])
     nohits = torch.zeros(0, dtype=torch.long, device=dev)
     rng = np.random.default_rng(0)
     # crops around her: centres drawn from her coverage
@@ -147,7 +164,7 @@ def main():
 
     @torch.no_grad()
     def evaluate(step):
-        tot = {'perceptual': 0.0, 'anchor': 0.0}
+        tot = {'perceptual': 0.0, 'anchor': 0.0, 'lines': 0.0}
         tiles = []
         for k, i in enumerate(held):
             px = px_all[i:i + 1]
@@ -155,6 +172,7 @@ def main():
             tgt = px[..., 13:17].float() / 255
             tot['perceptual'] += perceptual(vgg, over_white(p), over_white(tgt)).item() / len(held)
             tot['anchor'] += (F.avg_pool2d(over_white(p), 8) - F.avg_pool2d(over_white(tgt), 8)).abs().mean().item() / len(held)
+            tot['lines'] += (edges(over_white(p)) - edges(over_white(tgt))).abs().mean().item() / len(held)
             if k % max(1, len(held) // 6) == 0 and len(tiles) < 6:
                 ren = px[0, ..., :3].float() / 255
                 row = torch.cat([ren, over_white(tgt)[0].permute(1, 2, 0), over_white(p)[0].permute(1, 2, 0)], 1)
@@ -166,6 +184,8 @@ def main():
 
     print(f'SSM blocks {a.ssm}: {sum(p.numel() for p in ssm_params)} parameters; adversarial x{a.adv} from step {a.adv_from}', flush=True)
     t0 = time.time(); it = 0; ema = {}
+    if a.load:   # the starting point's held-out numbers, the baseline
+        print('it 0  | held: ' + '  '.join(f'{k} {v:.4f}' for k, v in evaluate(0).items()), flush=True)
     while True:
         it += 1
         prog = min(1, (time.time() - t0) / a.seconds)
@@ -176,15 +196,16 @@ def main():
         # generator (the shader)
         for t in leaves: t.requires_grad_(True); t.grad = None
         if ssm_opt: ssm_opt.zero_grad()
-        p, _ = forward(net, px, pit, True, credit=True)
+        p, hits = forward(net, px, pit, True, credit=True)
         lp = perceptual(vgg, over_white(p), over_white(tgt))
+        ll = (edges(over_white(p)) - edges(over_white(tgt))).abs().mean((1, 2, 3)) if a.lines else torch.zeros_like(lp)
         la = (F.avg_pool2d(over_white(p), 8) - F.avg_pool2d(over_white(tgt), 8)).abs().mean((1, 2, 3)) \
             + (F.avg_pool2d(p[..., 3:4].permute(0, 3, 1, 2), 8) - F.avg_pool2d(tgt[..., 3:4].permute(0, 3, 1, 2), 8)).abs().mean((1, 2, 3))
         use_adv = it > a.adv_from
         lg = -D(d_in(p, px)).mean((1, 2, 3)) if use_adv else torch.zeros_like(lp)
-        (lp + a.anchor * la + (a.adv * min(1, (it - a.adv_from) / 500) if use_adv else 0) * lg).sum().backward()
+        (lp + a.anchor * la + a.lines * ll + (a.adv * min(1, (it - a.adv_from) / 500) if use_adv else 0) * lg).sum().backward()
         for t in leaves: t.requires_grad_(False)
-        opt.step(it, a.lr * sched, 0.0, a.batch, nohits)
+        opt.step(it, a.lr * sched, a.lr_tex * sched if a.coarse_tex else 0.0, a.batch, hits[hits >= nfine] if a.coarse_tex else nohits)
         if ssm_opt:
             for g in ssm_opt.param_groups: g['lr'] = 2e-3 * sched
             torch.nn.utils.clip_grad_norm_(ssm_params, 1.0); ssm_opt.step()
@@ -195,7 +216,7 @@ def main():
             ld.backward(); d_opt.step()
         else:
             ld = torch.zeros(())
-        for k, v in [('perc', lp.mean().item()), ('anchor', la.mean().item()), ('g', lg.mean().item()), ('d', ld.item())]:
+        for k, v in [('perc', lp.mean().item()), ('anchor', la.mean().item()), ('lines', ll.mean().item()), ('g', lg.mean().item()), ('d', ld.item())]:
             ema[k] = v if k not in ema else .98 * ema[k] + .02 * v
         last = time.time() - t0 >= a.seconds
         if it % a.eval_every == 0 or last:
