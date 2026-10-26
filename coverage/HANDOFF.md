@@ -140,12 +140,29 @@ the device with `#prof`.
   across frames, and a WebGPU kernel.
 - **Style shader** (`nts/style_torch.py`, `make_style_data.py`). The SSM shader with no neural texture
   (a fixed part code + UV instead), trained with VGG perceptual + PatchGAN + a weak 1/8-resolution
-  anchor, on film frames or on free-drawn keyframes. A first run on the film frames was in progress
-  at handoff. The question it tests: can a small real-time network learn drawn (non-literal) anime
-  features on held-out angles?
+  anchor, on film frames or on free-drawn keyframes. The question it tests: can a small real-time
+  network learn drawn (non-literal) anime features on held-out angles?
+
+  **First result (film frames, 840 frames at 360×640, 90 held out, 90 min, 5,921 steps).** Yes,
+  partly. With no learned texture it draws on held-out angles:
+  - strand lines through the hair, where the render has a smooth gradient;
+  - ink outlines on the jaw, neck and fingers;
+  - stronger lash lines;
+  - warm cel skin and neutral silver hair.
+
+  Still missing: the film's blush, its heavier ink weight, the crown whorl, and anything outside the
+  3D silhouette (the film follows the silhouette, so nothing asks for it). Held-out VGG perceptual
+  went from 0.687 at step 500 to 0.646.
+
+  The model is in the kit (`style/style.ntst` + `.ssm.pt`, 4 blocks with dilations 1,3,9,27 and SSM
+  blocks 1,3), with its final held-out grids. There is no runtime engine for it yet: the SSM write is
+  a frame-wide reduction. Do it in the fused WebGPU engine, ideally with a temporal write (read the
+  previous frame's state), which also removes the sync point.
 - **Free-drawn keyframes:** `edit_images.py` with a "draw it as an anime artist would, not a trace"
   prompt and no keying. 115 of a planned 300 were drawn for the magical girl. They clearly redraw eyes,
-  face and hair beyond the 3D silhouette.
+  face and hair beyond the 3D silhouette. They are kept in the session's `out/style/keys.tar`, which is not in the kit;
+  regenerate them with `jobs-keys.json` (in the tar) and `edit_images.py`. Next test: the style shader
+  on these drawings, to see whether it learns shapes beyond the silhouette.
 
 ## New character checklist
 
