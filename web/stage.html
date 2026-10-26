@@ -52,6 +52,8 @@ body {
 }
 #credit b { font-size: 17px; font-weight: 800; text-wrap: balance; }
 #credit span { font-size: 12px; color: var(--ink-soft); }
+#poses { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: thin; }
+#poses button { flex: none; }
 
 .group { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--chip); border: 1px solid var(--chip-line); backdrop-filter: blur(10px); flex-wrap: wrap; }
 button {
@@ -89,12 +91,11 @@ body.dragging #empty .card { border-color: var(--accent); }
   </div>
 </div>
 
-<div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span></div>
+<div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span><span id="motion-credit" hidden></span></div>
 
 <div class="hud" id="controls" hidden>
-  <div class="group" id="poses" aria-label="Pose">
+  <div class="group" id="poses" aria-label="Pose and moves">
     <button type="button" data-pose="stand" aria-pressed="true">Stand</button>
-    <button type="button" data-pose="wave" aria-pressed="false">Wave</button>
     <button type="button" data-pose="tpose" aria-pressed="false">T-pose</button>
   </div>
   <div class="group" id="faces" aria-label="Expression"></div>
@@ -115,7 +116,9 @@ body.dragging #empty .card { border-color: var(--accent); }
 </script>
 <script type="module">
 // A live VRM stage: orbit around the avatar with MToon shading, spring-bone hair and skirt, an idle
-// sway, blinking, eyes that follow the camera, and buttons for pose and expression.
+// sway, blinking, eyes that follow the camera, and buttons for pose, mocap moves and expression.
+// The moves are CMU motion capture clips (motions-cmu.json, made by coverage/motion/retarget_bvh.py)
+// retargeted live by coverage/live/motion.js.
 // Loads ?model=<url>, else stock.vrm.png beside the page (a VRM packed into a PNG by
 // coverage/live/slim_vrm.py, for hosts that serve images but not model files), else the stock
 // avatar in out/stock/ when served from the repo (npm run viewer, then /web/stage.html), else
@@ -124,6 +127,14 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { createMotion } from '../coverage/live/motion.js';
+
+// Button labels for the clips in motions-cmu.json, in this order.
+const MOVES = {
+  wave: 'Wave', bow: 'Grand bow', stretch: 'Stretch & yawn', walk: 'Walk', shywalk: 'Shy walk', coolwalk: 'Cool walk',
+  moonwalk: 'Moonwalk', twist: 'Twist', charleston: 'Charleston', dance: 'Ballet', jacks: 'Jumping jacks',
+};
+const motionData = fetch('./motions-cmu.json').then(r => (r.ok ? r.json() : null)).catch(() => null);
 
 const $ = id => document.getElementById(id);
 const stage = $('stage');
@@ -176,7 +187,7 @@ const resize = () => {
 addEventListener('resize', resize);
 resize();
 
-let vrm = null, pose = 'stand', face = null;
+let vrm = null, pose = 'stand', poseStart = 0, face = null, motion = null;
 const bone = n => vrm.humanoid.getNormalizedBoneNode(n);
 
 // A VRM packed into an RGB PNG by coverage/live/slim_vrm.py: a 4-byte length, then the file.
@@ -239,6 +250,19 @@ async function load(src, label) {
   $('faces').hidden = !wanted.length;
   face = null;
 
+  // The mocap retargets against her rest skeleton, so it is set up before any posing.
+  const motions = await motionData;
+  motion = motions ? createMotion(THREE, vrm, motions) : null;
+  $('motion-credit').textContent = motions?.credit.replace(/ \(mocap.*$/, '').replace(/, created.*$/, '') || '';
+  $('poses').querySelectorAll('[data-pose^="clip:"]').forEach(b => b.remove());
+  if (motion) for (const [name, label] of Object.entries(MOVES)) {
+    if (!motion.clips.includes(name)) continue;
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.pose = `clip:${name}`; b.textContent = label;
+    $('poses').append(b);
+  }
+  if (pose.startsWith('clip:') && !motion) pose = 'stand';
+
   // Settle the springs in the stand before showing her, so the hair doesn't fall in from the T-pose.
   setPose(pose);
   for (let i = 0; i < 120; i++) { applyPose(i / 60); vrm.update(1 / 60); }
@@ -250,13 +274,17 @@ async function load(src, label) {
 
 function setPose(p) {
   pose = p;
+  poseStart = clock.elapsedTime;
+  $('motion-credit').hidden = !p.startsWith('clip:');
   for (const b of $('poses').children) b.setAttribute('aria-pressed', String(b.dataset.pose === p));
 }
 
-// The pose at time t (seconds): arms down with a slow breath and sway, a wave, or the bind T-pose.
+// The pose at time t (seconds): a mocap clip from its start, the bind T-pose, or arms down with a
+// slow breath and sway.
 function applyPose(t) {
   vrm.humanoid.resetNormalizedPose();
   if (pose === 'tpose') return;
+  if (pose.startsWith('clip:')) { motion.apply(pose.slice(5), Math.max(0, t - poseStart)); return; }
   const breath = Math.sin(t * 1.6), sway = Math.sin(t * 0.7);
   bone('spine').rotation.x = 0.02 * breath;
   bone('chest') && (bone('chest').rotation.x = 0.015 * breath);
@@ -265,17 +293,8 @@ function applyPose(t) {
   bone('neck') && (bone('neck').rotation.z = -0.03 * sway);
   bone('leftUpperArm').rotation.z = -1.19 + 0.03 * breath;
   bone('leftLowerArm').rotation.z = -0.15;
-  if (pose === 'wave') {
-    bone('rightUpperArm').rotation.z = -0.95;
-    bone('rightUpperArm').rotation.x = -0.2;
-    bone('rightLowerArm').rotation.y = 0;
-    bone('rightLowerArm').rotation.z = -1.25 + 0.35 * Math.sin(t * 7);
-    bone('rightHand') && (bone('rightHand').rotation.z = 0.1 * Math.sin(t * 7));
-    bone('head').rotation.z = 0.08;
-  } else {
-    bone('rightUpperArm').rotation.z = 1.19 - 0.03 * breath;
-    bone('rightLowerArm').rotation.z = 0.15;
-  }
+  bone('rightUpperArm').rotation.z = 1.19 - 0.03 * breath;
+  bone('rightLowerArm').rotation.z = 0.15;
 }
 
 // Blink every few seconds, skipped while an expression that closes the eyes is on.

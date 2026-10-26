@@ -39,6 +39,24 @@ skirt, an idle sway, blinking, and buttons for pose (stand, wave, T-pose) and ex
 `web/stock.vrm.png` (a VRM packed by `coverage/live/slim_vrm.py`), else
 `out/stock/stock_avatar.vrm` if you put one there, else waits for a dropped or chosen `.vrm`.
 
+### Moves (motion capture)
+
+The stage's moves are 11 clips from the [CMU Graphics Lab Motion Capture Database](http://mocap.cs.cmu.edu/)
+(free for all uses, including in commercial products; the raw data may not be resold), retargeted
+into `web/motions-cmu.json` by `coverage/motion/retarget_bvh.py`, which reads CMU's `.asf`/`.amc`
+files as well as BVH. To rebuild or add clips (subject `NN`, trial `NN_TT` from the CMU site):
+
+```sh
+mkdir -p cmu && cd cmu && curl -O http://mocap.cs.cmu.edu/subjects/91/91.asf -O http://mocap.cs.cmu.edu/subjects/91/91_29.amc && cd ..
+python3 coverage/motion/retarget_bvh.py cmu --out web/motions-cmu.json --face-front \
+  --credit "Motion: CMU Graphics Lab Motion Capture Database (mocap.cs.cmu.edu), created with funding from NSF EIA-0196217" \
+  --clip walk=91.asf:91_29.amc --clip wave=141.asf:141_16.amc ...   # see the clip list in web/motions-cmu.json
+```
+
+`--face-front` takes out slow turning as well as travel, so clips that walk loops round the room
+play facing the front. The coverage clips in `coverage/live/motions.json` are from the Bandai Namco
+Research Motion Dataset, which is CC BY-NC 4.0: non-commercial only.
+
 ## Web viewer (anime key drawings you can orbit freely)
 
 Gen 2: 174 key drawings on eight camera-height rings from -30 deg (looking up) to +75 deg (nearly
