@@ -35,9 +35,11 @@ Image-only models (Hy Image, Grok Imagine) are sent to OpenRouter's `/images` en
 
 `web/stage.html` renders a VRM avatar live: drag to orbit, MToon shading, spring-bone hair and
 skirt, an idle sway, blinking, and buttons for pose (stand, wave, T-pose) and expression. With
-`npm run viewer` open http://localhost:8000/web/stage.html: it loads `?model=<url>`, else
-`web/stock.vrm.png` (a VRM packed by `coverage/live/slim_vrm.py`), else
-`out/stock/stock_avatar.vrm` if you put one there, else waits for a dropped or chosen `.vrm`.
+`npm run viewer` open http://localhost:8000/web/stage.html. It starts with a generic box character
+(`web/boxchar.js`: a bare VRM humanoid on the rig the moves were baked on, so every move, clip and
+the free run drive it unchanged), or the VRM at `?model=<url>`. **VRoid avatar** switches to
+`web/stock.vrm.png` (a VRM packed by `coverage/live/slim_vrm.py`), else `out/stock/stock_avatar.vrm`
+if you put one there, and back; **Open…** or a drop loads any `.vrm`.
 
 ### Moves (VRM Animation)
 

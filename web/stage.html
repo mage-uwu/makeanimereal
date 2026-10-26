@@ -91,7 +91,7 @@ body.dragging #empty .card { border-color: var(--accent); }
 
 <div id="stage"></div>
 
-<div id="empty">
+<div id="empty" hidden>
   <div class="card">
     <h1>Drop a .vrm avatar here</h1>
     <p>She loads on this stage with her toon shading, swaying hair and blinking eyes. The file stays on your device.</p>
@@ -100,7 +100,7 @@ body.dragging #empty .card { border-color: var(--accent); }
   </div>
 </div>
 
-<div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span><span id="motion-credit" hidden></span></div>
+<div class="hud" id="credit" hidden><b id="name"></b><span id="author"></span><span id="motion-credit" hidden></span><span id="loadstatus" role="status"></span></div>
 
 <div class="hud" id="runhint" hidden>
   <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or arrows to run, from the camera's view</span>
@@ -126,6 +126,7 @@ body.dragging #empty .card { border-color: var(--accent); }
   <div class="group">
     <button type="button" id="spin" aria-pressed="true">Turntable</button>
     <button type="button" id="reset">Reset view</button>
+    <button type="button" id="avatar" aria-pressed="false" title="Switch between the box character and the VRoid avatar">VRoid avatar</button>
     <button type="button" id="other">Open…</button>
   </div>
 </div>
@@ -153,7 +154,8 @@ body.dragging #empty .card { border-color: var(--accent); }
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMLoaderPlugin, VRMUtils, VRMHumanoid } from '@pixiv/three-vrm';
+import { createBoxCharacter } from './boxchar.js';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { createVrmanet } from './vrmanet.js';
 import { createFreeRun, COURSE } from './freerun.js';
@@ -261,21 +263,41 @@ async function unpackPng(url) {
   return rgb.buffer.slice(4, 4 + n);
 }
 
-// src: a URL, or the file's bytes.
+const say = m => { $('loadstatus').textContent = m; $('status').textContent = m; };
+
+// A VRM file. src: a URL, or the file's bytes.
 async function load(src, label) {
-  $('status').textContent = `Loading ${label}…`;
+  say(`Loading ${label}…`);
   const loader = new GLTFLoader();
   loader.register(parser => new VRMLoaderPlugin(parser));
   let gltf;
   try { gltf = typeof src === 'string' ? await loader.loadAsync(src) : await loader.parseAsync(src, ''); }
-  catch (e) { $('status').textContent = `Could not open ${label}: ${e.message || e}. Pick a .vrm file exported from VRoid or similar.`; return false; }
+  catch (e) { say(`Could not open ${label}: ${e.message || e}. Pick a .vrm file exported from VRoid or similar.`); return false; }
   const next = gltf.userData.vrm;
-  if (!next) { $('status').textContent = `${label} is a glTF without VRM data. Pick a .vrm file.`; return false; }
-  if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); }
-  vrm = next;
+  if (!next) { say(`${label} is a glTF without VRM data. Pick a .vrm file.`); return false; }
   VRMUtils.removeUnnecessaryVertices(gltf.scene);
   VRMUtils.combineSkeletons(gltf.scene);
-  VRMUtils.rotateVRM0(vrm);
+  VRMUtils.rotateVRM0(vrm = install(next));
+  finish(label);
+  $('avatar').setAttribute('aria-pressed', 'true');
+  return true;
+}
+
+// The built-in box character (boxchar.js), the default.
+function loadBox() {
+  vrm = install(createBoxCharacter(THREE, VRMHumanoid));
+  finish('Box character');
+  $('avatar').setAttribute('aria-pressed', 'false');
+}
+
+// Swap the character in: whatever moves the old one stops first.
+function install(next) {
+  if (pose.startsWith('parc:') || pose === 'free:run') setPose('stand');
+  if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); }
+  return next;
+}
+
+function finish(label) {
   vrm.scene.traverse(o => { o.frustumCulled = false; });
   scene.add(vrm.scene);
   if (vrm.lookAt) vrm.lookAt.target = camera;
@@ -313,8 +335,7 @@ async function load(src, label) {
   for (let i = 0; i < 120; i++) { applyPose(i / 60); vrm.update(1 / 60); }
   $('empty').hidden = true;
   $('controls').hidden = false;
-  $('status').textContent = '';
-  return true;
+  say('');
 }
 
 function setPose(p) {
@@ -432,16 +453,24 @@ async function startParkour(name) {
   const clip = createVRMAnimationClip(anim, vrm);
   pk.mixer = new THREE.AnimationMixer(vrm.scene);
   pk.mixer.clipAction(clip).play();
-  // Watch from the side of her path, pulled back: where she starts, and the way she goes.
-  const hipsAt = t => { pk.mixer.setTime(t); vrm.scene.updateMatrixWorld(true); return vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3()); };
-  const end = hipsAt(clip.duration * 0.999), start = hipsAt(0);
-  const along = end.clone().sub(start).setY(0);
-  const side = along.lengthSq() > 1e-4 ? new THREE.Vector3(along.z, 0, -along.x).normalize() : new THREE.Vector3(1, 0, 0);
-  controls.target.copy(start);
-  camera.position.copy(start).addScaledVector(side, 5.5).add(new THREE.Vector3(0, 1.6, 0)).addScaledVector(along.normalize(), -1.5);
-  controls.update();
   // The player scales the hips' path by hip height; the terrain gets the same scale.
   const s = vrm.humanoid.normalizedRestPose.hips.position[1] / anim.restHipsPosition.y;
+  // Watch from the side of her path, pulled back: where she starts, and the way she goes. Terrain can
+  // hide her (a wall she climbs, a pit she crosses): of eight directions round that view, take the one
+  // that needs the camera least high to see over the terrain all along her path, and raise it that much.
+  const hipsAt = t => { pk.mixer.setTime(t); vrm.scene.updateMatrixWorld(true); return vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3()); };
+  const path = Array.from({ length: 12 }, (_, i) => hipsAt(clip.duration * 0.999 * i / 11));
+  const start = path[0], along = path[11].clone().sub(start).setY(0);
+  const side = along.lengthSq() > 1e-4 ? new THREE.Vector3(along.z, 0, -along.x).normalize() : new THREE.Vector3(1, 0, 0);
+  const R = 5.7, view = side.clone().multiplyScalar(5.5).addScaledVector(along.normalize(), -1.5).normalize();
+  const height = (x, z) => (ground.heights[Math.round((z / s - ground.z0) / ground.cell)]?.[Math.round((x / s - ground.x0) / ground.cell)] ?? -Infinity) * s;
+  // The steepest rise of the terrain over her, seen from that way (off the map is open).
+  const rise = dir => Math.max(0, ...path.flatMap(p => [0.5, 1, 1.5, 2, 3, 4, 5].map(d => (height(p.x + dir.x * d, p.z + dir.z * d) - p.y + 0.3) / d)));
+  const ways = [0, 1, -1, 2, -2, 3, -3, 4].map(k => view.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), k * Math.PI / 4));
+  const best = ways.reduce((a, b) => (rise(b) < rise(a) - 0.05 ? b : a));
+  controls.target.copy(start);
+  camera.position.copy(start).addScaledVector(best, R).add(new THREE.Vector3(0, Math.min(Math.max(1.6, rise(best) * R), R * 1.5), 0));
+  controls.update();
   pk.terrain = buildTerrain(ground, s);
   scene.add(pk.terrain);
   floor.visible = false;
@@ -600,17 +629,22 @@ const openFile = async file => {
 $('pick').addEventListener('click', () => $('file').click());
 $('other').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', e => { openFile(e.target.files[0]); e.target.value = ''; });
-addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
-addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
-addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); openFile(e.dataTransfer.files[0]); });
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); $('empty').hidden = false; });
+addEventListener('dragleave', e => { if (!e.relatedTarget) { document.body.classList.remove('dragging'); $('empty').hidden = true; } });
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); $('empty').hidden = true; openFile(e.dataTransfer.files[0]); });
 
-const asked = new URLSearchParams(location.search).get('model');
-const fallback = '../out/stock/stock_avatar.vrm';
-if (asked) load(asked, asked.split('/').pop());
-else {
-  $('status').textContent = 'Looking for an avatar…';
-  unpackPng('stock.vrm.png').then(buf => load(buf, 'stock avatar'), () =>
-    fetch(fallback, { method: 'HEAD' }).then(r => r.ok && load(fallback, 'stock_avatar.vrm')).catch(() => {})
-  ).finally(() => { if (!vrm) $('status').textContent = ''; });
+// The VRoid avatar, on request: stock.vrm.png beside the page, else the stock avatar in out/stock/.
+async function loadVroid() {
+  say('Loading the VRoid avatar…');
+  const local = '../out/stock/stock_avatar.vrm';
+  const ok = await unpackPng('stock.vrm.png').then(buf => load(buf, 'stock avatar'),
+    () => fetch(local, { method: 'HEAD' }).then(r => r.ok && load(local, 'stock_avatar.vrm')).catch(() => false));
+  if (!ok) say('No VRoid avatar here: open or drop a .vrm file');
 }
+$('avatar').addEventListener('click', () => ($('avatar').getAttribute('aria-pressed') === 'true' ? loadBox() : loadVroid()));
+
+// Start with the box character, or the model named in ?model=.
+const asked = new URLSearchParams(location.search).get('model');
+loadBox();
+if (asked) load(asked, asked.split('/').pop());
 </script>
