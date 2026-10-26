@@ -131,7 +131,7 @@ import { createSword } from './sword.js';
 import { backdropUniforms, createBackdropCanvas } from './backdrop.js';
 
 // The characters: each its own model and its own trained network(s) (coverage/asset/README.md).
-// #bunny, #girlhd pick the others (scale 2: trained at 720 x 1280, drawn at twice the pixels); shorts:
+// #girl, #girlhd, #style, #bunny pick the others (scale 2: trained at 720 x 1280, drawn at twice the pixels); shorts:
 // the colour of the safety shorts its training renders had (render-orbit.mjs --shorts-color), drawn here too.
 const CHARS = {
   girl: { label: 'Magical Girl', model: 'model.vrm.png', tree: 'nts-tree/', dense: 'nts/', shorts: 0x1c2056 },
@@ -140,7 +140,9 @@ const CHARS = {
   bunny: { label: 'Bunny', model: 'bunny/model.vrm.png', tree: 'bunny/nts-tree/', shorts: 0xf4dde3 },
   bunnystyle: { label: 'Bunny Style', model: 'bunny/model.vrm.png', tree: 'bunny/nts-style/', shorts: 0xf4dde3, gpuOnly: true },   // bravo.py's viewer files
 };
-const CHAR = Object.keys(CHARS).find(k => k !== 'girl' && location.hash.slice(1).split('-').includes(k)) || 'girl', CH = CHARS[CHAR];
+// the page opens on Bunny Style; #girl (or another character's name) picks another
+const DEFAULT_CHAR = 'bunnystyle';
+const CHAR = Object.keys(CHARS).find(k => k !== DEFAULT_CHAR && location.hash.slice(1).split('-').includes(k)) || DEFAULT_CHAR, CH = CHARS[CHAR];
 // The network's frame: the training frames' scale (360 x 640, or twice that for an HD character) on a
 // larger canvas, so raised arms fit. #tight: the training frame itself (the checks compare against it).
 const S = CH.scale || 1;
@@ -668,7 +670,7 @@ for (const c of Object.keys(CHARS)) {
   b.onclick = () => {
     if (c === CHAR) return;
     const t = location.hash.slice(1).split('-').filter(x => x && !(x in CHARS) && x !== 'dense');
-    if (c !== 'girl') t.push(c);
+    if (c !== DEFAULT_CHAR) t.push(c);
     location.hash = t.join('-'); location.reload();
   };
 }
@@ -712,7 +714,11 @@ try {
   if (ENGINE === 'gpu') {
     try { [gls] = await Promise.all([createGlShader({ THREE, renderer, NW, NH, base: NET_BASE, maxStrip: MAX_STRIP, cacheStencil: !location.hash.includes('nocache'), packed: !location.hash.includes('unpacked'),
       precision: location.hash.includes('fp32') ? 'full' : location.hash.match(/fp16emu(S|B)?/) ? 'emulate' + (location.hash.match(/fp16emu(S|B)?/)[1] || '') : 'half' }), loadModel()]); parts = gls.parts; }
-    catch (e) { if (CH.gpuOnly) throw e; console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
+    catch (e) {
+      // no WebGL2: the default (GPU-only) character falls back to the magical girl on the CPU engine
+      if (CH.gpuOnly && CHAR === DEFAULT_CHAR) { console.warn('GPU engine unavailable, showing the magical girl on the CPU:', e); location.hash = 'girl-cpu'; location.reload(); throw e; }
+      if (CH.gpuOnly) throw e;
+      console.warn('GPU engine unavailable, using the CPU one:', e); location.hash = engineHash('cpu'); location.reload(); throw e; }
   } else {
     if (!WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11])))
       throw new Error('this browser has no WebAssembly SIMD (iOS 16.4 or later, or a current desktop browser)');
