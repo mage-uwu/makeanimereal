@@ -363,7 +363,7 @@ const rgbOf = n => { const c = new THREE.Color().setStyle(css(n), THREE.LinearSR
 function glView(extra = {}) {
   const fb = frameBox();
   // toon contours: drawn for the canvas as it is now (so a zoom redraws them), about 1.5 CSS pixels wide at the fitted size
-  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(6, Math.max(1, fb.box[3] * 0.0012))) : null;
+  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(4, Math.max(0.75, fb.box[3] * 0.0007))) : null;
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
   // Raw 3D: three.js at the canvas's resolution, not the network's colour tile stretched

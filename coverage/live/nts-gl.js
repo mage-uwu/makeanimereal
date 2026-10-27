@@ -603,7 +603,7 @@ float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing
   return 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
 }
 // Anime line art from toon.js (canvas-sized): her outline (the hull, blue) where it lies on the background,
-// and inner lines where the surface a line-width away is a step behind. Near-black ink.
+// and inner lines where the surface a line-width away is a step behind. Thin, multiplied, part strength.
 vec4 toonOver(vec4 c) {
   if (toon == 0) return c;
   ivec2 p = ivec2(gl_FragCoord.xy);
@@ -623,7 +623,10 @@ vec4 toonOver(vec4 c) {
     }
     ki = smoothstep(0.5, 3.5, n);
   }
-  return vec4(mix(c.rgb, vec3(0.045, 0.035, 0.05), max(ko, ki)), 1.0);
+  // composed, not painted over: the ink multiplies what is beneath (drawing, VRoid blend or backdrop), so a
+  // line takes the local colour as ink on a painting does, at part strength, the inner lines lighter
+  float k = max(0.65 * ko, 0.45 * ki);
+  return vec4(c.rgb * mix(1.0, 0.18, k), 1.0);
 }
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
