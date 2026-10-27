@@ -80,7 +80,7 @@ button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
       <button id="m-raw" aria-pressed="false">Raw 3D</button>
       <button id="m-sharp" aria-pressed="true" hidden title="Edge-aware upscale: her edges at the screen's resolution, guided by her geometry (off: plain bilinear)">Sharp</button>
       <button id="m-fine" aria-pressed="false" hidden title="The network on a grid twice as fine as it trained on (its stencils' reach scaled to match): the same drawing at twice the resolution, four times the work (off: its training resolution)">2x</button>
-      <button id="m-lines" aria-pressed="true" hidden title="Line art: toon contours (drawn from her geometry), the network's learned ink, or none">Lines: Toon</button>
+      <button id="m-lines" aria-pressed="true" hidden title="Line art: anime contours drawn from her geometry at the screen's resolution (outline, depth steps, material borders), or none">Lines: Anime</button>
       <span class="sep"></span>
       <button id="e-gpu" aria-pressed="false" title="The network in WebGL2 fragment shaders">GPU</button>
       <button id="e-fused" aria-pressed="false" title="The network in fused WebGPU compute kernels, all on the GPU (fused-nts.js)">Fused</button>
@@ -348,7 +348,7 @@ net.width = NW; net.height = NH;
 const netCtx = net.getContext('2d');
 const zoom = { z: 1, tx: 0, ty: 0 };   // magnification and shift (CSS pixels) of the fitted frame
 let blend = 0;   // the VRoid render's share in the blend (v-blend)
-let fps = 0, lastShown = 0, raw = false, lines = 'off', sharp = !location.hash.includes('nosharp');   // line art (both off for now); the edge-aware upscale: 'toon' (toon.js), 'neural' (the ink branch), 'off'
+let fps = 0, lastShown = 0, raw = false, lines = location.hash.includes('nolines') ? 'off' : 'toon', sharp = !location.hash.includes('nosharp');   // line art (both off for now); the edge-aware upscale: 'toon' (toon.js), 'neural' (the ink branch), 'off'
 function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 // Where the frame goes on the canvas: fit her height (a portrait phone shows the middle of the wide
 // frame), then the pinch zoom. [x, y, w, h] in canvas pixels, top-down.
@@ -363,7 +363,7 @@ const rgbOf = n => { const c = new THREE.Color().setStyle(css(n), THREE.LinearSR
 function glView(extra = {}) {
   const fb = frameBox();
   // toon contours: drawn for the canvas as it is now (so a zoom redraws them), about 1.5 CSS pixels wide at the fitted size
-  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(8, Math.max(1, fb.box[3] * 0.0019))) : null;
+  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(6, Math.max(1, fb.box[3] * 0.0012))) : null;
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
   // Raw 3D: three.js at the canvas's resolution, not the network's colour tile stretched
@@ -599,7 +599,7 @@ document.getElementById('m-sharp').onclick = e => { sharp = !sharp; e.currentTar
 document.getElementById('m-lines').onclick = e => {
   const modes = ['toon', ...(gls?.ink ? ['neural'] : []), 'off'];
   lines = modes[(modes.indexOf(lines) + 1) % modes.length];
-  e.currentTarget.textContent = `Lines: ${{ toon: 'Toon', neural: 'Neural', off: 'Off' }[lines]}`;
+  e.currentTarget.textContent = `Lines: ${{ toon: 'Anime', neural: 'Neural', off: 'Off' }[lines]}`;
   e.currentTarget.setAttribute('aria-pressed', String(lines !== 'off')); dirty = true;
 };
 document.getElementById('v-blend').onclick = e => {
@@ -753,10 +753,12 @@ try {
     parts = shader.parts;
   }
   assignParts(parts);
-  // Line art (toon contours, the ink branch) is off for now: the chip stays hidden and toon.js unused.
+  // Line art: anime contours from her geometry (toon.js) at the screen's resolution; the Lines chip turns them off
   if (gls) gls.prof.on = PROF && !PROF_A;
   if (gls) {   // GPU engine: the edge-aware upscale
     guide = createGuide({ THREE, renderer, vertexShader: gbufVert, depthUniforms: depthMat.uniforms });
+    toon = createToon({ THREE, renderer, root: vrm.scene, extra: shorts });
+    const lb = document.getElementById('m-lines'); lb.hidden = false; lb.textContent = 'Lines: Anime'; lb.setAttribute('aria-pressed', String(lines !== 'off'));
     rawView = createRawView({ THREE, renderer });
     const b = document.getElementById('m-sharp'); b.hidden = false; b.setAttribute('aria-pressed', String(sharp));
     const f = document.getElementById('m-fine'); f.hidden = !CH.fine; f.setAttribute('aria-pressed', String(FINE > 1));

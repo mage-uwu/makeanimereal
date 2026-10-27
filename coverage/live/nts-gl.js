@@ -602,23 +602,28 @@ float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing
   float n = toonP.x, f = toonP.y;
   return 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
 }
-// toon.js's contours (canvas-sized), plus the near side of every step in depth of more than 3 cm from
-// one of her surfaces to another (the silhouette is the hull's): sixteen taps about half a line-width
-// away, thinner than the outline as inner lines are drawn, a partial count giving the soft edge.
+// Anime line art from toon.js (canvas-sized): her outline (the hull, blue) where it lies on the background,
+// and inner lines where the surface a line-width away is a step behind. Near-black ink.
 vec4 toonOver(vec4 c) {
   if (toon == 0) return c;
   ivec2 p = ivec2(gl_FragCoord.xy);
-  float k = texelFetch(TT, p, 0).a, z = viewZ(p);
+  vec4 t = texelFetch(TT, p, 0);
+  float z = viewZ(p), ko = z < 1e3 ? 0.0 : t.b, ki = 0.0;   // her outline only against the background (not strand over strand)
   if (z < 1e3) {
     float n = 0.0;
     for (int i = 0; i < 16; i++) {
       float a = float(i) * 0.3927 + 0.2, r = max(1.0, toonP.z * (i % 2 == 0 ? 0.45 : 0.8));
-      float zn = viewZ(p + ivec2(round(vec2(cos(a), sin(a)) * r)));
-      if (zn < 1e3 && zn - z > 0.03) n += 1.0;
+      ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), ivec2(view) - 1);
+      float zn = viewZ(q);
+      float dz = zn - z, gn = texelFetch(TT, q, 0).r;
+      // a step behind: to another material (hair over face), or a big one (an arm before her body)
+      // a step behind of 3 cm or more (bangs over forehead, jaw over neck, an arm before her body), except
+      // hair over hair (her strand layers would hatch it all over): hair is group 31 (toon.js)
+      if (zn < 1e3 && dz > 0.03 && !(t.r > 30.5 / 32.0 && gn > 30.5 / 32.0)) n += 1.0;
     }
-    k = max(k, smoothstep(0.5, 3.5, n));
+    ki = smoothstep(0.5, 3.5, n);
   }
-  return vec4(mix(c.rgb, vec3(0.012, 0.010, 0.022), k), 1.0);
+  return vec4(mix(c.rgb, vec3(0.045, 0.035, 0.05), max(ko, ki)), 1.0);
 }
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {

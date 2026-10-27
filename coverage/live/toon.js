@@ -8,11 +8,20 @@
 // her forehead) the hull's few millimetres can miss, so the prepass depth goes along too: nts-gl.js
 // inks a pixel when the surface a line-width away is a step behind it. Only materials that carry an outline in the model (her
 // skin, clothes and shoes) and her hair get a hull; decals (eyes, brows, lashes) and the mouth don't.
-// The result is a canvas-sized mask; nts-gl.js lays it over the drawing in its display pass.
+// The prepass also writes each surface's material group into red (group / 32: all skin 30, all hair 31,
+// every other material its own), so nts-gl.js can leave out the lines between hair's own layers. The hull
+// writes blue: the outline mask. Its width is weighted by light: heavier on the side turned from the light.
+// The result is canvas-sized; nts-gl.js lays it over the drawing in its display pass.
 export function createToon({ THREE, renderer, root, extra = [] }) {
   const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
   const uni = { width: { value: 2 }, res: { value: new THREE.Vector2(1, 1) }, back: { value: 0.004 } };
-  const cache = new Map();
+  const cache = new Map(), groups = new Map();
+  // skin 30 and hair 31 (nts-gl.js knows hair's: no lines between its own layers); the rest from 1 up
+  const groupOf = m => { const n = m.name || m.uuid;
+    if (/HAIR/i.test(n)) return 31;
+    if (/SKIN/i.test(n)) return 30;
+    if (!groups.has(n)) groups.set(n, Math.min(29, groups.size + 1));
+    return groups.get(n); };
   const mapOf = m => m.map ?? m.uniforms?.map?.value ?? null;
   const hullable = m => m.isOutline !== true && !m.transparent && ((m.outlineWidthMode && m.outlineWidthMode !== 'none') || /HAIR/i.test(m.name) || m.isMeshBasicMaterial);
   function derived(m) {
@@ -20,11 +29,11 @@ export function createToon({ THREE, renderer, root, extra = [] }) {
     let pair = { depth: HIDDEN, hull: HIDDEN };
     if (m.isOutline !== true && !m.transparent && m.visible !== false) {
       const map = m.alphaTest > 0 ? mapOf(m) : null, cut = map ? { map, alphaTest: m.alphaTest } : {};
-      const depth = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, ...cut });
+      const depth = new THREE.MeshBasicMaterial({ color: new THREE.Color(groupOf(m) / 32, 0, 0), side: THREE.DoubleSide, ...cut });
       let hull = HIDDEN;
       if (hullable(m)) {
-        // Lambert: always has the vertex normal (Basic only with skinning or an envmap). Black, opaque.
-        hull = new THREE.MeshLambertMaterial({ color: 0x000000, side: THREE.BackSide, depthWrite: false, ...cut });
+        // Lambert: always has the vertex normal (Basic only with skinning or an envmap). Blue (the mask), opaque.
+        hull = new THREE.MeshLambertMaterial({ color: 0x000000, emissive: 0x0000ff, side: THREE.BackSide, depthWrite: false, ...cut });
         hull.onBeforeCompile = sh => {
           Object.assign(sh.uniforms, { toonWidth: uni.width, toonRes: uni.res, toonBack: uni.back });
           sh.vertexShader = 'uniform float toonWidth, toonBack; uniform vec2 toonRes;\n' + sh.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
@@ -36,8 +45,10 @@ export function createToon({ THREE, renderer, root, extra = [] }) {
     vec4 cp = projectionMatrix * (mvPosition + vec4(0.0, 0.0, -toonBack, 0.0));
     vec2 dir = (projectionMatrix * vec4(vn, 0.0)).xy * toonRes;
     float len = length(dir);
+    // stylized weight: heavier on the side turned from the light (upper left, in front), lighter where it's lit
+    float wt = mix(0.65, 1.45, 0.5 - 0.5 * dot(vn, normalize(vec3(-0.4, 0.6, 0.7))));
     gl_Position = cp;
-    if (len > 1e-6) gl_Position.xy += dir / len * (2.0 * toonWidth) / toonRes * cp.w;
+    if (len > 1e-6) gl_Position.xy += dir / len * (2.0 * toonWidth * wt) / toonRes * cp.w;
   }`);
         };
         hull.customProgramCacheKey = () => 'toon-hull';
@@ -58,7 +69,7 @@ export function createToon({ THREE, renderer, root, extra = [] }) {
   let rt = null;
   const clear = new THREE.Color();
   // view: { W, H, box: [x, y, w, h] } as nts-gl.js gets it (the network frame's place on the canvas);
-  // width: line width in canvas pixels. Returns the mask (alpha: ink) and depth textures, canvas-sized,
+  // width: line width in canvas pixels. Returns the mask (blue: the outline; red: material group) and depth textures, canvas-sized,
   // with what nts-gl.js needs to read the depth.
   function render(scene, camera, { W, H, box }, width) {
     if (!rt || rt.width !== W || rt.height !== H) {
