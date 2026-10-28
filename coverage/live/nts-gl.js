@@ -617,8 +617,8 @@ vec3 fillAt(ivec2 pp) {
 vec3 inkOf(vec3 f) { return min(f * f * 0.34 + vec3(0.015, 0.0, 0.03), vec3(0.30)); }
 // Line art from toon.js (canvas-sized), solid like drawn line art: her outline (the hull, blue) where it
 // lies on the background, in the ink of the fill beside it; inner lines where the surface a line-width
-// away is a step behind (jaw over neck, hair over shoulders; not between hair's own layers), a little
-// lighter, in the ink of the near surface.
+// away is a step behind (jaw over neck, hair over shoulders; not between hair's own layers) or where hair
+// meets the face (bangs over the forehead), a little lighter, in the ink of the near surface.
 vec4 toonOver(vec4 c) {
   if (toon == 0) return c;
   ivec2 p = ivec2(gl_FragCoord.xy);
@@ -634,6 +634,13 @@ vec4 toonOver(vec4 c) {
     float dz = zn - z, gn = texelFetch(TT, q, 0).r;
     // a step behind of 3 cm or more, except hair over hair (its strand layers would hatch it): hair is group 31 (toon.js)
     if (zn < 1e3 && dz > 0.03 && !(t.r > 30.5 / 32.0 && gn > 30.5 / 32.0)) n += 1.0;
+    // hair against the face (bangs over the forehead, side locks over the cheeks), on the hair's side, at any
+    // small step: clear hair here, clear face (group 29, toon.js) there, and still face three times as far: an
+    // open patch, not skin showing in a gap between strands (their IDs blend at multisampled edges)
+    else if (zn < 1e3 && dz > -0.01 && t.r > 30.75 / 32.0 && abs(gn - 29.0 / 32.0) < 0.25 / 32.0) {
+      ivec2 q2 = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * r * 3.0)), ivec2(0), ivec2(view) - 1);
+      if (abs(texelFetch(TT, q2, 0).r - 29.0 / 32.0) < 0.25 / 32.0 && viewZ(q2) < 1e3) n += 1.0;
+    }
   }
   ki = smoothstep(0.5, 3.5, n);
   if (ko > 0.0 && side.r < 0.0)   // her fill further out: 8 taps at 2.5 line-widths

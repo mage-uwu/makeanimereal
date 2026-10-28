@@ -8,19 +8,22 @@
 // her forehead) the hull's few millimetres can miss, so the prepass depth goes along too: nts-gl.js
 // inks a pixel when the surface a line-width away is a step behind it. Only materials that carry an outline in the model (her
 // skin, clothes and shoes) and her hair get a hull; decals (eyes, brows, lashes) and the mouth don't.
-// The prepass also writes each surface's material group into red (group / 32: all skin 30, all hair 31,
-// every other material its own), so nts-gl.js can leave out the lines between hair's own layers. The hull
+// The prepass also writes each surface's material group into red (group / 32: face 29 (skin, brows, eyes), other skin 30,
+// hair 31, every other material its own), so nts-gl.js can leave out the lines between hair's own layers
+// and draw the one where hair meets the face. The hull
 // writes blue: the outline mask. Its width is weighted by light: heavier on the side turned from the light.
 // The result is canvas-sized; nts-gl.js lays it over the drawing in its display pass.
 export function createToon({ THREE, renderer, root, extra = [] }) {
   const HIDDEN = new THREE.MeshBasicMaterial({ visible: false });
   const uni = { width: { value: 2 }, res: { value: new THREE.Vector2(1, 1) }, back: { value: 0.004 } };
   const cache = new Map(), groups = new Map();
-  // skin 30 and hair 31 (nts-gl.js knows hair's: no lines between its own layers); the rest from 1 up
+  // face 29, other skin 30, hair 31 (nts-gl.js knows these: no lines between hair's own layers, a line
+  // where hair meets the face); the rest from 1 up
   const groupOf = m => { const n = m.name || m.uuid;
     if (/HAIR/i.test(n)) return 31;
+    if (/FACE|EYE/i.test(n)) return 29;   // the face: its skin, brows, lash lines, eyes, mouth (hair against it: bangs, side locks)
     if (/SKIN/i.test(n)) return 30;
-    if (!groups.has(n)) groups.set(n, Math.min(29, groups.size + 1));
+    if (!groups.has(n)) groups.set(n, Math.min(28, groups.size + 1));
     return groups.get(n); };
   const mapOf = m => m.map ?? m.uniforms?.map?.value ?? null;
   const hullable = m => m.isOutline !== true && !m.transparent && ((m.outlineWidthMode && m.outlineWidthMode !== 'none') || /HAIR/i.test(m.name) || m.isMeshBasicMaterial);
@@ -29,11 +32,21 @@ export function createToon({ THREE, renderer, root, extra = [] }) {
     let pair = { depth: HIDDEN, hull: HIDDEN };
     if (m.isOutline !== true && !m.transparent && m.visible !== false) {
       const map = m.alphaTest > 0 ? mapOf(m) : null, cut = map ? { map, alphaTest: m.alphaTest } : {};
-      const depth = new THREE.MeshBasicMaterial({ color: new THREE.Color(groupOf(m) / 32, 0, 0), side: THREE.DoubleSide, ...cut });
+      const depth = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, ...cut });
+      // the group ID written as is, after the alpha cut-out (not times the texture, as a colour would be)
+      const gid = groupOf(m) / 32;
+      depth.onBeforeCompile = sh => {
+        sh.uniforms.toonGroup = { value: gid };
+        sh.fragmentShader = 'uniform float toonGroup;\n' + sh.fragmentShader.replace('#include <opaque_fragment>', 'gl_FragColor = vec4(toonGroup, 0.0, 0.0, 1.0);');
+      };
+      depth.customProgramCacheKey = () => 'toon-group';
       let hull = HIDDEN;
       if (hullable(m)) {
         // Lambert: always has the vertex normal (Basic only with skinning or an envmap). Blue (the mask), opaque.
-        hull = new THREE.MeshLambertMaterial({ color: 0x000000, emissive: 0x0000ff, side: THREE.BackSide, depthWrite: false, ...cut });
+        // added, not written: blue (the mask) goes on, the group ID beneath stays (a hull over the next strand
+        // or the forehead would otherwise read as no surface there)
+        hull = new THREE.MeshLambertMaterial({ color: 0x000000, emissive: 0x0000ff, side: THREE.BackSide, depthWrite: false, ...cut,
+          blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor });
         hull.onBeforeCompile = sh => {
           Object.assign(sh.uniforms, { toonWidth: uni.width, toonRes: uni.res, toonBack: uni.back });
           sh.vertexShader = 'uniform float toonWidth, toonBack; uniform vec2 toonRes;\n' + sh.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
