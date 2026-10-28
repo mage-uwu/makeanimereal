@@ -554,6 +554,7 @@ uniform vec3 toonP;   // near, far, line width (canvas pixels)
 uniform sampler2D G, T1, T2, T4; uniform int sharp; uniform vec2 lowRes;
 uniform sampler2D RAW;   // raw == 2: Raw 3D at the canvas's resolution (guide.js createRawView), premultiplied
 uniform float blendK;    // the VRoid render (RAW) mixed over the drawing: 0 none .. 1 all
+uniform int under;       // 1: RAW under the drawing, where the mesh is but the drawing isn't (with line art: no gap at her outline)
 out vec4 o;
 // The edge-aware upscale (joint bilateral): the drawing is the network's resolution, guide.js's G is
 // her geometry at the canvas's. A canvas pixel takes the drawing's pixels around it (4 x 4) weighted by
@@ -602,31 +603,47 @@ float viewZ(ivec2 p) {   // distance along the view axis; far away where nothing
   float n = toonP.x, f = toonP.y;
   return 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
 }
-// Anime line art from toon.js (canvas-sized): her outline (the hull, blue) where it lies on the background,
-// and inner lines where the surface a line-width away is a step behind. Thin, multiplied, part strength.
+vec3 toSrgbL(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+// What she looks like at canvas pixel pp (straight colour): the fill a line borders. The VRoid render's where
+// there is one (the drawing's edge carries the film's pale spill), else the drawing's
+vec3 fillAt(ivec2 pp) {
+  vec2 q = vec2(pp.x, view.y - float(pp.y)), pr = (q - box.xy) / box.zw;
+  if (under == 1) { vec4 v = texelFetch(RAW, pp, 0); if (v.a > 0.05) return toSrgbL(v.rgb / v.a); }   // the mesh's own colour: true at her edge
+  vec4 d = texture(R, vec2(pr.x, 1.0 - pr.y));
+  return d.a > 0.05 ? d.rgb / d.a : vec3(0.6);
+}
+// Anime ink: the fill made dark and deep (pink hair a rose-brown line, skin a warm brown, white cloth a
+// cool grey-violet), never lighter than a dark mid-tone
+vec3 inkOf(vec3 f) { return min(f * f * 0.34 + vec3(0.015, 0.0, 0.03), vec3(0.30)); }
+// Line art from toon.js (canvas-sized), solid like drawn line art: her outline (the hull, blue) where it
+// lies on the background, in the ink of the fill beside it; inner lines where the surface a line-width
+// away is a step behind (jaw over neck, hair over shoulders; not between hair's own layers), a little
+// lighter, in the ink of the near surface.
 vec4 toonOver(vec4 c) {
   if (toon == 0) return c;
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 t = texelFetch(TT, p, 0);
-  float z = viewZ(p), ko = z < 1e3 ? 0.0 : t.b, ki = 0.0;   // her outline only against the background (not strand over strand)
-  if (z < 1e3) {
-    float n = 0.0;
-    for (int i = 0; i < 16; i++) {
-      float a = float(i) * 0.3927 + 0.2, r = max(1.0, toonP.z * (i % 2 == 0 ? 0.45 : 0.8));
-      ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), ivec2(view) - 1);
-      float zn = viewZ(q);
-      float dz = zn - z, gn = texelFetch(TT, q, 0).r;
-      // a step behind: to another material (hair over face), or a big one (an arm before her body)
-      // a step behind of 3 cm or more (bangs over forehead, jaw over neck, an arm before her body), except
-      // hair over hair (her strand layers would hatch it all over): hair is group 31 (toon.js)
-      if (zn < 1e3 && dz > 0.03 && !(t.r > 30.5 / 32.0 && gn > 30.5 / 32.0)) n += 1.0;
-    }
-    ki = smoothstep(0.5, 3.5, n);
+  float z = viewZ(p), ko = z < 1e3 ? 0.0 : t.b, ki = 0.0;
+  vec3 side = vec3(-1.0);   // (the outline's fill: the nearest tap on her)
+  float n = 0.0;
+  for (int i = 0; i < 16; i++) {
+    float a = float(i) * 0.3927 + 0.2, r = max(1.0, toonP.z * (i % 2 == 0 ? 0.45 : 0.8));
+    ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), ivec2(view) - 1);
+    float zn = viewZ(q);
+    if (z >= 1e3) { if (ko > 0.0 && zn < 1e3 && side.r < 0.0) side = fillAt(q); continue; }
+    float dz = zn - z, gn = texelFetch(TT, q, 0).r;
+    // a step behind of 3 cm or more, except hair over hair (its strand layers would hatch it): hair is group 31 (toon.js)
+    if (zn < 1e3 && dz > 0.03 && !(t.r > 30.5 / 32.0 && gn > 30.5 / 32.0)) n += 1.0;
   }
-  // composed, not painted over: the ink multiplies what is beneath (drawing, VRoid blend or backdrop), so a
-  // line takes the local colour as ink on a painting does, at part strength, the inner lines lighter
-  float k = max(0.65 * ko, 0.45 * ki);
-  return vec4(c.rgb * mix(1.0, 0.18, k), 1.0);
+  ki = smoothstep(0.5, 3.5, n);
+  if (ko > 0.0 && side.r < 0.0)   // her fill further out: 8 taps at 2.5 line-widths
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.7854 + 0.3;
+      ivec2 q = clamp(p + ivec2(round(vec2(cos(a), sin(a)) * max(2.0, toonP.z * 2.5))), ivec2(0), ivec2(view) - 1);
+      if (viewZ(q) < 1e3) { side = fillAt(q); break; }
+    }
+  vec3 rgb = mix(c.rgb, inkOf(side.r < 0.0 ? vec3(0.45) : side), ko);
+  return vec4(mix(rgb, inkOf(c.rgb), 0.9 * ki), 1.0);
 }
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 void main() {
@@ -641,6 +658,21 @@ void main() {
   if (sharp == 1) d = upscale(uv, d);
   float k = ink == 1 ? texture(K, uv).r : 0.0;   // ink over the colour: alpha a + k (1 - a), colour scaled by (1 - k)
   d = vec4(d.rgb * (1.0 - k), d.a + k * (1.0 - d.a));
+  if (under == 1) {   // with line art: the mesh's own render (RAW) under the drawing where it leaves a gap (a strand
+    // it didn't draw), and over it in a band two line-widths wide along her silhouette, where the drawing has the
+    // film's pale spill: the outline then meets her true edge colour
+    ivec2 pp = ivec2(gl_FragCoord.xy);
+    vec4 c = texelFetch(RAW, pp, 0);
+    if (c.a > 0.004) {
+      vec4 v = vec4(toSrgb(c.rgb / c.a) * c.a, c.a);
+      float off = 0.0;
+      for (int i = 0; i < 8; i++) {
+        float a = float(i) * 0.7854 + 0.3;
+        if (viewZ(pp + ivec2(round(vec2(cos(a), sin(a)) * max(2.0, toonP.z * 2.0)))) >= 1e3) off += 1.0;
+      }
+      d = mix(d + v * (1.0 - d.a), v, 0.9 * smoothstep(0.0, 2.0, off));
+    }
+  }
   if (blendK > 0.0) {   // the blend: the VRoid render's own shading mixed with the drawing (both premultiplied, sRGB)
     vec4 c = texelFetch(RAW, ivec2(gl_FragCoord.xy), 0);
     d = mix(d, c.a < 0.004 ? vec4(0.0) : vec4(toSrgb(c.rgb / c.a) * c.a, c.a), blendK);
@@ -978,7 +1010,8 @@ export async function createGlShader({ THREE, renderer, NW, NH, base = 'nts/', m
     gl.uniform4f(s.u.box, ...view.box); gl.uniform3f(s.u.top, ...view.top); gl.uniform3f(s.u.bottom, ...view.bottom);
     gl.uniform2f(s.u.view, view.W, view.H); gl.uniform1i(s.u.raw, view.raw ? (view.rawTex ? 2 : 1) : 0);
     if (view.rawTex) bindTex(9, gl.TEXTURE_2D, view.rawTex, null, s.u.RAW);
-    gl.uniform1f(s.u.blendK, view.rawTex && !view.raw ? view.blend || 0 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
+    gl.uniform1f(s.u.blendK, view.rawTex && !view.raw ? view.blend || 0 : 0);
+    gl.uniform1i(s.u.under, view.rawTex && !view.raw && view.toon ? 1 : 0); gl.uniform1i(s.u.ink, view.ink === false ? 0 : 1);
     gl.uniform1i(s.u.toon, view.toon && !view.raw ? 1 : 0);
     gl.uniform1i(s.u.bgOn, view.backdrop ? 1 : 0);
     if (view.backdrop) setBackdropUniforms(gl, s.u, view.backdrop);

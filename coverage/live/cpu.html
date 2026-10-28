@@ -363,11 +363,11 @@ const rgbOf = n => { const c = new THREE.Color().setStyle(css(n), THREE.LinearSR
 function glView(extra = {}) {
   const fb = frameBox();
   // toon contours: drawn for the canvas as it is now (so a zoom redraws them), about 1.5 CSS pixels wide at the fitted size
-  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(4, Math.max(0.75, fb.box[3] * 0.0007))) : null;
+  const toonTex = lines === 'toon' && toon && !raw ? toon.render(scene, camera, fb, Math.min(6, Math.max(1, fb.box[3] * 0.0014))) : null;
   // the edge-aware upscale's guide: her geometry at the canvas's resolution, redrawn with the canvas
   const guideTex = sharp && guide && !raw ? guide.render(scene, camera, fb, shorts) : null;
   // Raw 3D: three.js at the canvas's resolution, not the network's colour tile stretched
-  const rawTex = (raw || blend > 0) && rawView ? rawView.render(scene, camera, fb) : null;
+  const rawTex = (raw || blend > 0 || toonTex) && rawView ? rawView.render(scene, camera, fb) : null;   // (with line art: fills the drawing's gaps under it)
   return { ...fb, top: rgbOf('--stage-top'), bottom: rgbOf('--stage-bottom'), raw, rawTex, blend, ink: lines === 'neural', toon: toonTex, guide: guideTex, backdrop: backdropNow(), ...extra };
 }
 // The backdrop (backdrop.js): 0 off (the stage gradient), 1 a pastel day, 2 an idol stage; under her hips, on the floor.
